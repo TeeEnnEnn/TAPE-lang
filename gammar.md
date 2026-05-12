@@ -7,7 +7,8 @@ declaration     ::= modifier* ( var_decl | fn_decl | type_decl | struct_decl | e
 
 modifier        ::= 'pub' | 'co' | 'static'
 
-use_decl        ::= 'use' IDENTIFIER (',' IDENTIFIER)* 'from' STRING ';'
+use_decl        ::= 'use' import_item (',' import_item)* 'from' STRING ';'
+
 
 var_decl        ::= 'var' IDENTIFIER (':' type_expr)? '=' expression ';'
 
@@ -108,6 +109,8 @@ struct_init     ::= IDENTIFIER '=' expression
 match_arms      ::= match_arm*
 match_arm       ::= expression_or_type '=>' statement
 expression_or_type ::= expression | type_expr
+
+import_item     ::= IDENTIFIER ('as' IDENTIFIER)?
 
 /* --- Lexical / Tokens --- */
 IDENTIFIER      ::= [a-zA-Z_] [a-zA-Z0-9_]*

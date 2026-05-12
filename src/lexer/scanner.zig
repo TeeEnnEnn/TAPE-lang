@@ -112,7 +112,6 @@ pub const TokenType = enum {
     NEVER_TYPE,
     ITERATOR_TYPE,
     OPTION_TYPE,
-    ANY_TYPE,
     // Special
     EOF,
 };
@@ -318,7 +317,6 @@ pub const Scanner = struct {
             },
             'A' => {
                 if (len > 1) switch (self.source[self.start + 1]) {
-                    'n' => return self.check_keyword(2, "y", .ANY_TYPE),
                     'r' => return self.check_keyword(2, "ray", .ARRAY_TYPE),
                     else => {},
                 };
@@ -558,12 +556,3 @@ pub const Scanner = struct {
         return buf_pos;
     }
 };
-
-test "Scanner Tokenizes basic program" {
-    var scanner: Scanner = Scanner.init("var hello = 'hello world'; var e: Error = Err('This is an error');");
-    var token_buffer: [1024]Token = undefined;
-    const token_count = try scanner.scan(&token_buffer);
-    for (0..token_count) |i| {
-        std.debug.print("Token: {s} Lexeme: {s}\n", .{ @tagName(token_buffer[i].token_type), token_buffer[i].lexeme });
-    }
-}
