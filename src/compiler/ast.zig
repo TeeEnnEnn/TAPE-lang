@@ -4,17 +4,26 @@ const Token = @import("../lexer/scanner").Token;
 pub const TypeId = u32;
 
 pub const ASTNode = union(enum) {
-    // Declarations
+    /// Variable Declaration
     var_decl: *VarDecl,
+    /// Function Declaration
     fn_decl: *FnDecl,
+    /// Type declaration
     type_decl: *TypeDecl,
+    /// Struct declaration
     struct_decl: *StructDecl,
+    /// Enum declaration
     enum_decl: *EnumDecl,
+    /// Struct Implementation Declaration
     impl_decl: *ImplDecl,
+    /// Use declaration
     use_decl: *UseDecl,
-    // Statements
+
+    /// Block of code (collection of statements in +1 scope)
     block_stmt: *BlockStmt,
+    /// `return value`
     return_stmt: *ReturnStmt,
+    /// `yield value`
     yield_stmt: *YieldStmt,
     give_stmt: *GiveStmt,
     break_stmt: *BreakStmt,
@@ -23,6 +32,7 @@ pub const ASTNode = union(enum) {
     for_stmt: *ForStmt,
     if_stmt: *IfStmt,
     expr_stmt: *ExprStmt,
+    panic_stmt: *PanicStmt,
 
     // Expressions
     assign_expr: *AssignExpr, // =, +=, -=, *=, /=, %=, <<=, >>=, &=, |=, ^=
@@ -44,11 +54,24 @@ pub const ASTNode = union(enum) {
     error_unwrap_expr: *ErrorUnwrapExpr, // ?
 
     // primary
+    /// Array expression node.
+    ///
+    /// ```
+    /// [ ]
+    /// ```
+    array_expr: *ArrayExpr,
+    /// Shape expression node.
+    ///
+    /// ```
+    /// shape {  }
+    /// ```
+    shape_expr: *ShapeExpr,
     group_expr: *GroupExpr, // ( )
     tuple_expr: *TupleExpr, // ( )
     table_expr: *TableExpr, // { }
     new_expr: *NewExpr, // new
     match_expr: *MatchExpr, // match
+    anon_fn_expr: *AnonFnExpr, // fn () -> {}
     // Literals
     int_lit: *IntLit,
     float_lit: *FloatLit,
@@ -60,13 +83,22 @@ pub const ASTNode = union(enum) {
     nil_type: *NilType,
     int_type: *IntType,
     float_type: *FloatType,
-    str_type: *StrType,
+    string_type: *StringType,
     bool_type: *BoolType,
     array_type: *ArrayType,
     table_type: *TableType,
     vector_type: *VectorType,
     matrix_type: *MatrixType,
+    buffer_type: *BufferType,
+    range_type: *RangeType,
+    iteratror_type: *IteratorType,
+    option_type: *OptionType,
+    never_type: *NeverType,
+    tuple_type: *TupleType,
+    complex_type: *ComplexType,
     identifier_type: *IdentifierType,
+    fn_type: *FnType,
+    union_type: *UnionType,
 };
 
 // Node Types
@@ -106,6 +138,7 @@ pub const FnDecl = struct {
 /// type 'name' = 'type_annotation'
 /// ```
 pub const TypeDecl = struct {
+    modifier_pub: bool,
     name: Token,
     type_annotation: ?*ASTNode,
 };
@@ -118,6 +151,7 @@ pub const TypeDecl = struct {
 /// }
 /// ```
 pub const StructDecl = struct {
+    modifier_pub: bool,
     name: Token,
     fields: []*TypedNamedField,
 };
@@ -130,6 +164,7 @@ pub const StructDecl = struct {
 /// }
 /// ```
 pub const EnumDecl = struct {
+    modifier_pub: bool,
     name: Token,
     variants: []Token,
 };
@@ -144,17 +179,6 @@ pub const EnumDecl = struct {
 pub const ImplDecl = struct {
     name: Token,
     methods: []*ASTNode,
-};
-
-/// Use declaration node.
-///
-/// ```
-/// use 'name' as 'alias' from 'module'
-/// ```
-pub const UseDecl = struct {
-    names: []Token,
-    aliases: []Token,
-    module: Token,
 };
 
 /// Block statement node.
@@ -213,14 +237,14 @@ pub const ContinueStmt = struct {};
 /// while ('expr') 'stmts'
 /// ```
 pub const WhileStmt = struct {
-    expr: *ASTNode,
+    condition: *ASTNode,
     stmts: []*ASTNode,
 };
 
 /// For statement node.
 ///
 /// ```
-/// for 'iterator_name' ('iterator_expr') 'body'
+/// for 'iterator_name' 'in' ('iterator_expr') 'body'
 /// ```
 pub const ForStmt = struct {
     iterator_name: Token,
@@ -237,6 +261,15 @@ pub const IfStmt = struct {
     expr: *ASTNode,
     then_branch: *ASTNode,
     else_branch: ?*ASTNode,
+};
+
+/// Panic statement node.
+///
+/// ```
+/// panic 'expr'
+/// ```
+pub const PanicStmt = struct {
+    expr: *ASTNode,
 };
 
 /// Expression statement node.
@@ -333,6 +366,16 @@ pub const CallExpr = struct {
 pub const IndexExpr = struct {
     expr: *ASTNode,
     index: *ASTNode,
+    resolved_type: TypeId = 0,
+};
+
+/// Array expression node.
+///
+/// ```
+/// [expr, ...]
+/// ```
+pub const ArrayExpr = struct {
+    elements: []*ASTNode,
     resolved_type: TypeId = 0,
 };
 
@@ -437,13 +480,41 @@ pub const MatchExpr = struct {
 /// ```
 pub const MatchCase = struct {
     pattern: *ASTNode,
-    stmts: []*ASTNode,
+    stmts: *ASTNode,
+    resolved_type: TypeId = 0,
+};
+
+/// Anonymous function node
+///
+/// ```
+/// fn () -> 'type_annotation' 'body'
+/// ```
+pub const AnonFnExpr = struct {
+    modifier_co: bool,
+    params: []*TypedNamedField,
+    return_type_annotation: ?*ASTNode,
+    body: *ASTNode,
     resolved_type: TypeId = 0,
 };
 
 pub const TypedNamedField = struct {
     name: Token,
     type_annotation: *ASTNode,
+};
+
+pub const ImportItem = struct {
+    name: Token,
+    alias: ?Token,
+};
+
+/// Use declaration node.
+///
+/// ```
+/// use 'name' as 'alias' from 'module'
+/// ```
+pub const UseDecl = struct {
+    items: []ImportItem,
+    module: Token,
 };
 
 pub const IntLit = struct {
@@ -476,7 +547,7 @@ pub const IntType = struct {};
 
 pub const FloatType = struct {};
 
-pub const StrType = struct {};
+pub const StringType = struct {};
 
 pub const BoolType = struct {};
 
@@ -524,6 +595,19 @@ pub const TupleType = struct {
 
 pub const ComplexType = struct {};
 
+pub const FnType = struct {
+    params: []*ASTNode,
+    return_type: *ASTNode,
+};
+
 pub const IdentifierType = struct {
     name: Token,
+    generic_args: []?*ASTNode,
 };
+
+pub const UnionType = struct {
+    left: *ASTNode,
+    right: *ASTNode,
+};
+
+pub const IntersectionType = struct {};

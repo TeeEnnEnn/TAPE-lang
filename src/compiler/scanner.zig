@@ -25,7 +25,7 @@ pub const TokenType = enum {
     COLON,
     // One or two character tokens
     ARROW,
-    BANG_EQUAL,
+    NOT_EQUAL,
     EQUAL,
     EQUAL_EQUAL,
     EQUAL_ARROW,
@@ -65,6 +65,7 @@ pub const TokenType = enum {
     IN,
     NIL,
     OR,
+    ORELSE,
     RETURN,
     TRUE,
     VAR,
@@ -91,6 +92,7 @@ pub const TokenType = enum {
     TYPE,
     NATIVE,
     STATIC,
+    CO,
     // Type keywords
     NIL_TYPE,
     BOOL_TYPE,
@@ -126,7 +128,7 @@ pub const ScannerError = error{
     UnterminatedString,
     UnexpectedCharacter,
     UnexpectedToken,
-    BufferTooSmall,
+    BufferTooSmall, // only for scan()
 };
 
 pub const Scanner = struct {
@@ -254,26 +256,16 @@ pub const Scanner = struct {
                 };
             },
             'E' => {
-                if (len > 1) {
-                    switch (self.source[self.start + 1]) {
-                        'r' => {
-                            if (len > 2) switch (self.source[self.start + 2]) {
-                                'r' => {
-                                    switch (self.source[self.start + 3]) {
-                                        'o' => {
-                                            return self.check_keyword(3, "or", .ERROR_TYPE);
-                                        },
-                                        else => {
-                                            return self.check_keyword(3, "", .ERR);
-                                        },
-                                    }
-                                },
-                                else => {},
-                            };
-                        },
-                        else => {},
-                    }
-                }
+                if (len > 1) switch (self.source[self.start + 1]) {
+                    'r' => {
+                        if (len == 3) return self.check_keyword(2, "r", .ERR);
+                        if (len > 3) switch (self.source[self.start + 3]) {
+                            'o' => return self.check_keyword(4, "r", .ERROR_TYPE),
+                            else => {},
+                        };
+                    },
+                    else => {},
+                };
             },
             'F' => {
                 if (len > 1) switch (self.source[self.start + 1]) {
@@ -334,7 +326,13 @@ pub const Scanner = struct {
             'b' => return self.check_keyword(1, "reak", .BREAK),
             'c' => {
                 if (len > 1) switch (self.source[self.start + 1]) {
-                    'o' => return self.check_keyword(2, "ntinue", .CONTINUE),
+                    'o' => {
+                        if (len == 2) return .CO;
+                        if (len > 2) switch (self.source[self.start + 2]) {
+                            'n' => return self.check_keyword(3, "tinue", .CONTINUE),
+                            else => {},
+                        };
+                    },
                     else => {},
                 };
             },
@@ -358,7 +356,18 @@ pub const Scanner = struct {
                     else => {},
                 };
             },
-            'o' => return self.check_keyword(1, "r", .OR),
+            'o' => {
+                if (len > 1) switch (self.source[self.start + 1]) {
+                    'r' => {
+                        if (len == 2) return .OR;
+                        if (len > 2) switch (self.source[self.start + 2]) {
+                            'e' => return self.check_keyword(3, "lse", .ORELSE),
+                            else => {},
+                        };
+                    },
+                    else => {},
+                };
+            },
             'r' => return self.check_keyword(1, "eturn", .RETURN),
             's' => {
                 if (len > 1) switch (self.source[self.start + 1]) {
@@ -391,7 +400,7 @@ pub const Scanner = struct {
                     'y' => {
                         if (len > 2 and self.source[self.start + 2] == 'p') {
                             if (len > 3 and self.source[self.start + 3] == 'e') {
-                                if (len == 4) return self.check_keyword(4, "", .TYPE);
+                                if (len == 4) return .TYPE;
                                 return self.check_keyword(4, "of", .TYPEOF);
                             }
                         }
@@ -483,7 +492,7 @@ pub const Scanner = struct {
         return self.make_token(self.identifier_type());
     }
 
-    fn scan_token(self: *Scanner) ScannerError!Token {
+    pub fn scan_token(self: *Scanner) ScannerError!Token {
         self.skip_whitespace();
         self.start = self.current;
 
@@ -518,7 +527,7 @@ pub const Scanner = struct {
             else
                 self.make_token(if (self.match('=')) .STAR_EQUAL else .STAR),
             '%' => self.make_token(if (self.match('=')) .PERCENT_EQUAL else .PERCENT),
-            '!' => if (self.match('=')) self.make_token(.BANG_EQUAL) else error.UnexpectedToken,
+            '!' => if (self.match('=')) self.make_token(.NOT_EQUAL) else error.UnexpectedToken,
             '=' => if (self.match('='))
                 self.make_token(.EQUAL_EQUAL)
             else if (self.match('>'))

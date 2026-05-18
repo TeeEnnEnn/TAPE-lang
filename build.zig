@@ -115,6 +115,38 @@ pub fn build(b: *std.Build) void {
         run_cmd.addArgs(args);
     }
 
+const compiler_mod = b.createModule(.{
+        .root_source_file = b.path("src/compiler/scanner.zig"),
+    });
+
+    mod.addImport("scanner", compiler_mod);
+
+    const scanner_test_mod = b.createModule(.{
+        .root_source_file = b.path("src/compiler/tests/test_scanner.zig"),
+        .target = target,
+        .imports = &.{.{ .name = "scanner", .module = compiler_mod }},
+    });
+
+    const parser_test_mod = b.createModule(.{
+        .root_source_file = b.path("src/compiler/tests/test_parser.zig"),
+        .target = target,
+        .imports = &.{.{ .name = "scanner", .module = compiler_mod }},
+    });
+
+    const scanner_tests = b.addTest(.{
+        .root_module = scanner_test_mod,
+    });
+    const run_scanner_tests = b.addRunArtifact(scanner_tests);
+    const scanner_test_step = b.step("test-scanner", "Run scanner tests");
+    scanner_test_step.dependOn(&run_scanner_tests.step);
+
+    const parser_tests = b.addTest(.{
+        .root_module = parser_test_mod,
+    });
+    const run_parser_tests = b.addRunArtifact(parser_tests);
+    const parser_test_step = b.step("test-parser", "Run parser tests");
+    parser_test_step.dependOn(&run_parser_tests.step);
+
     // Creates an executable that will run `test` blocks from the provided module.
     // Here `mod` needs to define a target, which is why earlier we made sure to
     // set the releative field.
@@ -124,6 +156,8 @@ pub fn build(b: *std.Build) void {
 
     // A run step that will run the test executable.
     const run_mod_tests = b.addRunArtifact(mod_tests);
+    const mod_test_step = b.step("test-root", "Run root module tests");
+    mod_test_step.dependOn(&run_mod_tests.step);
 
     // Creates an executable that will run `test` blocks from the executable's
     // root module. Note that test executables only test one module at a time,
@@ -134,6 +168,8 @@ pub fn build(b: *std.Build) void {
 
     // A run step that will run the second test executable.
     const run_exe_tests = b.addRunArtifact(exe_tests);
+    const exe_test_step = b.step("test-exe", "Run exe module tests");
+    exe_test_step.dependOn(&run_exe_tests.step);
 
     // A top level step for running all tests. dependOn can be called multiple
     // times and since the two run steps do not depend on one another, this will
@@ -141,6 +177,8 @@ pub fn build(b: *std.Build) void {
     const test_step = b.step("test", "Run tests");
     test_step.dependOn(&run_mod_tests.step);
     test_step.dependOn(&run_exe_tests.step);
+    test_step.dependOn(&run_scanner_tests.step);
+    test_step.dependOn(&run_parser_tests.step);
 
     // Just like flags, top level steps are also listed in the `--help` menu.
     //

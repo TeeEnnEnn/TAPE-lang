@@ -96,6 +96,7 @@ primary         ::= IDENTIFIER
                   | '{' table_entries? '}'          /* Table literal */
                   | 'new' IDENTIFIER '{' struct_inits? '}'
                   | 'match' '(' expression ')' '{' match_arms? '}'
+                  | 'fn' '(' parameters? ')' ('->' type_expr)? statement
 
 /* --- Helpers --- */
 arguments       ::= expression (',' expression)* ','?
