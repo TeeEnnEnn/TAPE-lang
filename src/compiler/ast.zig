@@ -14,6 +14,9 @@ pub const ASTNode = union(enum) {
     struct_decl: *StructDecl,
     /// Enum declaration
     enum_decl: *EnumDecl,
+    /// Error declaration
+    error_decl: *ErrorDecl,
+
     /// Struct Implementation Declaration
     impl_decl: *ImplDecl,
     /// Use declaration
@@ -93,12 +96,14 @@ pub const ASTNode = union(enum) {
     range_type: *RangeType,
     iteratror_type: *IteratorType,
     option_type: *OptionType,
+    result_type: *ResultType,
     never_type: *NeverType,
     tuple_type: *TupleType,
     complex_type: *ComplexType,
     identifier_type: *IdentifierType,
     fn_type: *FnType,
     union_type: *UnionType,
+    shape_type: *ShapeType,
 };
 
 // Node Types
@@ -164,6 +169,19 @@ pub const StructDecl = struct {
 /// }
 /// ```
 pub const EnumDecl = struct {
+    modifier_pub: bool,
+    name: Token,
+    variants: []Token,
+};
+
+/// Error declaration node.
+///
+/// ```
+/// error 'name' {
+///     'variants'
+/// }
+/// ```
+pub const ErrorDecl = struct {
     modifier_pub: bool,
     name: Token,
     variants: []Token,
@@ -238,7 +256,7 @@ pub const ContinueStmt = struct {};
 /// ```
 pub const WhileStmt = struct {
     condition: *ASTNode,
-    stmts: []*ASTNode,
+    body: *ASTNode,
 };
 
 /// For statement node.
@@ -258,7 +276,7 @@ pub const ForStmt = struct {
 /// if ('expr') 'then_branch' ('else_branch')
 /// ```
 pub const IfStmt = struct {
-    expr: *ASTNode,
+    condition: *ASTNode,
     then_branch: *ASTNode,
     else_branch: ?*ASTNode,
 };
@@ -587,6 +605,11 @@ pub const OptionType = struct {
     element_type: *ASTNode,
 };
 
+pub const ResultType = struct {
+    ok_type: *ASTNode,
+    err_type: *ASTNode,
+};
+
 pub const NeverType = struct {};
 
 pub const TupleType = struct {
@@ -597,12 +620,12 @@ pub const ComplexType = struct {};
 
 pub const FnType = struct {
     params: []*ASTNode,
-    return_type: *ASTNode,
+    return_type: ?*ASTNode,
 };
 
 pub const IdentifierType = struct {
     name: Token,
-    generic_args: []?*ASTNode,
+    generic_args: ?[]*ASTNode,
 };
 
 pub const UnionType = struct {
@@ -610,4 +633,6 @@ pub const UnionType = struct {
     right: *ASTNode,
 };
 
-pub const IntersectionType = struct {};
+pub const ShapeType = struct {
+    fields: []*TypedNamedField,
+};

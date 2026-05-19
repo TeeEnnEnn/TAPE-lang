@@ -115,7 +115,7 @@ pub fn build(b: *std.Build) void {
         run_cmd.addArgs(args);
     }
 
-const compiler_mod = b.createModule(.{
+    const compiler_mod = b.createModule(.{
         .root_source_file = b.path("src/compiler/scanner.zig"),
     });
 
@@ -133,6 +133,26 @@ const compiler_mod = b.createModule(.{
         .imports = &.{.{ .name = "scanner", .module = compiler_mod }},
     });
 
+    const ast_mod = b.createModule(.{
+        .root_source_file = b.path("src/compiler/ast.zig"),
+        .target = target,
+    });
+
+    const types_mod = b.createModule(.{
+        .root_source_file = b.path("src/compiler/type_registry.zig"),
+        .target = target,
+        .imports = &.{.{ .name = "ast", .module = ast_mod }},
+    });
+
+    const semantic_test_mod = b.createModule(.{
+        .root_source_file = b.path("src/compiler/tests/test_type_registry.zig"),
+        .target = target,
+        .imports = &.{
+            .{ .name = "ast", .module = ast_mod },
+            .{ .name = "types_registry", .module = types_mod },
+        },
+    });
+
     const scanner_tests = b.addTest(.{
         .root_module = scanner_test_mod,
     });
@@ -146,6 +166,13 @@ const compiler_mod = b.createModule(.{
     const run_parser_tests = b.addRunArtifact(parser_tests);
     const parser_test_step = b.step("test-parser", "Run parser tests");
     parser_test_step.dependOn(&run_parser_tests.step);
+
+    const semantic_tests = b.addTest(.{
+        .root_module = semantic_test_mod,
+    });
+    const run_semantic_tests = b.addRunArtifact(semantic_tests);
+    const semantic_test_step = b.step("test-semantic", "Run semantic tests");
+    semantic_test_step.dependOn(&run_semantic_tests.step);
 
     // Creates an executable that will run `test` blocks from the provided module.
     // Here `mod` needs to define a target, which is why earlier we made sure to

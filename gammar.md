@@ -20,6 +20,8 @@ struct_decl     ::= 'struct' IDENTIFIER '{' struct_fields? '}'
 
 enum_decl       ::= 'enum' IDENTIFIER '{' enum_variants? '}'
 
+error_decl      ::= 'error' IDENTIFIER '{' enum_variants? '}'
+
 impl_decl       ::= 'impl' IDENTIFIER '{' (modifier* fn_decl)* '}'
 
 /* --- Types --- */
@@ -45,6 +47,7 @@ statement       ::= expression ';'
                   | 'return' expression? ';'
                   | 'yield' expression? ';'
                   | 'give' expression ';'
+                  | 'panic' expression ';'
                   | 'break' ';'
                   | 'continue' ';'
                   | 'while' '(' expression ')' block

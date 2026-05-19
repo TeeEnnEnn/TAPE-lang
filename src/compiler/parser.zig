@@ -905,7 +905,7 @@ pub const Parser = struct {
         try self.consume(.LEFT_PAREN);
         const condition = try self.parse_expression();
         try self.consume(.RIGHT_PAREN);
-        const body = try self.parse_block_statement();
+        const body = try self.parse_statement();
         const while_stmt = try self.allocator.create(AST.WhileStmt);
         while_stmt.* = .{ .condition = condition, .body = body };
         const node = try self.allocator.create(AST.ASTNode);
@@ -917,12 +917,12 @@ pub const Parser = struct {
         try self.consume(.LEFT_PAREN);
         const condition = try self.parse_expression();
         try self.consume(.RIGHT_PAREN);
-        const then_branch = try self.parse_block_statement();
+        const then_branch = try self.parse_statement();
 
         var else_branch: *AST.ASTNode = null;
         if (self.check(.ELSE)) {
             try self.consume(.ELSE);
-            else_branch = try self.parse_block_statement();
+            else_branch = try self.parse_statement();
         }
 
         const if_stmt = try self.allocator.create(AST.IfStmt);
@@ -1063,6 +1063,29 @@ pub const Parser = struct {
         return node;
     }
 
+    fn parse_error_declaration(self: *Parser, is_pub: bool) ParserError!*AST.ASTNode {
+        try self.consume(.IDENTIFIER);
+        const token = self.previous;
+
+        try self.consume(.LEFT_BRACE);
+        var variants = std.ArrayList(Token).init(self.allocator);
+        while (true) {
+            try self.consume(.IDENTIFIER);
+            const variant = self.previous;
+            try variants.append(variant);
+            if (self.check(.RIGHT_BRACE)) {
+                break;
+            }
+            try self.consume(.COMMA);
+        }
+
+        const error_decl = try self.allocator.create(AST.ErrorDecl);
+        error_decl.* = .{ .name = token, .variants = variants.toOwnedSlice(), .modifier_pub = is_pub };
+        const node = try self.allocator.create(AST.ASTNode);
+        node.* = .{ .error_decl = error_decl };
+        return node;
+    }
+
     fn parse_enum_declaration(self: *Parser, is_pub: bool) ParserError!*AST.ASTNode {
         try self.consume(.IDENTIFIER);
         const token = self.previous;
@@ -1070,7 +1093,8 @@ pub const Parser = struct {
         try self.consume(.LEFT_BRACE);
         var variants = std.ArrayList(Token).init(self.allocator);
         while (true) {
-            const variant = try self.consume(.IDENTIFIER);
+            try self.consume(.IDENTIFIER);
+            const variant = self.previous;
             try variants.append(variant);
             if (self.check(.RIGHT_BRACE)) {
                 break;
@@ -1191,6 +1215,10 @@ pub const Parser = struct {
             return try self.parse_type_declaration(is_pub);
         } else if (try self.match(.IMPL)) {
             return try self.parse_impl_declaration(is_pub);
+        } else if (try self.match(.ENUM)) {
+            return try self.parse_enum_declaration(is_pub);
+        } else if (try self.match(.ERROR)) {
+            return try self.parse_error_declaration(is_pub);
         } else {
             if (is_pub) return ParserError.UnexpectedToken;
             return try self.parse_statement();
