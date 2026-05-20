@@ -683,12 +683,6 @@ pub const Parser = struct {
             const node = try self.allocator.create(AST.ASTNode);
             node.* = .{ .never_type = never_type };
             left = node;
-        } else if (try self.match(.COMPLEX_TYPE)) {
-            const complex_type = try self.allocator.create(AST.ComplexType);
-            complex_type.* = .{};
-            const node = try self.allocator.create(AST.ASTNode);
-            node.* = .{ .complex_type = complex_type };
-            left = node;
         } else if (try self.match(.ARRAY_TYPE)) {
             try self.consume(.LEFT_SQUARE);
             const element = try self.parse_type_expression();
@@ -709,29 +703,6 @@ pub const Parser = struct {
             const node = try self.allocator.create(AST.ASTNode);
             node.* = .{ .table_type = table_type };
             left = node;
-        } else if (try self.match(.VECTOR_TYPE)) {
-            try self.consume(.LEFT_SQUARE);
-            try self.consume(.INT);
-            const dim = try std.fmt.parseInt(u32, self.previous.lexeme, 10);
-            try self.consume(.RIGHT_SQUARE);
-            const vector_type = try self.allocator.create(AST.VectorType);
-            vector_type.* = .{ .dimension = dim };
-            const node = try self.allocator.create(AST.ASTNode);
-            node.* = .{ .vector_type = vector_type };
-            left = node;
-        } else if (try self.match(.MATRIX_TYPE)) {
-            try self.consume(.LEFT_SQUARE);
-            try self.consume(.INT);
-            const rows = try std.fmt.parseInt(u32, self.previous.lexeme, 10);
-            try self.consume(.COMMA);
-            try self.consume(.INT);
-            const cols = try std.fmt.parseInt(u32, self.previous.lexeme, 10);
-            try self.consume(.RIGHT_SQUARE);
-            const matrix_type = try self.allocator.create(AST.MatrixType);
-            matrix_type.* = .{ .row_dim = rows, .col_dim = cols };
-            const node = try self.allocator.create(AST.ASTNode);
-            node.* = .{ .matrix_type = matrix_type };
-            left = node;
         } else if (try self.match(.RANGE_TYPE)) {
             try self.consume(.LEFT_SQUARE);
             const start = try self.parse_type_expression();
@@ -747,15 +718,6 @@ pub const Parser = struct {
             range_type.* = .{ .start = start, .end = end, .step = step };
             const node = try self.allocator.create(AST.ASTNode);
             node.* = .{ .range_type = range_type };
-            left = node;
-        } else if (try self.match(.ITERATOR_TYPE)) {
-            try self.consume(.LEFT_SQUARE);
-            const element = try self.parse_type_expression();
-            try self.consume(.RIGHT_SQUARE);
-            const iter_type = try self.allocator.create(AST.IteratorType);
-            iter_type.* = .{ .element_type = element };
-            const node = try self.allocator.create(AST.ASTNode);
-            node.* = .{ .iterator_type = iter_type };
             left = node;
         } else if (try self.match(.OPTION_TYPE)) {
             try self.consume(.LEFT_SQUARE);
@@ -1331,11 +1293,11 @@ pub const Parser = struct {
             }
         }
         if (idx >= self.scanner.source.len) return false;
-        
+
         const quote = self.scanner.source[idx];
         if (quote != '"' and quote != '\'') return false;
         idx += 1;
-        
+
         // Find matching quote
         var escaped = false;
         while (idx < self.scanner.source.len) {
@@ -1351,7 +1313,7 @@ pub const Parser = struct {
             }
             idx += 1;
         }
-        
+
         // Skip whitespace and comments again
         while (idx < self.scanner.source.len) {
             const c = self.scanner.source[idx];
@@ -1366,7 +1328,7 @@ pub const Parser = struct {
                 break;
             }
         }
-        
+
         if (idx < self.scanner.source.len and self.scanner.source[idx] == ':') {
             return true;
         }

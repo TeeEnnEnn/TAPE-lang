@@ -90,16 +90,12 @@ pub const ASTNode = union(enum) {
     bool_type: *BoolType,
     array_type: *ArrayType,
     table_type: *TableType,
-    vector_type: *VectorType,
-    matrix_type: *MatrixType,
     buffer_type: *BufferType,
     range_type: *RangeType,
-    iterator_type: *IteratorType,
     option_type: *OptionType,
     result_type: *ResultType,
     never_type: *NeverType,
     tuple_type: *TupleType,
-    complex_type: *ComplexType,
     identifier_type: *IdentifierType,
     fn_type: *FnType,
     union_type: *UnionType,
@@ -580,25 +576,12 @@ pub const TableType = struct {
     element_type: *ASTNode,
 };
 
-pub const VectorType = struct {
-    dimension: u32,
-};
-
-pub const MatrixType = struct {
-    row_dim: u32,
-    col_dim: u32,
-};
-
 pub const BufferType = struct {};
 
 pub const RangeType = struct {
     start: *ASTNode,
     end: *ASTNode,
     step: u32 = 1,
-};
-
-pub const IteratorType = struct {
-    element_type: *ASTNode,
 };
 
 pub const OptionType = struct {
@@ -615,8 +598,6 @@ pub const NeverType = struct {};
 pub const TupleType = struct {
     element_types: []*ASTNode,
 };
-
-pub const ComplexType = struct {};
 
 pub const FnType = struct {
     params: []*ASTNode,

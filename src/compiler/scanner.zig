@@ -10,7 +10,6 @@ pub const TokenType = enum {
     RIGHT_BRACE,
     LEFT_SQUARE,
     RIGHT_SQUARE,
-    DOLLAR_LEFT_SQUARE,
     COMMA,
     DOT,
     DOT_DOT,
@@ -106,16 +105,9 @@ pub const TokenType = enum {
     TABLE_TYPE,
     ERROR_TYPE,
     RESULT_TYPE,
-    RANDOM_TYPE,
-    FILE_TYPE,
-    VECTOR_TYPE,
-    COMPLEX_TYPE,
-    MATRIX_TYPE,
-    TUPLE_TYPE,
     BUFFER_TYPE,
     RANGE_TYPE,
     NEVER_TYPE,
-    ITERATOR_TYPE,
     OPTION_TYPE,
     // Special
     EOF,
@@ -254,7 +246,6 @@ pub const Scanner = struct {
             'I' => {
                 if (len > 1) switch (self.source[self.start + 1]) {
                     'n' => return self.check_keyword(2, "t", .INT_TYPE),
-                    't' => return self.check_keyword(2, "erator", .ITERATOR_TYPE),
                     else => {},
                 };
             },
@@ -272,12 +263,10 @@ pub const Scanner = struct {
             },
             'F' => {
                 if (len > 1) switch (self.source[self.start + 1]) {
-                    'i' => return self.check_keyword(2, "le", .FILE_TYPE),
                     'l' => return self.check_keyword(2, "oat", .FLOAT_TYPE),
                     else => {},
                 };
             },
-            'C' => return self.check_keyword(1, "omplex", .COMPLEX_TYPE),
             'S' => {
                 if (len > 1) switch (self.source[self.start + 1]) {
                     't' => return self.check_keyword(2, "ring", .STRING_TYPE),
@@ -287,7 +276,6 @@ pub const Scanner = struct {
             },
             'T' => {
                 if (len > 1) switch (self.source[self.start + 1]) {
-                    'u' => return self.check_keyword(2, "ple", .TUPLE_TYPE),
                     'a' => return self.check_keyword(2, "ble", .TABLE_TYPE),
                     else => {},
                 };
@@ -299,7 +287,6 @@ pub const Scanner = struct {
                             'n' => {
                                 if (len > 3) switch (self.source[self.start + 3]) {
                                     'g' => return self.check_keyword(4, "e", .RANGE_TYPE),
-                                    'd' => return self.check_keyword(4, "om", .RANDOM_TYPE),
                                     else => {},
                                 };
                             },
@@ -316,8 +303,6 @@ pub const Scanner = struct {
                     else => {},
                 };
             },
-            'V' => return self.check_keyword(1, "ector", .VECTOR_TYPE),
-            'M' => return self.check_keyword(1, "atrix", .MATRIX_TYPE),
             // Language keywords
             'a' => {
                 if (len > 1) switch (self.source[self.start + 1]) {
@@ -522,7 +507,6 @@ pub const Scanner = struct {
             '}' => self.make_token(.RIGHT_BRACE),
             '[' => self.make_token(.LEFT_SQUARE),
             ']' => self.make_token(.RIGHT_SQUARE),
-            '$' => if (self.match('[')) self.make_token(.DOLLAR_LEFT_SQUARE) else error.UnexpectedToken,
             ';' => self.make_token(.SEMICOLON),
             ',' => self.make_token(.COMMA),
             '.' => self.make_token(if (self.match('.')) .DOT_DOT else .DOT),

@@ -40,7 +40,7 @@ test "TypeRegistry - Array Types" {
 
     const array_int_id = try resolveType(allocator, &registry, "Array[Int]");
     const array_int_id2 = try resolveType(allocator, &registry, "Array[Int]");
-    
+
     // Deduplication check: same type should resolve to the same TypeId
     try std.testing.expectEqual(array_int_id, array_int_id2);
 
@@ -72,23 +72,6 @@ test "TypeRegistry - Union Types" {
     const union_id = try resolveType(allocator, &registry, "Int | Nil");
     const union_id2 = try resolveType(allocator, &registry, "Int | Nil");
     try std.testing.expectEqual(union_id, union_id2);
-}
-
-test "TypeRegistry - Vector and Matrix Types" {
-    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
-    defer arena.deinit();
-    const allocator = arena.allocator();
-
-    var registry = try TypeRegistry.init(allocator);
-    defer registry.deinit();
-
-    const vec_id = try resolveType(allocator, &registry, "Vector[3]");
-    const vec_id2 = try resolveType(allocator, &registry, "Vector[3]");
-    try std.testing.expectEqual(vec_id, vec_id2);
-
-    const mat_id = try resolveType(allocator, &registry, "Matrix[2, 3]");
-    const mat_id2 = try resolveType(allocator, &registry, "Matrix[2, 3]");
-    try std.testing.expectEqual(mat_id, mat_id2);
 }
 
 test "TypeRegistry - Function Types" {

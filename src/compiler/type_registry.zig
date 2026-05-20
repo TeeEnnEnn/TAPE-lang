@@ -18,27 +18,21 @@ pub const PrimitiveType = enum(TypeId) {
     Float,
     String,
     Bool,
-    File,
     Never,
     Buffer,
-    Complex,
 };
 
 pub const TypeInfo = union(enum) {
     primitive: PrimitiveType,
     array: TypeId,
-    vector: u32, // the dimensions
-    matrix: struct { rows: u32, cols: u32 }, // the dimensions
     tuple: []TypeId,
     range: struct { start: TypeId, end: TypeId },
     table: struct { key: TypeId, value: TypeId },
     function: struct { args: []TypeId, ret: TypeId },
     option: TypeId,
     result: struct { ok: TypeId, err: TypeId },
-    iterator: TypeId,
     union_type: struct { left: TypeId, right: TypeId },
     shape: []ShapeField,
-
     identifier: struct { name: []const u8, generics: ?[]TypeId }, // errors, enums, structs
 };
 
@@ -57,10 +51,8 @@ pub const TypeRegistry = struct {
         try registry.types.append(allocator, .{ .primitive = .Float });
         try registry.types.append(allocator, .{ .primitive = .String });
         try registry.types.append(allocator, .{ .primitive = .Bool });
-        try registry.types.append(allocator, .{ .primitive = .File });
         try registry.types.append(allocator, .{ .primitive = .Never });
         try registry.types.append(allocator, .{ .primitive = .Buffer });
-        try registry.types.append(allocator, .{ .primitive = .Complex });
 
         return registry;
     }
@@ -78,7 +70,6 @@ pub const TypeRegistry = struct {
             .bool_type => @intFromEnum(PrimitiveType.Bool),
             .buffer_type => @intFromEnum(PrimitiveType.Buffer),
             .never_type => @intFromEnum(PrimitiveType.Never),
-            .complex_type => @intFromEnum(PrimitiveType.Complex),
 
             .array_type => |array| {
                 const element_id = try self.resolve(array.element_type);
@@ -88,15 +79,6 @@ pub const TypeRegistry = struct {
                 const key_id = try self.resolve(table.key_type);
                 const value_id = try self.resolve(table.element_type);
                 return try self.add_table_type(key_id, value_id);
-            },
-            .vector_type => |vector| {
-                const dim = vector.dimension;
-                return try self.add_vector_type(dim);
-            },
-            .matrix_type => |matrix| {
-                const row_dim = matrix.row_dim;
-                const col_dim = matrix.col_dim;
-                return try self.add_matrix_type(row_dim, col_dim);
             },
             .tuple_type => |tuple| {
                 const elements = tuple.element_types;
@@ -119,10 +101,6 @@ pub const TypeRegistry = struct {
                     return try self.add_function_type(try arg_ids.toOwnedSlice(self.allocator), ret_id);
                 }
                 return try self.add_function_type(try arg_ids.toOwnedSlice(self.allocator), @intFromEnum(PrimitiveType.Nil));
-            },
-            .iterator_type => |iterator| {
-                const element_id = try self.resolve(iterator.element_type);
-                return try self.add_iterator_type(element_id);
             },
             .range_type => |range| {
                 const start_id = try self.resolve(range.start);
@@ -218,42 +196,6 @@ pub const TypeRegistry = struct {
         return id;
     }
 
-    fn add_vector_type(self: *TypeRegistry, dim: u32) !TypeId {
-        for (self.types.items, 0..) |info, index| {
-            switch (info) {
-                .vector => |existing_dim| {
-                    if (existing_dim == dim) {
-                        return @as(TypeId, @intCast(index));
-                    }
-                },
-                else => continue,
-            }
-        }
-
-        // add new type
-        const id = @as(TypeId, @intCast(self.types.items.len));
-        try self.types.append(self.allocator, .{ .vector = dim });
-        return id;
-    }
-
-    fn add_matrix_type(self: *TypeRegistry, row_dim: u32, col_dim: u32) !TypeId {
-        for (self.types.items, 0..) |info, index| {
-            switch (info) {
-                .matrix => |m| {
-                    if (m.rows == row_dim and m.cols == col_dim) {
-                        return @as(TypeId, @intCast(index));
-                    }
-                },
-                else => continue,
-            }
-        }
-
-        // add new type
-        const id = @as(TypeId, @intCast(self.types.items.len));
-        try self.types.append(self.allocator, .{ .matrix = .{ .rows = row_dim, .cols = col_dim } });
-        return id;
-    }
-
     fn add_tuple_type(self: *TypeRegistry, elements: []TypeId) !TypeId {
         for (self.types.items, 0..) |info, index| {
             switch (info) {
@@ -287,24 +229,6 @@ pub const TypeRegistry = struct {
         // add new type
         const id = @as(TypeId, @intCast(self.types.items.len));
         try self.types.append(self.allocator, .{ .function = .{ .args = args, .ret = ret } });
-        return id;
-    }
-
-    fn add_iterator_type(self: *TypeRegistry, element_type: TypeId) !TypeId {
-        for (self.types.items, 0..) |info, index| {
-            switch (info) {
-                .iterator => |existing_element_type| {
-                    if (existing_element_type == element_type) {
-                        return @as(TypeId, @intCast(index));
-                    }
-                },
-                else => continue,
-            }
-        }
-
-        // add new type
-        const id = @as(TypeId, @intCast(self.types.items.len));
-        try self.types.append(self.allocator, .{ .iterator = element_type });
         return id;
     }
 
