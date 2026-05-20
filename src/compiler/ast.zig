@@ -1,5 +1,5 @@
 const std = @import("std");
-const Token = @import("../lexer/scanner").Token;
+const Token = @import("scanner.zig").Token;
 
 pub const TypeId = u32;
 
@@ -94,7 +94,7 @@ pub const ASTNode = union(enum) {
     matrix_type: *MatrixType,
     buffer_type: *BufferType,
     range_type: *RangeType,
-    iteratror_type: *IteratorType,
+    iterator_type: *IteratorType,
     option_type: *OptionType,
     result_type: *ResultType,
     never_type: *NeverType,

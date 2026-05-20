@@ -72,6 +72,7 @@ pub const TokenType = enum {
     WHILE,
     BREAK,
     CONTINUE,
+    YIELD,
     USE,
     FROM,
     PUB,
@@ -93,6 +94,8 @@ pub const TokenType = enum {
     NATIVE,
     STATIC,
     CO,
+    ENUM,
+    ERROR,
     // Type keywords
     NIL_TYPE,
     BOOL_TYPE,
@@ -337,7 +340,14 @@ pub const Scanner = struct {
                 };
             },
             'd' => return self.check_keyword(1, "efault", .DEFAULT),
-            'e' => return self.check_keyword(1, "lse", .ELSE),
+            'e' => {
+                if (len > 1) switch (self.source[self.start + 1]) {
+                    'l' => return self.check_keyword(2, "se", .ELSE),
+                    'n' => return self.check_keyword(2, "um", .ENUM),
+                    'r' => return self.check_keyword(2, "ror", .ERROR),
+                    else => {},
+                };
+            },
             'g' => return self.check_keyword(1, "ive", .GIVE),
             'i' => {
                 if (len > 1) switch (self.source[self.start + 1]) {
@@ -384,6 +394,7 @@ pub const Scanner = struct {
             },
             'w' => return self.check_keyword(1, "hile", .WHILE),
             'v' => return self.check_keyword(1, "ar", .VAR),
+            'y' => return self.check_keyword(1, "ield", .YIELD),
             'f' => {
                 if (len > 1) switch (self.source[self.start + 1]) {
                     'a' => return self.check_keyword(2, "lse", .FALSE),

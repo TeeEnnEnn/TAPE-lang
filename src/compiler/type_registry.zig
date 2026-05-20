@@ -3,9 +3,14 @@ const ast = @import("ast.zig");
 
 pub const TypeId = ast.TypeId;
 
+pub const ShapeField = struct {
+    name: []const u8,
+    type: TypeId,
+};
+
 pub const TypeRegistryError = error{
     UnknownType,
-};
+} || std.mem.Allocator.Error;
 
 pub const PrimitiveType = enum(TypeId) {
     Nil = 0,
@@ -32,7 +37,7 @@ pub const TypeInfo = union(enum) {
     result: struct { ok: TypeId, err: TypeId },
     iterator: TypeId,
     union_type: struct { left: TypeId, right: TypeId },
-    shape: []struct { name: []const u8, type: TypeId },
+    shape: []ShapeField,
 
     identifier: struct { name: []const u8, generics: ?[]TypeId }, // errors, enums, structs
 };
@@ -43,25 +48,25 @@ pub const TypeRegistry = struct {
 
     pub fn init(allocator: std.mem.Allocator) !TypeRegistry {
         var registry = TypeRegistry{
-            .types = std.ArrayList(TypeInfo).init(allocator),
+            .types = .empty,
             .allocator = allocator,
         };
 
-        try registry.types.append(.{ .primitive = .Nil });
-        try registry.types.append(.{ .primitive = .Int });
-        try registry.types.append(.{ .primitive = .Float });
-        try registry.types.append(.{ .primitive = .String });
-        try registry.types.append(.{ .primitive = .Bool });
-        try registry.types.append(.{ .primitive = .File });
-        try registry.types.append(.{ .primitive = .Never });
-        try registry.types.append(.{ .primitive = .Buffer });
-        try registry.types.append(.{ .primitive = .Complex });
+        try registry.types.append(allocator, .{ .primitive = .Nil });
+        try registry.types.append(allocator, .{ .primitive = .Int });
+        try registry.types.append(allocator, .{ .primitive = .Float });
+        try registry.types.append(allocator, .{ .primitive = .String });
+        try registry.types.append(allocator, .{ .primitive = .Bool });
+        try registry.types.append(allocator, .{ .primitive = .File });
+        try registry.types.append(allocator, .{ .primitive = .Never });
+        try registry.types.append(allocator, .{ .primitive = .Buffer });
+        try registry.types.append(allocator, .{ .primitive = .Complex });
 
         return registry;
     }
 
     pub fn deinit(self: *TypeRegistry) void {
-        self.types.deinit();
+        self.types.deinit(self.allocator);
     }
 
     pub fn resolve(self: *TypeRegistry, type_node: *ast.ASTNode) TypeRegistryError!TypeId {
@@ -77,7 +82,7 @@ pub const TypeRegistry = struct {
 
             .array_type => |array| {
                 const element_id = try self.resolve(array.element_type);
-                return try self.add_array(element_id);
+                return try self.add_array_type(element_id);
             },
             .table_type => |table| {
                 const key_id = try self.resolve(table.key_type);
@@ -95,25 +100,25 @@ pub const TypeRegistry = struct {
             },
             .tuple_type => |tuple| {
                 const elements = tuple.element_types;
-                const element_ids = try std.ArrayList(TypeId).init(self.allocator);
+                var element_ids: std.ArrayList(TypeId) = .empty;
                 for (elements) |element| {
                     const element_id = try self.resolve(element);
-                    try element_ids.append(element_id);
+                    try element_ids.append(self.allocator, element_id);
                 }
-                return try self.add_tuple_type(try element_ids.toOwnedSlice());
+                return try self.add_tuple_type(try element_ids.toOwnedSlice(self.allocator));
             },
             .fn_type => |function| {
                 const args = function.params;
-                const arg_ids = try std.ArrayList(TypeId).init(self.allocator);
+                var arg_ids: std.ArrayList(TypeId) = .empty;
                 for (args) |arg| {
                     const arg_id = try self.resolve(arg);
-                    try arg_ids.append(arg_id);
+                    try arg_ids.append(self.allocator, arg_id);
                 }
                 if (function.return_type) |ret| {
                     const ret_id = try self.resolve(ret);
-                    return try self.add_function_type(try arg_ids.toOwnedSlice(), ret_id);
+                    return try self.add_function_type(try arg_ids.toOwnedSlice(self.allocator), ret_id);
                 }
-                return try self.add_function_type(try arg_ids.toOwnedSlice(), @intFromEnum(PrimitiveType.Nil));
+                return try self.add_function_type(try arg_ids.toOwnedSlice(self.allocator), @intFromEnum(PrimitiveType.Nil));
             },
             .iterator_type => |iterator| {
                 const element_id = try self.resolve(iterator.element_type);
@@ -138,12 +143,12 @@ pub const TypeRegistry = struct {
                 const generics = identifier.generic_args;
 
                 if (generics) |args| {
-                    const resolved_generics = try std.ArrayList(TypeId).init(self.allocator);
+                    var resolved_generics: std.ArrayList(TypeId) = .empty;
                     for (args) |arg| {
                         const arg_id = try self.resolve(arg);
-                        try resolved_generics.append(arg_id);
+                        try resolved_generics.append(self.allocator, arg_id);
                     }
-                    return try self.add_identifier_type(name, try resolved_generics.toOwnedSlice());
+                    return try self.add_identifier_type(name, try resolved_generics.toOwnedSlice(self.allocator));
                 }
                 return try self.add_identifier_type(name, null);
             },
@@ -154,13 +159,23 @@ pub const TypeRegistry = struct {
             },
             .shape_type => |shape| {
                 const fields = shape.fields;
-                const field_types = try std.ArrayList(struct { []const u8, TypeId }).init(self.allocator);
+                var field_types: std.ArrayList(ShapeField) = .empty;
                 for (fields) |field| {
                     const name = field.name.lexeme;
                     const type_id = try self.resolve(field.type_annotation);
-                    try field_types.append(.{ name, type_id });
+                    try field_types.append(self.allocator, .{ .name = name, .type = type_id });
                 }
-                return try self.add_shape_type(try field_types.toOwnedSlice());
+                return try self.add_shape_type(try field_types.toOwnedSlice(self.allocator));
+            },
+            .shape_expr => |shape| {
+                const fields = shape.fields;
+                var field_types: std.ArrayList(ShapeField) = .empty;
+                for (fields) |field| {
+                    const name = field.name.lexeme;
+                    const type_id = try self.resolve(field.type_annotation);
+                    try field_types.append(self.allocator, .{ .name = name, .type = type_id });
+                }
+                return try self.add_shape_type(try field_types.toOwnedSlice(self.allocator));
             },
             else => return TypeRegistryError.UnknownType,
         };
@@ -181,15 +196,15 @@ pub const TypeRegistry = struct {
 
         // add new type
         const id = @as(TypeId, @intCast(self.types.items.len));
-        try self.types.append(.{ .array = element_type });
+        try self.types.append(self.allocator, .{ .array = element_type });
         return id;
     }
 
     fn add_table_type(self: *TypeRegistry, key_type: TypeId, value_type: TypeId) !TypeId {
         for (self.types.items, 0..) |info, index| {
             switch (info) {
-                .table => |existing_key_type, existing_value_type| {
-                    if (existing_key_type == key_type and existing_value_type == value_type) {
+                .table => |t| {
+                    if (t.key == key_type and t.value == value_type) {
                         return @as(TypeId, @intCast(index));
                     }
                 },
@@ -199,7 +214,7 @@ pub const TypeRegistry = struct {
 
         // add new type
         const id = @as(TypeId, @intCast(self.types.items.len));
-        try self.types.append(.{ .table = .{ key_type, value_type } });
+        try self.types.append(self.allocator, .{ .table = .{ .key = key_type, .value = value_type } });
         return id;
     }
 
@@ -217,15 +232,15 @@ pub const TypeRegistry = struct {
 
         // add new type
         const id = @as(TypeId, @intCast(self.types.items.len));
-        try self.types.append(.{ .vector = dim });
+        try self.types.append(self.allocator, .{ .vector = dim });
         return id;
     }
 
     fn add_matrix_type(self: *TypeRegistry, row_dim: u32, col_dim: u32) !TypeId {
         for (self.types.items, 0..) |info, index| {
             switch (info) {
-                .matrix => |existing_row_dim, existing_col_dim| {
-                    if (existing_row_dim == row_dim and existing_col_dim == col_dim) {
+                .matrix => |m| {
+                    if (m.rows == row_dim and m.cols == col_dim) {
                         return @as(TypeId, @intCast(index));
                     }
                 },
@@ -235,7 +250,7 @@ pub const TypeRegistry = struct {
 
         // add new type
         const id = @as(TypeId, @intCast(self.types.items.len));
-        try self.types.append(.{ .matrix = .{ row_dim, col_dim } });
+        try self.types.append(self.allocator, .{ .matrix = .{ .rows = row_dim, .cols = col_dim } });
         return id;
     }
 
@@ -253,15 +268,15 @@ pub const TypeRegistry = struct {
 
         // add new type
         const id = @as(TypeId, @intCast(self.types.items.len));
-        try self.types.append(.{ .tuple = elements });
+        try self.types.append(self.allocator, .{ .tuple = elements });
         return id;
     }
 
     fn add_function_type(self: *TypeRegistry, args: []TypeId, ret: TypeId) !TypeId {
         for (self.types.items, 0..) |info, index| {
             switch (info) {
-                .function => |existing_args, existing_ret| {
-                    if (std.mem.eql(TypeId, existing_args, args) and existing_ret == ret) {
+                .function => |f| {
+                    if (std.mem.eql(TypeId, f.args, args) and f.ret == ret) {
                         return @as(TypeId, @intCast(index));
                     }
                 },
@@ -271,7 +286,7 @@ pub const TypeRegistry = struct {
 
         // add new type
         const id = @as(TypeId, @intCast(self.types.items.len));
-        try self.types.append(.{ .function = .{ args, ret } });
+        try self.types.append(self.allocator, .{ .function = .{ .args = args, .ret = ret } });
         return id;
     }
 
@@ -289,15 +304,15 @@ pub const TypeRegistry = struct {
 
         // add new type
         const id = @as(TypeId, @intCast(self.types.items.len));
-        try self.types.append(.{ .iterator = element_type });
+        try self.types.append(self.allocator, .{ .iterator = element_type });
         return id;
     }
 
     fn add_range_type(self: *TypeRegistry, start: TypeId, end: TypeId) !TypeId {
         for (self.types.items, 0..) |info, index| {
             switch (info) {
-                .range => |existing_start, existing_end| {
-                    if (existing_start == start and existing_end == end) {
+                .range => |r| {
+                    if (r.start == start and r.end == end) {
                         return @as(TypeId, @intCast(index));
                     }
                 },
@@ -307,15 +322,15 @@ pub const TypeRegistry = struct {
 
         // add new type
         const id = @as(TypeId, @intCast(self.types.items.len));
-        try self.types.append(.{ .range = .{ start, end } });
+        try self.types.append(self.allocator, .{ .range = .{ .start = start, .end = end } });
         return id;
     }
 
     fn add_result_type(self: *TypeRegistry, ok_type: TypeId, err_type: TypeId) !TypeId {
         for (self.types.items, 0..) |info, index| {
             switch (info) {
-                .result => |existing_ok_type, existing_err_type| {
-                    if (existing_ok_type == ok_type and existing_err_type == err_type) {
+                .result => |r| {
+                    if (r.ok == ok_type and r.err == err_type) {
                         return @as(TypeId, @intCast(index));
                     }
                 },
@@ -325,7 +340,7 @@ pub const TypeRegistry = struct {
 
         // add new type
         const id = @as(TypeId, @intCast(self.types.items.len));
-        try self.types.append(.{ .result = .{ ok_type, err_type } });
+        try self.types.append(self.allocator, .{ .result = .{ .ok = ok_type, .err = err_type } });
         return id;
     }
 
@@ -343,7 +358,7 @@ pub const TypeRegistry = struct {
 
         // add new type
         const id = @as(TypeId, @intCast(self.types.items.len));
-        try self.types.append(.{ .option = some_type });
+        try self.types.append(self.allocator, .{ .option = some_type });
         return id;
     }
 
@@ -367,15 +382,15 @@ pub const TypeRegistry = struct {
 
         // add new type
         const id = @as(TypeId, @intCast(self.types.items.len));
-        try self.types.append(.{ .identifier = .{ .name = name, .generics = generics } });
+        try self.types.append(self.allocator, .{ .identifier = .{ .name = name, .generics = generics } });
         return id;
     }
 
     fn add_union_type(self: *TypeRegistry, left_id: TypeId, right_id: TypeId) !TypeId {
         for (self.types.items, 0..) |info, index| {
             switch (info) {
-                .union_type => |existing_left_id, existing_right_id| {
-                    if (existing_left_id == left_id and existing_right_id == right_id) {
+                .union_type => |u| {
+                    if (u.left == left_id and u.right == right_id) {
                         return @as(TypeId, @intCast(index));
                     }
                 },
@@ -385,11 +400,11 @@ pub const TypeRegistry = struct {
 
         // add new type
         const id = @as(TypeId, @intCast(self.types.items.len));
-        try self.types.append(.{ .union_type = .{ left_id, right_id } });
+        try self.types.append(self.allocator, .{ .union_type = .{ .left = left_id, .right = right_id } });
         return id;
     }
 
-    fn add_shape_type(self: *TypeRegistry, fields: []struct { []const u8, TypeId }) !TypeId {
+    fn add_shape_type(self: *TypeRegistry, fields: []ShapeField) !TypeId {
         for (self.types.items, 0..) |info, index| {
             switch (info) {
                 .shape => |existing_fields| {
@@ -410,7 +425,7 @@ pub const TypeRegistry = struct {
 
         // add new type
         const id = @as(TypeId, @intCast(self.types.items.len));
-        try self.types.append(.{ .shape = fields });
+        try self.types.append(self.allocator, .{ .shape = fields });
         return id;
     }
 

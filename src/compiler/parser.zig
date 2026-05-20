@@ -6,22 +6,24 @@ const MatchCase = AST.MatchCase;
 
 const std = @import("std");
 
-pub const ParserError = error{
+const ScannerError = @import("scanner.zig").ScannerError;
+
+pub const ParserError = ScannerError || std.mem.Allocator.Error || std.fmt.ParseIntError || std.fmt.ParseFloatError || error{
     UnexpectedToken,
 };
 
 pub const Parser = struct {
-    scanner: *Scanner,
+    scanner: Scanner,
     allocator: std.mem.Allocator,
     current: Token,
     previous: Token,
 
-    pub fn init(allocator: std.mem.Allocator, scanner: *Scanner) !Parser {
+    pub fn init(allocator: std.mem.Allocator, source: []const u8) !Parser {
         var parser = Parser{
             .allocator = allocator,
-            .scanner = scanner,
-            .current = Token{},
-            .previous = Token{},
+            .scanner = Scanner.init(source),
+            .current = Token{ .token_type = .EOF, .lexeme = "", .line = 0 },
+            .previous = Token{ .token_type = .EOF, .lexeme = "", .line = 0 },
         };
         try parser.advance();
         return parser;
@@ -349,17 +351,17 @@ pub const Parser = struct {
         while (true) {
             if (try self.match(.LEFT_PAREN)) {
                 // Function Call
-                var args = std.ArrayList(*AST.ASTNode).init(self.allocator);
+                var args: std.ArrayList(*AST.ASTNode) = .empty;
                 if (!self.check(.RIGHT_PAREN)) {
                     while (true) {
-                        try args.append(try self.parse_expression());
+                        try args.append(self.allocator, try self.parse_expression());
                         if (!try self.match(.COMMA)) break;
                     }
                 }
                 try self.consume(.RIGHT_PAREN);
 
                 const call = try self.allocator.create(AST.CallExpr);
-                call.* = .{ .expr = expr, .args = try args.toOwnedSlice() };
+                call.* = .{ .expr = expr, .args = try args.toOwnedSlice(self.allocator) };
                 const node = try self.allocator.create(AST.ASTNode);
                 node.* = .{ .call_expr = call };
                 expr = node;
@@ -409,20 +411,19 @@ pub const Parser = struct {
 
     fn parse_primary(self: *Parser) ParserError!*AST.ASTNode {
         if (try self.match(.CO)) {
-            if (try self.match(.FN)) {
-                return try self.parse_anonymous_function(true);
-            }
+            try self.consume(.FN);
+            return try self.parse_anonymous_function(true);
         } else if (try self.match(.FN)) {
             return try self.parse_anonymous_function(false);
-        } else if (try self.match(.TRUE) or try self.match(.FALSE) or try self.match(.STRING) or try self.match(.INT) or try self.match(.FLOAT) or try self.match(.NIL)) {
+        } else if (self.check(.TRUE) or self.check(.FALSE) or self.check(.STRING) or self.check(.INT) or self.check(.FLOAT) or self.check(.NIL)) {
             return try self.parse_literal();
-        } else if (try self.match(.IDENTIFIER)) {
+        } else if (self.check(.IDENTIFIER)) {
             return try self.parse_identifier_expression();
         } else if (try self.match(.LEFT_SQUARE)) {
             return try self.parse_array_literal();
         } else if (try self.match(.LEFT_BRACE)) {
             return try self.parse_table_literal();
-        } else if (try self.match(.LEFT_PAREN)) {
+        } else if (self.check(.LEFT_PAREN)) {
             return try self.parse_group_or_tuple();
         } else if (try self.match(.NEW)) {
             return try self.parse_new_expression();
@@ -439,7 +440,7 @@ pub const Parser = struct {
             TokenType.STRING => {
                 try self.advance();
                 const literal = try self.allocator.create(AST.StrLit);
-                literal.* = .{ .value = token.lexeme };
+                literal.* = .{ .value = token.lexeme[1 .. token.lexeme.len - 1] };
                 const node = try self.allocator.create(AST.ASTNode);
                 node.* = .{ .str_lit = literal };
                 return node;
@@ -447,7 +448,7 @@ pub const Parser = struct {
             TokenType.INT => {
                 try self.advance();
                 const literal = try self.allocator.create(AST.IntLit);
-                literal.* = .{ .value = std.fmt.parseInt(i64, token.lexeme, 10) };
+                literal.* = .{ .value = try std.fmt.parseInt(i64, token.lexeme, 10) };
                 const node = try self.allocator.create(AST.ASTNode);
                 node.* = .{ .int_lit = literal };
                 return node;
@@ -455,7 +456,7 @@ pub const Parser = struct {
             TokenType.FLOAT => {
                 try self.advance();
                 const literal = try self.allocator.create(AST.FloatLit);
-                literal.* = .{ .value = std.fmt.parseFloat(f64, token.lexeme, 10) };
+                literal.* = .{ .value = try std.fmt.parseFloat(f64, token.lexeme) };
                 const node = try self.allocator.create(AST.ASTNode);
                 node.* = .{ .float_lit = literal };
                 return node;
@@ -505,19 +506,19 @@ pub const Parser = struct {
 
         if (try self.match(.COMMA)) {
             // It's a tuple: (expr,) or (expr, expr)
-            var elements = std.ArrayList(*AST.ASTNode).init(self.allocator);
-            try elements.append(first_expr);
+            var elements: std.ArrayList(*AST.ASTNode) = .empty;
+            try elements.append(self.allocator, first_expr);
 
             if (!self.check(.RIGHT_PAREN)) {
                 while (true) {
-                    try elements.append(try self.parse_expression());
+                    try elements.append(self.allocator, try self.parse_expression());
                     if (!try self.match(.COMMA)) break;
                 }
             }
             try self.consume(.RIGHT_PAREN);
 
             const tuple_expr = try self.allocator.create(AST.TupleExpr);
-            tuple_expr.* = .{ .exprs = try elements.toOwnedSlice(), .resolved_type = 0 };
+            tuple_expr.* = .{ .exprs = try elements.toOwnedSlice(self.allocator), .resolved_type = 0 };
             const node = try self.allocator.create(AST.ASTNode);
             node.* = .{ .tuple_expr = tuple_expr };
             return node;
@@ -537,7 +538,7 @@ pub const Parser = struct {
         const struct_name = self.previous;
 
         try self.consume(.LEFT_BRACE);
-        var fields = std.ArrayList(AST.StructInitField).init(self.allocator);
+        var fields: std.ArrayList(AST.StructInitField) = .empty;
 
         if (!self.check(.RIGHT_BRACE)) {
             while (true) {
@@ -546,7 +547,7 @@ pub const Parser = struct {
                 try self.consume(.EQUAL);
                 const value = try self.parse_expression();
 
-                try fields.append(AST.StructInitField{ .name = field_name, .value = value });
+                try fields.append(self.allocator, AST.StructInitField{ .name = field_name, .value = value });
 
                 if (!try self.match(.COMMA)) break;
             }
@@ -554,14 +555,14 @@ pub const Parser = struct {
         try self.consume(.RIGHT_BRACE);
 
         const new_expr = try self.allocator.create(AST.NewExpr);
-        new_expr.* = .{ .struct_name = struct_name, .fields = try fields.toOwnedSlice(), .resolved_type = 0 };
+        new_expr.* = .{ .struct_name = struct_name, .fields = try fields.toOwnedSlice(self.allocator), .resolved_type = 0 };
         const node = try self.allocator.create(AST.ASTNode);
         node.* = .{ .new_expr = new_expr };
         return node;
     }
 
     fn parse_identifier_expression(self: *Parser) ParserError!*AST.ASTNode {
-        self.consume(.IDENTIFIER);
+        try self.consume(.IDENTIFIER);
         const token = self.previous;
         const identifier = try self.allocator.create(AST.IdentifierExpr);
         identifier.* = .{ .name = token };
@@ -571,15 +572,13 @@ pub const Parser = struct {
     }
 
     fn parse_anonymous_function(self: *Parser, is_coroutine: bool) ParserError!*AST.ASTNode {
-        try self.advance();
-
         try self.consume(.LEFT_PAREN);
-        var params = std.ArrayList(*AST.TypedNamedField).init(self.allocator);
+        var params: std.ArrayList(*AST.TypedNamedField) = .empty;
 
         if (!self.check(.RIGHT_PAREN)) {
             while (true) {
                 const param_node = try self.parse_typed_named_field(); // Helper to parse "name: Type"
-                try params.append(param_node);
+                try params.append(self.allocator, param_node);
                 if (!try self.match(.COMMA)) break;
             }
         }
@@ -587,7 +586,7 @@ pub const Parser = struct {
 
         var return_type: ?*AST.ASTNode = null;
         if (try self.match(.ARROW)) {
-            return_type = try self.parse_type_expr();
+            return_type = try self.parse_type_expression();
         }
 
         const body = try self.parse_statement();
@@ -595,7 +594,7 @@ pub const Parser = struct {
         const anon = try self.allocator.create(AST.AnonFnExpr);
         anon.* = .{
             .modifier_co = is_coroutine,
-            .params = try params.toOwnedSlice(),
+            .params = try params.toOwnedSlice(self.allocator),
             .return_type_annotation = return_type,
             .body = body,
         };
@@ -609,8 +608,8 @@ pub const Parser = struct {
         try self.consume(.IDENTIFIER);
         const token = self.previous;
         try self.consume(.COLON);
-        const type_ = self.parse_type_expression();
-        const named_field = self.allocator.create(AST.TypedNamedField);
+        const type_ = try self.parse_type_expression();
+        const named_field = try self.allocator.create(AST.TypedNamedField);
         named_field.* = .{ .name = token, .type_annotation = type_ };
         return named_field;
     }
@@ -623,10 +622,10 @@ pub const Parser = struct {
         } else if (try self.match(.FN)) {
             // Function Type: fn (Int, Float) -> Bool
             try self.consume(.LEFT_PAREN);
-            var params = std.ArrayList(*AST.ASTNode).init(self.allocator);
+            var params: std.ArrayList(*AST.ASTNode) = .empty;
             if (!self.check(.RIGHT_PAREN)) {
                 while (true) {
-                    try params.append(try self.parse_type_expression());
+                    try params.append(self.allocator, try self.parse_type_expression());
                     if (!try self.match(.COMMA)) break;
                 }
             }
@@ -638,23 +637,159 @@ pub const Parser = struct {
             }
 
             const fn_type = try self.allocator.create(AST.FnType);
-            fn_type.* = .{ .params = try params.toOwnedSlice(), .return_type = return_type };
+            fn_type.* = .{ .params = try params.toOwnedSlice(self.allocator), .return_type = return_type };
             const node = try self.allocator.create(AST.ASTNode);
             node.* = .{ .fn_type = fn_type };
             left = node;
+        } else if (try self.match(.NIL_TYPE)) {
+            const nil_type = try self.allocator.create(AST.NilType);
+            nil_type.* = .{};
+            const node = try self.allocator.create(AST.ASTNode);
+            node.* = .{ .nil_type = nil_type };
+            left = node;
+        } else if (try self.match(.BOOL_TYPE)) {
+            const bool_type = try self.allocator.create(AST.BoolType);
+            bool_type.* = .{};
+            const node = try self.allocator.create(AST.ASTNode);
+            node.* = .{ .bool_type = bool_type };
+            left = node;
+        } else if (try self.match(.INT_TYPE)) {
+            const int_type = try self.allocator.create(AST.IntType);
+            int_type.* = .{};
+            const node = try self.allocator.create(AST.ASTNode);
+            node.* = .{ .int_type = int_type };
+            left = node;
+        } else if (try self.match(.FLOAT_TYPE)) {
+            const float_type = try self.allocator.create(AST.FloatType);
+            float_type.* = .{};
+            const node = try self.allocator.create(AST.ASTNode);
+            node.* = .{ .float_type = float_type };
+            left = node;
+        } else if (try self.match(.STRING_TYPE)) {
+            const string_type = try self.allocator.create(AST.StringType);
+            string_type.* = .{};
+            const node = try self.allocator.create(AST.ASTNode);
+            node.* = .{ .string_type = string_type };
+            left = node;
+        } else if (try self.match(.BUFFER_TYPE)) {
+            const buffer_type = try self.allocator.create(AST.BufferType);
+            buffer_type.* = .{};
+            const node = try self.allocator.create(AST.ASTNode);
+            node.* = .{ .buffer_type = buffer_type };
+            left = node;
+        } else if (try self.match(.NEVER_TYPE)) {
+            const never_type = try self.allocator.create(AST.NeverType);
+            never_type.* = .{};
+            const node = try self.allocator.create(AST.ASTNode);
+            node.* = .{ .never_type = never_type };
+            left = node;
+        } else if (try self.match(.COMPLEX_TYPE)) {
+            const complex_type = try self.allocator.create(AST.ComplexType);
+            complex_type.* = .{};
+            const node = try self.allocator.create(AST.ASTNode);
+            node.* = .{ .complex_type = complex_type };
+            left = node;
+        } else if (try self.match(.ARRAY_TYPE)) {
+            try self.consume(.LEFT_SQUARE);
+            const element = try self.parse_type_expression();
+            try self.consume(.RIGHT_SQUARE);
+            const array_type = try self.allocator.create(AST.ArrayType);
+            array_type.* = .{ .element_type = element };
+            const node = try self.allocator.create(AST.ASTNode);
+            node.* = .{ .array_type = array_type };
+            left = node;
+        } else if (try self.match(.TABLE_TYPE)) {
+            try self.consume(.LEFT_SQUARE);
+            const key = try self.parse_type_expression();
+            try self.consume(.COMMA);
+            const val = try self.parse_type_expression();
+            try self.consume(.RIGHT_SQUARE);
+            const table_type = try self.allocator.create(AST.TableType);
+            table_type.* = .{ .key_type = key, .element_type = val };
+            const node = try self.allocator.create(AST.ASTNode);
+            node.* = .{ .table_type = table_type };
+            left = node;
+        } else if (try self.match(.VECTOR_TYPE)) {
+            try self.consume(.LEFT_SQUARE);
+            try self.consume(.INT);
+            const dim = try std.fmt.parseInt(u32, self.previous.lexeme, 10);
+            try self.consume(.RIGHT_SQUARE);
+            const vector_type = try self.allocator.create(AST.VectorType);
+            vector_type.* = .{ .dimension = dim };
+            const node = try self.allocator.create(AST.ASTNode);
+            node.* = .{ .vector_type = vector_type };
+            left = node;
+        } else if (try self.match(.MATRIX_TYPE)) {
+            try self.consume(.LEFT_SQUARE);
+            try self.consume(.INT);
+            const rows = try std.fmt.parseInt(u32, self.previous.lexeme, 10);
+            try self.consume(.COMMA);
+            try self.consume(.INT);
+            const cols = try std.fmt.parseInt(u32, self.previous.lexeme, 10);
+            try self.consume(.RIGHT_SQUARE);
+            const matrix_type = try self.allocator.create(AST.MatrixType);
+            matrix_type.* = .{ .row_dim = rows, .col_dim = cols };
+            const node = try self.allocator.create(AST.ASTNode);
+            node.* = .{ .matrix_type = matrix_type };
+            left = node;
+        } else if (try self.match(.RANGE_TYPE)) {
+            try self.consume(.LEFT_SQUARE);
+            const start = try self.parse_type_expression();
+            try self.consume(.COMMA);
+            const end = try self.parse_type_expression();
+            var step: u32 = 1;
+            if (try self.match(.COMMA)) {
+                try self.consume(.INT);
+                step = try std.fmt.parseInt(u32, self.previous.lexeme, 10);
+            }
+            try self.consume(.RIGHT_SQUARE);
+            const range_type = try self.allocator.create(AST.RangeType);
+            range_type.* = .{ .start = start, .end = end, .step = step };
+            const node = try self.allocator.create(AST.ASTNode);
+            node.* = .{ .range_type = range_type };
+            left = node;
+        } else if (try self.match(.ITERATOR_TYPE)) {
+            try self.consume(.LEFT_SQUARE);
+            const element = try self.parse_type_expression();
+            try self.consume(.RIGHT_SQUARE);
+            const iter_type = try self.allocator.create(AST.IteratorType);
+            iter_type.* = .{ .element_type = element };
+            const node = try self.allocator.create(AST.ASTNode);
+            node.* = .{ .iterator_type = iter_type };
+            left = node;
+        } else if (try self.match(.OPTION_TYPE)) {
+            try self.consume(.LEFT_SQUARE);
+            const some = try self.parse_type_expression();
+            try self.consume(.RIGHT_SQUARE);
+            const opt_type = try self.allocator.create(AST.OptionType);
+            opt_type.* = .{ .element_type = some };
+            const node = try self.allocator.create(AST.ASTNode);
+            node.* = .{ .option_type = opt_type };
+            left = node;
+        } else if (try self.match(.RESULT_TYPE)) {
+            try self.consume(.LEFT_SQUARE);
+            const ok = try self.parse_type_expression();
+            try self.consume(.COMMA);
+            const err = try self.parse_type_expression();
+            try self.consume(.RIGHT_SQUARE);
+            const res_type = try self.allocator.create(AST.ResultType);
+            res_type.* = .{ .ok_type = ok, .err_type = err };
+            const node = try self.allocator.create(AST.ASTNode);
+            node.* = .{ .result_type = res_type };
+            left = node;
         } else if (try self.match(.LEFT_PAREN)) {
             // Tuple type: (Int, Float)
-            var elements = std.ArrayList(*AST.ASTNode).init(self.allocator);
+            var elements: std.ArrayList(*AST.ASTNode) = .empty;
             if (!self.check(.RIGHT_PAREN)) {
                 while (true) {
-                    try elements.append(try self.parse_type_expression());
+                    try elements.append(self.allocator, try self.parse_type_expression());
                     if (!try self.match(.COMMA)) break;
                 }
             }
             try self.consume(.RIGHT_PAREN);
 
             const tuple_type = try self.allocator.create(AST.TupleType);
-            tuple_type.* = .{ .element_types = try elements.toOwnedSlice() };
+            tuple_type.* = .{ .element_types = try elements.toOwnedSlice(self.allocator) };
             const node = try self.allocator.create(AST.ASTNode);
             node.* = .{ .tuple_type = tuple_type };
             left = node;
@@ -665,13 +800,13 @@ pub const Parser = struct {
 
             var generic_args: ?[]*AST.ASTNode = null;
             if (try self.match(.LEFT_SQUARE)) {
-                var args = std.ArrayList(*AST.ASTNode).init(self.allocator);
+                var args: std.ArrayList(*AST.ASTNode) = .empty;
                 while (true) {
-                    try args.append(try self.parse_type_expression());
+                    try args.append(self.allocator, try self.parse_type_expression());
                     if (!try self.match(.COMMA)) break;
                 }
                 try self.consume(.RIGHT_SQUARE);
-                generic_args = try args.toOwnedSlice();
+                generic_args = try args.toOwnedSlice(self.allocator);
             }
 
             const id_type = try self.allocator.create(AST.IdentifierType);
@@ -695,15 +830,15 @@ pub const Parser = struct {
     }
 
     fn parse_table_literal(self: *Parser) ParserError!*AST.ASTNode {
-        const key_types = std.ArrayList(*AST.ASTNode).init(self.allocator);
-        const value_types = std.ArrayList(*AST.ASTNode).init(self.allocator);
+        var key_types: std.ArrayList(*AST.ASTNode) = .empty;
+        var value_types: std.ArrayList(*AST.ASTNode) = .empty;
 
         while (true) {
             const key_type = try self.parse_expression();
             try self.consume(.COLON);
             const value_type = try self.parse_expression();
-            try key_types.append(key_type);
-            try value_types.append(value_type);
+            try key_types.append(self.allocator, key_type);
+            try value_types.append(self.allocator, value_type);
             if (self.check(.RIGHT_BRACE)) {
                 break;
             }
@@ -713,8 +848,8 @@ pub const Parser = struct {
 
         const table_literal = try self.allocator.create(AST.TableExpr);
         table_literal.* = .{
-            .keys = key_types.toOwnedSlice(),
-            .values = value_types.toOwnedSlice(),
+            .keys = try key_types.toOwnedSlice(self.allocator),
+            .values = try value_types.toOwnedSlice(self.allocator),
         };
 
         const node = try self.allocator.create(AST.ASTNode);
@@ -724,10 +859,10 @@ pub const Parser = struct {
     }
 
     fn parse_array_literal(self: *Parser) ParserError!*AST.ASTNode {
-        var elements = std.ArrayList(*AST.ASTNode).init(self.allocator);
+        var elements: std.ArrayList(*AST.ASTNode) = .empty;
         while (true) {
             const element = try self.parse_expression();
-            try elements.append(element);
+            try elements.append(self.allocator, element);
             if (self.check(.RIGHT_SQUARE)) {
                 break;
             }
@@ -737,7 +872,7 @@ pub const Parser = struct {
 
         const array_literal = try self.allocator.create(AST.ArrayExpr);
         array_literal.* = .{
-            .elements = elements.toOwnedSlice(),
+            .elements = try elements.toOwnedSlice(self.allocator),
         };
 
         const node = try self.allocator.create(AST.ASTNode);
@@ -778,12 +913,12 @@ pub const Parser = struct {
         const name = self.previous;
 
         try self.consume(.LEFT_PAREN);
-        var params = std.ArrayList(*AST.TypedNamedField).init(self.allocator);
+        var params: std.ArrayList(*AST.TypedNamedField) = .empty;
 
         if (!self.check(.RIGHT_PAREN)) {
             while (true) {
                 const param = try self.parse_typed_named_field();
-                try params.append(param);
+                try params.append(self.allocator, param);
                 if (!try self.match(.COMMA)) break;
             }
         }
@@ -803,7 +938,7 @@ pub const Parser = struct {
             .modifier_static = is_static,
             .modifier_co = is_co,
             .name = name,
-            .params = try params.toOwnedSlice(),
+            .params = try params.toOwnedSlice(self.allocator),
             .return_type_annotation = return_type,
             .body = body,
         };
@@ -816,34 +951,40 @@ pub const Parser = struct {
 
     fn parse_shape_expression(self: *Parser) ParserError!*AST.ASTNode {
         try self.consume(.LEFT_BRACE);
-        const fields = std.ArrayList(*AST.TypedNamedField).init(self.allocator);
-        while (!self.check(.RIGHT_BRACE) and !self.check(.EOF)) {
-            const field = try self.parse_typed_named_field();
-            try fields.append(field);
+        var fields: std.ArrayList(*AST.TypedNamedField) = .empty;
+        if (!self.check(.RIGHT_BRACE)) {
+            while (true) {
+                const field = try self.parse_typed_named_field();
+                try fields.append(self.allocator, field);
+                if (self.check(.RIGHT_BRACE)) {
+                    break;
+                }
+                try self.consume(.COMMA);
+            }
         }
         try self.consume(.RIGHT_BRACE);
         const shape_expr = try self.allocator.create(AST.ShapeExpr);
-        shape_expr.* = .{ .fields = try fields.toOwnedSlice() };
+        shape_expr.* = .{ .fields = try fields.toOwnedSlice(self.allocator) };
         const node = try self.allocator.create(AST.ASTNode);
         node.* = .{ .shape_expr = shape_expr };
         return node;
     }
 
-    fn parse_type_declaration(self: *Parser) ParserError!*AST.ASTNode {
+    fn parse_type_declaration(self: *Parser, is_pub: bool) ParserError!*AST.ASTNode {
         try self.consume(.IDENTIFIER);
         const name = self.previous;
         try self.consume(.EQUAL);
         if (self.check(.LEFT_BRACE)) {
             const shape_expr = try self.parse_shape_expression();
             const type_decl = try self.allocator.create(AST.TypeDecl);
-            type_decl.* = .{ .name = name, .shape_expr = shape_expr };
+            type_decl.* = .{ .modifier_pub = is_pub, .name = name, .type_annotation = shape_expr };
             const node = try self.allocator.create(AST.ASTNode);
             node.* = .{ .type_decl = type_decl };
             return node;
         } else {
             const type_expr = try self.parse_type_expression();
             const type_decl = try self.allocator.create(AST.TypeDecl);
-            type_decl.* = .{ .name = name, .type_annotation = type_expr };
+            type_decl.* = .{ .modifier_pub = is_pub, .name = name, .type_annotation = type_expr };
             const node = try self.allocator.create(AST.ASTNode);
             node.* = .{ .type_decl = type_decl };
             return node;
@@ -851,13 +992,14 @@ pub const Parser = struct {
         return ParserError.UnexpectedToken;
     }
 
-    fn parse_impl_declaration(self: *Parser) ParserError!*AST.ASTNode {
+    fn parse_impl_declaration(self: *Parser, is_pub: bool) ParserError!*AST.ASTNode {
+        _ = is_pub;
         try self.consume(.IDENTIFIER);
         const name = self.previous;
         var is_static = false;
         var is_coroutine = false;
         try self.consume(.LEFT_BRACE);
-        const methods = std.ArrayList(*AST.ASTNode).init(self.allocator);
+        var methods: std.ArrayList(*AST.ASTNode) = .empty;
 
         while (!self.check(.RIGHT_BRACE) and !self.check(.EOF)) {
             if (self.check(.STATIC)) {
@@ -866,20 +1008,20 @@ pub const Parser = struct {
             } else {
                 is_static = false;
             }
-            if (self.check(.COROUTINE)) {
-                try self.consume(.COROUTINE);
+            if (self.check(.CO)) {
+                try self.consume(.CO);
                 is_coroutine = true;
             } else {
                 is_coroutine = false;
             }
             try self.consume(.FN);
             const fn_decl = try self.parse_function_declaration(false, is_static, is_coroutine);
-            try methods.append(fn_decl);
+            try methods.append(self.allocator, fn_decl);
         }
         try self.consume(.RIGHT_BRACE);
 
         const impl_decl = try self.allocator.create(AST.ImplDecl);
-        impl_decl.* = .{ .name = name, .methods = try methods.toOwnedSlice() };
+        impl_decl.* = .{ .name = name, .methods = try methods.toOwnedSlice(self.allocator) };
 
         const node = try self.allocator.create(AST.ASTNode);
         node.* = .{ .impl_decl = impl_decl };
@@ -919,7 +1061,7 @@ pub const Parser = struct {
         try self.consume(.RIGHT_PAREN);
         const then_branch = try self.parse_statement();
 
-        var else_branch: *AST.ASTNode = null;
+        var else_branch: ?*AST.ASTNode = null;
         if (self.check(.ELSE)) {
             try self.consume(.ELSE);
             else_branch = try self.parse_statement();
@@ -990,16 +1132,16 @@ pub const Parser = struct {
     }
 
     fn parse_block_statement(self: *Parser) ParserError!*AST.ASTNode {
-        var statements = std.ArrayList(*AST.ASTNode).init(self.allocator);
+        var statements: std.ArrayList(*AST.ASTNode) = .empty;
         while (!self.check(.RIGHT_BRACE) and !self.check(.EOF)) {
             const stmt = try self.parse_declaration();
-            try statements.append(stmt);
+            try statements.append(self.allocator, stmt);
         }
 
         try self.consume(.RIGHT_BRACE);
 
         const block = try self.allocator.create(AST.BlockStmt);
-        block.* = .{ .stmts = try statements.toOwnedSlice() };
+        block.* = .{ .stmts = try statements.toOwnedSlice(self.allocator) };
 
         const node = try self.allocator.create(AST.ASTNode);
         node.* = .{ .block_stmt = block };
@@ -1012,7 +1154,7 @@ pub const Parser = struct {
         try self.consume(.EQUAL_ARROW);
         const stmt = try self.parse_statement();
         const case = try self.allocator.create(MatchCase);
-        case.* = .{ .expr = expr, .stmt = stmt };
+        case.* = .{ .pattern = expr, .stmts = stmt };
         return case;
     }
 
@@ -1021,16 +1163,16 @@ pub const Parser = struct {
         const expr = try self.parse_expression();
         try self.consume(.RIGHT_PAREN);
         try self.consume(.LEFT_BRACE);
-        const cases = std.ArrayList(*MatchCase).init(self.allocator);
+        var cases: std.ArrayList(*MatchCase) = .empty;
         while (!self.check(.RIGHT_BRACE) and !self.check(.EOF)) {
             const case = try self.parse_match_case();
-            try cases.append(case);
+            try cases.append(self.allocator, case);
             if (!self.check(.RIGHT_BRACE)) try self.consume(.COMMA);
         }
         try self.consume(.RIGHT_BRACE);
 
         const match_expr = try self.allocator.create(AST.MatchExpr);
-        match_expr.* = .{ .expr = expr, .cases = cases };
+        match_expr.* = .{ .expr = expr, .cases = try cases.toOwnedSlice(self.allocator) };
 
         const node = try self.allocator.create(AST.ASTNode);
         node.* = .{ .match_expr = match_expr };
@@ -1068,11 +1210,11 @@ pub const Parser = struct {
         const token = self.previous;
 
         try self.consume(.LEFT_BRACE);
-        var variants = std.ArrayList(Token).init(self.allocator);
+        var variants: std.ArrayList(Token) = .empty;
         while (true) {
             try self.consume(.IDENTIFIER);
             const variant = self.previous;
-            try variants.append(variant);
+            try variants.append(self.allocator, variant);
             if (self.check(.RIGHT_BRACE)) {
                 break;
             }
@@ -1080,7 +1222,7 @@ pub const Parser = struct {
         }
 
         const error_decl = try self.allocator.create(AST.ErrorDecl);
-        error_decl.* = .{ .name = token, .variants = variants.toOwnedSlice(), .modifier_pub = is_pub };
+        error_decl.* = .{ .name = token, .variants = try variants.toOwnedSlice(self.allocator), .modifier_pub = is_pub };
         const node = try self.allocator.create(AST.ASTNode);
         node.* = .{ .error_decl = error_decl };
         return node;
@@ -1091,11 +1233,11 @@ pub const Parser = struct {
         const token = self.previous;
 
         try self.consume(.LEFT_BRACE);
-        var variants = std.ArrayList(Token).init(self.allocator);
+        var variants: std.ArrayList(Token) = .empty;
         while (true) {
             try self.consume(.IDENTIFIER);
             const variant = self.previous;
-            try variants.append(variant);
+            try variants.append(self.allocator, variant);
             if (self.check(.RIGHT_BRACE)) {
                 break;
             }
@@ -1103,7 +1245,7 @@ pub const Parser = struct {
         }
 
         const enum_decl = try self.allocator.create(AST.EnumDecl);
-        enum_decl.* = .{ .name = token, .variants = variants.toOwnedSlice(), .modifier_pub = is_pub };
+        enum_decl.* = .{ .name = token, .variants = try variants.toOwnedSlice(self.allocator), .modifier_pub = is_pub };
         const node = try self.allocator.create(AST.ASTNode);
         node.* = .{ .enum_decl = enum_decl };
         return node;
@@ -1111,11 +1253,12 @@ pub const Parser = struct {
 
     fn parse_struct_declaration(self: *Parser, is_pub: bool) ParserError!*AST.ASTNode {
         try self.consume(.IDENTIFIER);
+        const name = self.previous;
         try self.consume(.LEFT_BRACE);
-        var fields = std.ArrayList(*AST.ASTNode).init(self.allocator);
+        var fields: std.ArrayList(*AST.TypedNamedField) = .empty;
         while (true) {
             const field = try self.parse_typed_named_field();
-            try fields.append(field);
+            try fields.append(self.allocator, field);
             if (self.check(.RIGHT_BRACE)) {
                 break;
             }
@@ -1125,7 +1268,8 @@ pub const Parser = struct {
         const struct_decl = try self.allocator.create(AST.StructDecl);
         struct_decl.* = .{
             .modifier_pub = is_pub,
-            .fields = try fields.toOwnedSlice(),
+            .name = name,
+            .fields = try fields.toOwnedSlice(self.allocator),
         };
         const node = try self.allocator.create(AST.ASTNode);
         node.* = .{
@@ -1135,7 +1279,7 @@ pub const Parser = struct {
     }
 
     fn parse_use_statement(self: *Parser) ParserError!*AST.ASTNode {
-        var items = std.ArrayList(AST.ImportItem).init(self.allocator);
+        var items: std.ArrayList(AST.ImportItem) = .empty;
 
         while (true) {
             try self.consume(.IDENTIFIER);
@@ -1147,7 +1291,7 @@ pub const Parser = struct {
                 alias = self.previous;
             }
 
-            try items.append(AST.ImportItem{ .name = name, .alias = alias });
+            try items.append(self.allocator, AST.ImportItem{ .name = name, .alias = alias });
 
             if (try self.match(.FROM)) break;
             try self.consume(.COMMA);
@@ -1158,7 +1302,7 @@ pub const Parser = struct {
         try self.consume(.SEMICOLON);
 
         const use_decl = try self.allocator.create(AST.UseDecl);
-        use_decl.* = .{ .items = try items.toOwnedSlice(), .module = module };
+        use_decl.* = .{ .items = try items.toOwnedSlice(self.allocator), .module = module };
 
         const node = try self.allocator.create(AST.ASTNode);
         node.* = .{ .use_decl = use_decl };
@@ -1169,10 +1313,74 @@ pub const Parser = struct {
         return try self.parse_assignment();
     }
 
+    fn is_table_literal_lookahead(self: *Parser) bool {
+        var idx = self.scanner.current;
+        // Skip whitespace and comments
+        while (idx < self.scanner.source.len) {
+            const c = self.scanner.source[idx];
+            if (c == ' ' or c == '\t' or c == '\r' or c == '\n') {
+                idx += 1;
+            } else if (c == '/' and idx + 1 < self.scanner.source.len and self.scanner.source[idx + 1] == '/') {
+                // Skip comment
+                idx += 2;
+                while (idx < self.scanner.source.len and self.scanner.source[idx] != '\n') {
+                    idx += 1;
+                }
+            } else {
+                break;
+            }
+        }
+        if (idx >= self.scanner.source.len) return false;
+        
+        const quote = self.scanner.source[idx];
+        if (quote != '"' and quote != '\'') return false;
+        idx += 1;
+        
+        // Find matching quote
+        var escaped = false;
+        while (idx < self.scanner.source.len) {
+            if (idx >= self.scanner.source.len) break;
+            const c = self.scanner.source[idx];
+            if (escaped) {
+                escaped = false;
+            } else if (c == '\\') {
+                escaped = true;
+            } else if (c == quote) {
+                idx += 1;
+                break;
+            }
+            idx += 1;
+        }
+        
+        // Skip whitespace and comments again
+        while (idx < self.scanner.source.len) {
+            const c = self.scanner.source[idx];
+            if (c == ' ' or c == '\t' or c == '\r' or c == '\n') {
+                idx += 1;
+            } else if (c == '/' and idx + 1 < self.scanner.source.len and self.scanner.source[idx + 1] == '/') {
+                idx += 2;
+                while (idx < self.scanner.source.len and self.scanner.source[idx] != '\n') {
+                    idx += 1;
+                }
+            } else {
+                break;
+            }
+        }
+        
+        if (idx < self.scanner.source.len and self.scanner.source[idx] == ':') {
+            return true;
+        }
+        return false;
+    }
+
     fn parse_statement(self: *Parser) ParserError!*AST.ASTNode {
         if (try self.match(.IF)) {
             return try self.parse_if_statement();
-        } else if (try self.match(.LEFT_BRACE)) {
+        } else if (self.check(.LEFT_BRACE)) {
+            if (self.is_table_literal_lookahead()) {
+                return try self.parse_expression_statement();
+            }
+            try self.advance();
             return try self.parse_block_statement();
         } else if (try self.match(.FOR)) {
             return try self.parse_for_statement();
@@ -1180,6 +1388,8 @@ pub const Parser = struct {
             return try self.parse_while_statement();
         } else if (try self.match(.RETURN)) {
             return try self.parse_return_statement();
+        } else if (try self.match(.YIELD)) {
+            return try self.parse_yield_statement();
         } else if (try self.match(.USE)) {
             return try self.parse_use_statement();
         } else if (try self.match(.GIVE)) {
@@ -1208,7 +1418,7 @@ pub const Parser = struct {
         if (try self.match(.VAR)) {
             return try self.parse_var_declaration(is_pub);
         } else if (try self.match(.FN)) {
-            return try self.parse_function_declaration(is_pub, is_coroutine);
+            return try self.parse_function_declaration(is_pub, false, is_coroutine);
         } else if (try self.match(.STRUCT)) {
             return try self.parse_struct_declaration(is_pub);
         } else if (try self.match(.TYPE)) {
@@ -1225,7 +1435,7 @@ pub const Parser = struct {
         }
     }
 
-    fn parse(self: *Parser) ParserError!*AST.ASTNode {
+    pub fn parse(self: *Parser) ParserError!*AST.ASTNode {
         return try self.parse_declaration();
     }
 };
