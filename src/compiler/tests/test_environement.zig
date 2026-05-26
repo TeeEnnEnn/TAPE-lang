@@ -37,7 +37,7 @@ test "Environment - fails for non existent name" {
     defer env.deinit();
 
     const result = env.lookup("y");
-    try std.testing.expectError(error.UndefinedName, result);
+    try std.testing.expectError(error.UndefinedSymbol, result);
 }
 
 test "Environment - correctly gets name from parent environment" {

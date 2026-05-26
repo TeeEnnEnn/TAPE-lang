@@ -3,7 +3,7 @@ const TypeId = @import("ast.zig").TypeId;
 
 pub const EnvironmentError = error{
     DuplicateDefinition,
-    UndefinedName,
+    UndefinedSymbol,
 } || std.mem.Allocator.Error;
 
 pub const Environment = struct {
@@ -39,6 +39,6 @@ pub const Environment = struct {
             }
             curr = env.parent;
         }
-        return EnvironmentError.UndefinedName;
+        return EnvironmentError.UndefinedSymbol;
     }
 };

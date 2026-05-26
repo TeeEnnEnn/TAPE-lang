@@ -1,0 +1,608 @@
+const std = @import("std");
+const AST = @import("ast.zig");
+const TypeRegistry = @import("type_registry.zig");
+const PrimitiveType = TypeRegistry.PrimitiveType;
+const Environment = @import("environment.zig").Environment;
+const EnvironmentError = @import("environment.zig").EnvironmentError;
+const TypeRegistryError = TypeRegistry.TypeRegistryError;
+const ShapeField = TypeRegistry.ShapeField;
+
+pub const TypeCheckerError = error{
+    TypeMismatch,
+    UndefinedSymbol,
+    DuplicateSymbol,
+    NotCallable,
+    InvalidArgumentCount,
+    NonBooleanCondition,
+    InvalidMemberAccess,
+    MissingReturn,
+    ImmutableAssignment,
+    NonExhaustiveMatch,
+    InvalidOperation,
+} || EnvironmentError || TypeRegistryError || std.mem.Allocator.Error;
+
+pub const TypeChecker = struct {
+    allocator: std.mem.Allocator,
+    registry: *TypeRegistry.TypeRegistry,
+    environment: *Environment,
+
+    expected_return_type: ?AST.TypeId = null,
+    expected_give_type: ?AST.TypeId = null,
+    expected_yield_type: ?AST.TypeId = null,
+
+    pub fn init(allocator: std.mem.Allocator, registry: *TypeRegistry.TypeRegistry, global_environment: *Environment) TypeChecker {
+        return .{ .allocator = allocator, .registry = registry, .environment = global_environment };
+    }
+
+    pub fn hoist(self: *TypeChecker, node: *AST.ASTNode) TypeCheckerError!void {
+        switch (node.*) {
+            .fn_decl => |decl| {
+                var param_types = std.ArrayList(AST.TypeId).init(self.allocator);
+                defer param_types.deinit();
+
+                for (decl.params) |param| {
+                    const param_id = try self.check_expression(param.type_annotation);
+                    try param_types.append(param_id);
+                }
+
+                const return_id = try self.registry.resolve(decl.return_type_annotation);
+
+                const fn_id = try self.registry.add_function_type(param_types.items, return_id);
+                try self.environment.define(decl.name.lexeme, fn_id);
+            },
+            .struct_decl => |decl| {
+                var field_types = std.ArrayList(ShapeField).init(self.allocator);
+                defer field_types.deinit();
+
+                for (decl.fields) |field| {
+                    const field_type = try self.registry.resolve(field.type_annotation);
+                    try field_types.append(.{ .name = field.name.lexeme, .type = field_type });
+                }
+
+                // Register shape type under the struct name
+                const shape_id = try self.registry.add_shape_type(field_types.items);
+                try self.environment.define(decl.name.lexeme, shape_id);
+            },
+            .type_decl => |decl| {
+                const type_id = try self.registry.resolve(decl.type_annotation);
+                try self.environment.define(decl.name.lexeme, type_id);
+            },
+            .enum_decl => |decl| {
+                const enum_id = try self.registry.add_identifier_type(decl.name.lexeme, null);
+                try self.environment.define(decl.name.lexeme, enum_id);
+            },
+            .error_decl => |decl| {
+                const error_id = try self.registry.add_identifier_type(decl.name.lexeme, null);
+                try self.environment.define(decl.name.lexeme, error_id);
+            },
+            .impl_decl => |decl| {
+                // a struct's impl block must be called after the struct
+                self.environment.lookup(decl.name.lexeme) catch {
+                    return TypeCheckerError.UndefinedSymbol;
+                };
+                // TODO: update the struct's shape with the new functions
+
+            },
+        }
+    }
+
+    pub fn check(self: *TypeChecker, node: *AST.ASTNode) TypeCheckerError!void {
+        switch (node.*) {
+            .var_decl => |decl| {
+                const expr_type = try self.check_expression(decl.initializer);
+                var target_type = expr_type;
+
+                if (decl.type_annotation) |annotated| {
+                    target_type = try self.registry.resolve(annotated);
+                    if (!try self.is_compatible(expr_type, target_type)) {
+                        return TypeCheckerError.TypeMismatch;
+                    }
+                }
+                try self.environment.define(decl.name.lexeme, target_type);
+            },
+            .fn_decl => |decl| {
+                const fn_id = self.environment.lookup(decl.name.lexeme) catch {
+                    return TypeCheckerError.UndefinedSymbol;
+                };
+
+                const type_info = self.registry.getTypeInfo(fn_id);
+
+                // Track expected return type
+                const prev_return = self.expected_return_type;
+                self.expected_return_type = type_info.function.ret;
+                defer self.expected_return_type = prev_return;
+
+                // Push function scope
+                var local_env = Environment.init(self.allocator, self.environment);
+                defer local_env.deinit();
+                const prev_env = self.environment;
+                self.environment = &local_env;
+                defer self.environment = prev_env;
+
+                // Define params locally
+                for (decl.params, type_info.function.args) |param, param_id| {
+                    try self.environment.define(param.name.lexeme, param_id);
+                }
+
+                try self.check(decl.body);
+            },
+            .type_decl => {},
+            .struct_decl => {},
+            .enum_decl => {},
+            .error_decl => {},
+            .impl_decl => |decl| {
+                for (decl.methods) |method| {
+                    try self.check(method);
+                }
+            },
+            .use_decl => {
+                // TODO: compilation of imported script
+            },
+            .block_stmt => |stmt| {
+                var local_env = Environment.init(self.allocator, self.environment);
+                defer local_env.deinit();
+
+                const prev_env = self.environment;
+                self.environment = &local_env;
+                defer self.environment = prev_env;
+                for (stmt.stmts) |child| {
+                    try self.check(child);
+                }
+            },
+            .return_stmt => |stmt| {
+                var provided_type = @intFromEnum(PrimitiveType.Nil);
+                if (stmt.expr) |v| {
+                    provided_type = try self.check_expression(v);
+                }
+
+                if (self.expected_return_type) |expected_type| {
+                    if (!try self.is_compatible(expected_type, provided_type)) {
+                        return TypeCheckerError.TypeMismatch;
+                    }
+                } else {
+                    return TypeCheckerError.InvalidOperation; // Return outside of function
+                }
+            },
+            .yield_stmt => |stmt| {
+                var provided_type = @intFromEnum(PrimitiveType.Nil);
+                if (stmt.expr) |v| {
+                    provided_type = try self.check_expression(v);
+                }
+
+                if (self.expected_yield_type) |expected_type| {
+                    if (!try self.is_compatible(expected_type, provided_type)) {
+                        return TypeCheckerError.TypeMismatch;
+                    }
+                } else {
+                    return TypeCheckerError.InvalidOperation; // Yield outside of coroutine
+                }
+            },
+            .give_stmt => |stmt| {
+                var provided_type = @intFromEnum(PrimitiveType.Nil);
+                if (stmt.expr) |v| {
+                    provided_type = try self.check_expression(v);
+                }
+
+                if (self.expected_give_type) |expected_type| {
+                    if (!try self.is_compatible(expected_type, provided_type)) {
+                        return TypeCheckerError.TypeMismatch;
+                    }
+                } else {
+                    return TypeCheckerError.InvalidOperation; // give outside of match
+                }
+            },
+            .while_stmt => |stmt| {
+                const condition_type = try self.check_expression(stmt.condition);
+                if (condition_type != @intFromEnum(PrimitiveType.Bool)) {
+                    return TypeCheckerError.TypeMismatch;
+                }
+                try self.check(stmt.body);
+            },
+            .for_stmt => |stmt| {
+                _ = stmt;
+            },
+            .if_stmt => |stmt| {
+                const condition_type = try self.check_expression(stmt.condition);
+                if (condition_type != @intFromEnum(PrimitiveType.Bool)) {
+                    return TypeCheckerError.NonBooleanCondition;
+                }
+                try self.check(stmt.then_branch);
+                if (stmt.else_branch) |else_branch| {
+                    try self.check(else_branch);
+                }
+            },
+            .expr_stmt => |stmt| {
+                try self.check_expression(stmt.expr);
+            },
+            .panic_stmt => |stmt| {
+                try self.check_expression(stmt.expr);
+            },
+            else => {},
+        }
+    }
+
+    fn check_expression(self: *TypeChecker, node: *AST.ASTNode) TypeCheckerError!AST.TypeId {
+        return switch (node.*) {
+            .assign_expr => |expr| {
+                const right_type = try self.check_expression(expr.right);
+
+                // if assigning to a variable
+                if (expr.left.* == .identifier_expr or expr.left.* == .instance_member_expr) {
+                    const left_type = try self.check_expression(expr.left);
+                    if (!try self.is_compatible(left_type, right_type)) {
+                        return TypeCheckerError.TypeMismatch;
+                    }
+                    expr.resolved_type = right_type;
+                    return right_type;
+                }
+
+                return TypeCheckerError.InvalidOperation; //
+            },
+            .identifier_expr => |expr| {
+                const expr_type = self.environment.lookup(expr.name.lexeme) catch {
+                    return TypeCheckerError.UndefinedSymbol;
+                };
+                expr.resolved_type = expr_type;
+                return expr_type;
+            },
+            .cast_expr => |expr| {
+                const left_type = try self.check_expression(expr.expr);
+                const right_type = try self.registry.resolve(expr.type);
+
+                if (!self.is_compatible(left_type, right_type)) return TypeCheckerError.TypeMismatch;
+                expr.resolved_type = right_type;
+                return right_type;
+            },
+            .unary_expr => |expr| {
+                const token = expr.operator;
+                const expr_type = try self.check_expression(expr.expr);
+                if (std.mem.eql(u8, token.lexeme, "-")) {
+                    if (expr_type == @intFromEnum(PrimitiveType.Float) or expr_type == @intFromEnum(PrimitiveType.Int)) {
+                        expr.resolved_type = expr_type;
+                        return expr_type;
+                    }
+                    return TypeCheckerError.InvalidOperation;
+                }
+                if (std.mem.eql(u8, token.lexeme, "~")) {
+                    if (expr_type == @intFromEnum(PrimitiveType.Int)) {
+                        expr.resolved_type = expr_type;
+                        return expr_type;
+                    }
+                    return TypeCheckerError.InvalidOperation;
+                }
+                if (std.mem.eql(u8, token.lexeme, "not")) {
+                    if (expr_type == @intFromEnum(PrimitiveType.Bool)) {
+                        expr.resolved_type = expr_type;
+                        return expr_type;
+                    }
+                }
+            },
+            .binary_expr => |expr| {
+                const left_type = try self.check_expression(expr.left);
+                const right_type = try self.check_expression(expr.right);
+                const op = expr.operator.lexeme;
+
+                if (std.mem.eql(u8, op, "+") or std.mem.eql(u8, op, "-") or std.mem.eql(u8, op, "*") or std.mem.eql(u8, op, "/") or std.mem.eql(u8, op, "%")) {
+                    const is_int = left_type == @intFromEnum(PrimitiveType.Int) and right_type == @intFromEnum(PrimitiveType.Int);
+                    const is_float = (left_type == @intFromEnum(PrimitiveType.Float) or left_type == @intFromEnum(PrimitiveType.Int)) and
+                        (right_type == @intFromEnum(PrimitiveType.Float) or right_type == @intFromEnum(PrimitiveType.Int));
+
+                    if (is_int) {
+                        expr.resolved_type = @intFromEnum(PrimitiveType.Int);
+                        return expr.resolved_type;
+                    } else if (is_float) {
+                        expr.resolved_type = @intFromEnum(PrimitiveType.Float);
+                        return expr.resolved_type;
+                    }
+                    if (std.mem.eql(u8, op, "+") and left_type == @intFromEnum(PrimitiveType.String) and right_type == @intFromEnum(PrimitiveType.String)) {
+                        expr.resolved_type = @intFromEnum(PrimitiveType.String);
+                        return expr.resolved_type;
+                    }
+                    return TypeCheckerError.InvalidOperation;
+                } else if (std.mem.eql(u8, op, "==") or std.mem.eql(u8, op, "!=") or std.mem.eql(u8, op, "<") or std.mem.eql(u8, op, "<=") or std.mem.eql(u8, op, ">") or std.mem.eql(u8, op, ">=")) {
+                    if (left_type != right_type) return TypeCheckerError.TypeMismatch;
+                    expr.resolved_type = @intFromEnum(PrimitiveType.Bool);
+                    return expr.resolved_type;
+                } else if (std.mem.eql(u8, op, "and") or std.mem.eql(u8, op, "or")) {
+                    if (left_type != @intFromEnum(PrimitiveType.Bool) or right_type != @intFromEnum(PrimitiveType.Bool)) return TypeCheckerError.TypeMismatch;
+                    expr.resolved_type = @intFromEnum(PrimitiveType.Bool);
+                    return expr.resolved_type;
+                }
+                return TypeCheckerError.InvalidOperation;
+            },
+            .call_expr => |expr| {
+                // check if the call target is a callable type. Otherwise error
+                const expr_type = try self.check_expression(expr.expr);
+                const type_info = self.registry.get_type_info(expr_type);
+                switch (type_info) {
+                    .function => |info| {
+                        if (expr.args.len != info.args.len) {
+                            return TypeCheckerError.InvalidArgumentCount;
+                        }
+                        for (expr.args, 0..) |arg, index| {
+                            const arg_type = try self.check_expression(arg);
+                            if (arg_type != info.args[index]) {
+                                return TypeCheckerError.TypeMismatch;
+                            }
+                        }
+                        expr.resolved_type = info.ret;
+                    },
+                    else => {
+                        return TypeCheckerError.InvalidOperation;
+                    },
+                }
+            },
+            .index_expr => |expr| {
+                // check if the index target is an indexable type. Otherwise error
+                const expr_type = try self.check_expression(expr.expr);
+                const index_type = try self.check_expression(expr.index);
+
+                const expr_info = self.registry.get_type_info(expr_type);
+
+                switch (expr_info) {
+                    .array => |arr_info| {
+                        if (index_type != @intFromEnum(PrimitiveType.Int)) {
+                            return TypeCheckerError.TypeMismatch;
+                        }
+                        expr.resolved_type = arr_info;
+                        return arr_info;
+                    },
+                    .table => |tbl_info| {
+                        if (index_type != tbl_info.key) {
+                            return TypeCheckerError.TypeMismatch;
+                        }
+                        expr.resolved_type = tbl_info.value;
+                        return tbl_info.value;
+                    },
+                    .tuple => |tup_info| {
+                        if (index_type != @intFromEnum(PrimitiveType.Int)) {
+                            return TypeCheckerError.TypeMismatch;
+                        }
+                        // TODO: make a union type of the possible tuple value types
+                        return tup_info[0];
+                    },
+                    .primitive => |prim| {
+                        switch (prim) {
+                            .String => {
+                                if (index_type != @intFromEnum(PrimitiveType.Int)) {
+                                    return TypeCheckerError.TypeMismatch;
+                                }
+                                expr.resolved_type = @intFromEnum(PrimitiveType.String);
+                                return @intFromEnum(PrimitiveType.String);
+                            },
+                            else => {
+                                return TypeCheckerError.TypeMismatch;
+                            },
+                        }
+                    },
+                    else => {
+                        return TypeCheckerError.TypeMismatch;
+                    },
+                }
+            },
+            .instance_member_expr => |expr| {
+                const obj_type = try self.check_expression(expr.expr);
+                const type_info = self.registry.getTypeInfo(obj_type);
+
+                if (type_info == .shape) {
+                    for (type_info.shape) |field| {
+                        if (std.mem.eql(u8, field.name, expr.member.lexeme)) {
+                            expr.resolved_type = field.type;
+                            return field.type;
+                        }
+                    }
+                }
+                return TypeCheckerError.InvalidMemberAccess;
+            },
+            .static_member_expr => |expr| {
+                const obj_type = try self.check_expression(expr.expr);
+                const type_info = self.registry.getTypeInfo(obj_type);
+
+                if (type_info == .shape) {
+                    for (type_info.shape) |field| {
+                        if (std.mem.eql(u8, field.name, expr.member.lexeme)) {
+                            expr.resolved_type = field.type;
+                            return field.type;
+                        }
+                    }
+                }
+                return TypeCheckerError.InvalidMemberAccess;
+            },
+            .error_unwrap_expr => |expr| {
+                const expr_type = try self.check_expression(expr.expr);
+                const type_info = self.registry.get_type_info(expr_type);
+                switch (type_info) {
+                    .result => |result| {
+                        expr.resolved_type = result.ok;
+                        return result.ok;
+                    },
+                    else => {
+                        return TypeCheckerError.InvalidOperation;
+                    },
+                }
+            },
+            .array_expr => |expr| {
+                var current_id = null;
+                for (expr.elements) |element| {
+                    if (current_id == null) {
+                        current_id = try self.check_expression(element);
+                        continue;
+                    }
+                    if (!self.is_compatible(current_id, try self.check_expression(element))) {
+                        return TypeCheckerError.TypeMismatch;
+                    }
+                }
+                if (current_id == null) {
+                    current_id = @intFromEnum(PrimitiveType.Nil); // nil
+                }
+                const array_type = try self.registry.add_array_type(current_id);
+                expr.resolved_type = array_type;
+                return array_type;
+            },
+            .shape_expr => |expr| {
+                var field_types = std.ArrayList(ShapeField).init(self.allocator);
+                defer field_types.deinit();
+
+                for (expr.fields) |field| {
+                    const field_type = try self.registry.resolve(field.type_annotation);
+                    try field_types.append(.{ .name = field.name.lexeme, .type = field_type });
+                }
+
+                const shape_type = try self.registry.add_shape_type(field_types.items);
+                expr.resolved_type = shape_type;
+                return shape_type;
+            },
+            .group_expr => |expr| {
+                const expr_type = try self.check_expression(expr.expr);
+                expr.resolved_type = expr_type;
+                return expr_type;
+            },
+            .tuple_expr => |expr| {
+                const inner_types = try std.ArrayList(u32).init(self.allocator);
+                for (expr.exprs) |v| {
+                    const expr_type = try self.check_expression(v);
+                    try inner_types.append(expr_type);
+                }
+                const tuple_type = self.registry.add_tuple_type(inner_types.items);
+                expr.resolved_type = tuple_type;
+                return tuple_type;
+            },
+            .table_expr => |expr| {
+                var key_type: ?AST.TypeId = null;
+                var value_type: ?AST.TypeId = null;
+
+                for (expr.keys) |key| {
+                    const key_type_id = try self.check_expression(key);
+                    if (key_type == null) {
+                        key_type = key_type_id;
+                    } else if (key_type != null) {
+                        if (key_type != key_type_id) {
+                            return TypeCheckerError.TypeMismatch;
+                        }
+                    }
+                }
+
+                for (expr.values) |value| {
+                    const value_type_id = try self.check_expression(value);
+                    if (value_type == null) {
+                        value_type = value_type_id;
+                    } else if (value_type != null) {
+                        if (value_type != value_type_id) {
+                            return TypeCheckerError.TypeMismatch;
+                        }
+                    }
+                }
+
+                if (key_type == null) {
+                    return TypeCheckerError.UnknownType;
+                }
+                if (value_type == null) {
+                    return TypeCheckerError.UnknownType;
+                }
+                const table_type = try self.registry.add_table_type(key_type, value_type);
+                expr.resolved_type = table_type;
+                return table_type;
+            },
+            .new_expr => |expr| {
+                const struct_typeid = self.environment.lookup(expr.struct_name.lexeme) catch {
+                    return TypeCheckerError.UndefinedSymbol;
+                };
+
+                const type_info = self.registry.getTypeInfo(struct_typeid);
+                if (type_info != .shape) return TypeCheckerError.InvalidOperation;
+
+                const shape_fields = type_info.shape;
+                var provided_count: usize = 0;
+
+                for (expr.fields) |provided_field| {
+                    const val_type = try self.check_expression(provided_field.value);
+
+                    var matched = false;
+                    for (shape_fields) |sf| {
+                        if (std.mem.eql(u8, sf.name, provided_field.name.lexeme)) {
+                            if (!try self.is_compatible(sf.type, val_type)) return TypeCheckerError.TypeMismatch;
+                            matched = true;
+                            break;
+                        }
+                    }
+                    if (!matched) return TypeCheckerError.InvalidMemberAccess;
+                    provided_count += 1;
+                }
+
+                if (provided_count != shape_fields.len) return TypeCheckerError.InvalidArgumentCount;
+
+                expr.resolved_type = struct_typeid;
+                return struct_typeid;
+            },
+            .match_expr => |expr| {
+                _ = expr;
+                // expr.cases: []*MatchCase
+                // expr.expr: *ASTNode
+                // expr.resolved_type: u32
+            },
+            .anon_fn_expr => |expr| {
+                var arg_types = std.ArrayList(u32).init(self.allocator);
+                defer arg_types.deinit();
+
+                for (expr.params) |param| {
+                    const param_typeid = try self.registry.resolve(param.type_annotation);
+                    try arg_types.append(param_typeid);
+                }
+                var ret_typeid = @intFromEnum(PrimitiveType.Nil);
+                if (expr.return_type_annotation) |ret_annot| {
+                    ret_typeid = try self.registry.resolve(ret_annot);
+                }
+
+                const function_typeid = try self.registry.add_function_type(try arg_types.toOwnedSlice(), ret_typeid);
+
+                // Typecheck inner body
+                const prev_ret = self.expected_return_type;
+                self.expected_return_type = ret_typeid;
+                defer self.expected_return_type = prev_ret;
+
+                try self.check(expr.body);
+
+                expr.resolved_type = function_typeid;
+                return function_typeid;
+            },
+            .int_lit => |lit| {
+                lit.resolved_type = @intFromEnum(PrimitiveType.Int);
+                return lit.resolved_type;
+            },
+            .float_lit => |lit| {
+                lit.resolved_type = @intFromEnum(PrimitiveType.Float);
+                return lit.resolved_type;
+            },
+            .str_lit => |lit| {
+                lit.resolved_type = @intFromEnum(PrimitiveType.String);
+                return lit.resolved_type;
+            },
+            .bool_lit => |lit| {
+                lit.resolved_type = @intFromEnum(PrimitiveType.Bool);
+                return lit.resolved_type;
+            },
+            .nil_lit => |lit| {
+                lit.resolved_type = @intFromEnum(PrimitiveType.Nil);
+                return lit.resolved_type;
+            },
+            else => {},
+        };
+    }
+
+    fn is_compatible(self: *TypeChecker, target: AST.TypeId, source: AST.TypeId) TypeCheckerError!bool {
+        if (target == source) return true;
+
+        const target_info = self.registry.get_type_info(target);
+        return switch (target_info) {
+            ._union => |u| {
+                // source is compatible if it fits either side of target union
+                return (try self.is_compatible(u.left, source)) or (try self.is_compatible(u.right, source));
+            },
+            .option => |opt| {
+                if (source == @intFromEnum(PrimitiveType.Nil)) return true; // Nil is compatible with Option (None)
+                return try self.is_compatible(opt, source);
+            },
+            else => return false,
+        };
+    }
+};

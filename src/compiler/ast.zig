@@ -141,7 +141,7 @@ pub const FnDecl = struct {
 pub const TypeDecl = struct {
     modifier_pub: bool,
     name: Token,
-    type_annotation: ?*ASTNode,
+    type_annotation: *ASTNode,
 };
 
 /// Struct declaration node.

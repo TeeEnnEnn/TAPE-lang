@@ -7,7 +7,7 @@ pub const scanner = @import("compiler/scanner.zig");
 pub const parser = @import("compiler/parser.zig");
 pub const type_registry = @import("compiler/type_registry.zig");
 pub const environment = @import("compiler/environment.zig");
-
+pub const type_checker = @import("compiler/type_checker.zig");
 
 test {
     _ = @import("compiler/scanner.zig");

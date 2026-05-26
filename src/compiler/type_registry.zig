@@ -19,7 +19,6 @@ pub const PrimitiveType = enum(TypeId) {
     String,
     Bool,
     Never,
-    Buffer,
 };
 
 pub const TypeInfo = union(enum) {
@@ -31,7 +30,7 @@ pub const TypeInfo = union(enum) {
     function: struct { args: []TypeId, ret: TypeId },
     option: TypeId,
     result: struct { ok: TypeId, err: TypeId },
-    union_type: struct { left: TypeId, right: TypeId },
+    _union: struct { left: TypeId, right: TypeId },
     shape: []ShapeField,
     identifier: struct { name: []const u8, generics: ?[]TypeId }, // errors, enums, structs
 };
@@ -52,7 +51,6 @@ pub const TypeRegistry = struct {
         try registry.types.append(allocator, .{ .primitive = .String });
         try registry.types.append(allocator, .{ .primitive = .Bool });
         try registry.types.append(allocator, .{ .primitive = .Never });
-        try registry.types.append(allocator, .{ .primitive = .Buffer });
 
         return registry;
     }
@@ -68,7 +66,6 @@ pub const TypeRegistry = struct {
             .float_type => @intFromEnum(PrimitiveType.Float),
             .string_type => @intFromEnum(PrimitiveType.String),
             .bool_type => @intFromEnum(PrimitiveType.Bool),
-            .buffer_type => @intFromEnum(PrimitiveType.Buffer),
             .never_type => @intFromEnum(PrimitiveType.Never),
 
             .array_type => |array| {
@@ -159,7 +156,7 @@ pub const TypeRegistry = struct {
         };
     }
 
-    fn add_array_type(self: *TypeRegistry, element_type: TypeId) !TypeId {
+    pub fn add_array_type(self: *TypeRegistry, element_type: TypeId) !TypeId {
         // check for existing type
         for (self.types.items, 0..) |info, index| {
             switch (info) {
@@ -178,7 +175,7 @@ pub const TypeRegistry = struct {
         return id;
     }
 
-    fn add_table_type(self: *TypeRegistry, key_type: TypeId, value_type: TypeId) !TypeId {
+    pub fn add_table_type(self: *TypeRegistry, key_type: TypeId, value_type: TypeId) !TypeId {
         for (self.types.items, 0..) |info, index| {
             switch (info) {
                 .table => |t| {
@@ -196,7 +193,7 @@ pub const TypeRegistry = struct {
         return id;
     }
 
-    fn add_tuple_type(self: *TypeRegistry, elements: []TypeId) !TypeId {
+    pub fn add_tuple_type(self: *TypeRegistry, elements: []TypeId) !TypeId {
         for (self.types.items, 0..) |info, index| {
             switch (info) {
                 .tuple => |existing_elements| {
@@ -214,7 +211,7 @@ pub const TypeRegistry = struct {
         return id;
     }
 
-    fn add_function_type(self: *TypeRegistry, args: []TypeId, ret: TypeId) !TypeId {
+    pub fn add_function_type(self: *TypeRegistry, args: []TypeId, ret: TypeId) !TypeId {
         for (self.types.items, 0..) |info, index| {
             switch (info) {
                 .function => |f| {
@@ -232,7 +229,7 @@ pub const TypeRegistry = struct {
         return id;
     }
 
-    fn add_range_type(self: *TypeRegistry, start: TypeId, end: TypeId) !TypeId {
+    pub fn add_range_type(self: *TypeRegistry, start: TypeId, end: TypeId) !TypeId {
         for (self.types.items, 0..) |info, index| {
             switch (info) {
                 .range => |r| {
@@ -250,7 +247,7 @@ pub const TypeRegistry = struct {
         return id;
     }
 
-    fn add_result_type(self: *TypeRegistry, ok_type: TypeId, err_type: TypeId) !TypeId {
+    pub fn add_result_type(self: *TypeRegistry, ok_type: TypeId, err_type: TypeId) !TypeId {
         for (self.types.items, 0..) |info, index| {
             switch (info) {
                 .result => |r| {
@@ -268,7 +265,7 @@ pub const TypeRegistry = struct {
         return id;
     }
 
-    fn add_option_type(self: *TypeRegistry, some_type: TypeId) !TypeId {
+    pub fn add_option_type(self: *TypeRegistry, some_type: TypeId) !TypeId {
         for (self.types.items, 0..) |info, index| {
             switch (info) {
                 .option => |existing_some_type| {
@@ -286,7 +283,7 @@ pub const TypeRegistry = struct {
         return id;
     }
 
-    fn add_identifier_type(self: *TypeRegistry, name: []const u8, generics: ?[]TypeId) !TypeId {
+    pub fn add_identifier_type(self: *TypeRegistry, name: []const u8, generics: ?[]TypeId) !TypeId {
         for (self.types.items, 0..) |info, index| {
             switch (info) {
                 .identifier => |id_info| {
@@ -310,10 +307,10 @@ pub const TypeRegistry = struct {
         return id;
     }
 
-    fn add_union_type(self: *TypeRegistry, left_id: TypeId, right_id: TypeId) !TypeId {
+    pub fn add_union_type(self: *TypeRegistry, left_id: TypeId, right_id: TypeId) !TypeId {
         for (self.types.items, 0..) |info, index| {
             switch (info) {
-                .union_type => |u| {
+                ._union => |u| {
                     if (u.left == left_id and u.right == right_id) {
                         return @as(TypeId, @intCast(index));
                     }
@@ -324,11 +321,11 @@ pub const TypeRegistry = struct {
 
         // add new type
         const id = @as(TypeId, @intCast(self.types.items.len));
-        try self.types.append(self.allocator, .{ .union_type = .{ .left = left_id, .right = right_id } });
+        try self.types.append(self.allocator, .{ ._union = .{ .left = left_id, .right = right_id } });
         return id;
     }
 
-    fn add_shape_type(self: *TypeRegistry, fields: []ShapeField) !TypeId {
+    pub fn add_shape_type(self: *TypeRegistry, fields: []ShapeField) !TypeId {
         for (self.types.items, 0..) |info, index| {
             switch (info) {
                 .shape => |existing_fields| {
@@ -353,7 +350,7 @@ pub const TypeRegistry = struct {
         return id;
     }
 
-    pub fn getTypeInfo(self: *TypeRegistry, id: TypeId) TypeInfo {
+    pub fn get_type_info(self: *TypeRegistry, id: TypeId) TypeInfo {
         return self.types.items[id];
     }
 };
