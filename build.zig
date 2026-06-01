@@ -21,6 +21,13 @@ pub fn build(b: *std.Build) void {
     // target and optimize options) will be listed when running `zig build --help`
     // in this directory.
 
+    const version_option: []const u8 = b.option([]const u8, "version", "TAPE version string.") orelse "dev";
+
+    const options = b.addOptions();
+    options.addOption([]const u8, "version", version_option);
+
+    const options_module = options.createModule();
+
     // This creates a module, which represents a collection of source files alongside
     // some compilation options, such as optimization mode and linked system libraries.
     // Zig modules are the preferred way of making Zig code available to consumers.
@@ -39,6 +46,9 @@ pub fn build(b: *std.Build) void {
         // Later on we'll use this module as the root module of a test executable
         // which requires us to specify a target.
         .target = target,
+        .imports = &.{
+            .{ .name = "TAPE_lang_build_options", .module = options_module },
+        },
     });
 
     // Here we define an executable. An executable needs to have a root module
@@ -79,6 +89,7 @@ pub fn build(b: *std.Build) void {
                 // can be extremely useful in case of collisions (which can happen
                 // importing modules from different packages).
                 .{ .name = "TAPE_lang", .module = mod },
+                .{ .name = "TAPE_lang_build_options", .module = options_module },
             },
         }),
     });

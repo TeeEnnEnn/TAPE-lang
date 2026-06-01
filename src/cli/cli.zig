@@ -1,4 +1,5 @@
 const std = @import("std");
+const options = @import("TAPE_lang_build_options");
 
 /// Errors that can occur when running TAPE in REPL mode.
 const TapeReplError = error{
@@ -119,9 +120,8 @@ pub fn run_check(io: std.Io, parsed_args: [][]const u8) anyerror!void {
 pub fn get_version(io: std.Io, parsed_args: [][]const u8) anyerror!void {
     _ = parsed_args;
     const stdout = std.Io.File.stdout();
-    const stdin = std.Io.File.stdin();
-    _ = stdin;
-    try stdout.writeStreamingAll(io, "Get the version of TAPE.");
+    const version = options.version;
+    try stdout.writeStreamingAll(io, version);
 }
 
 pub fn init_project(io: std.Io, parsed_args: [][]const u8) anyerror!void {
@@ -178,7 +178,7 @@ pub fn get_help(io: std.Io, parsed_args: [][]const u8) anyerror!void {
             args_printed += 1;
         }
         if (args_printed == 0) {
-            try stdout.writeStreamingAll(io, "<nil>");
+            try stdout.writeStreamingAll(io, "<none>");
         }
         if (args_printed < longest_command_args) {
             for (0..(longest_command_args - args_printed)) |_| {
