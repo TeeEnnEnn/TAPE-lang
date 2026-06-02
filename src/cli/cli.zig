@@ -1,5 +1,6 @@
 const std = @import("std");
 const options = @import("TAPE_lang_build_options");
+const create_tape_project = @import("helpers.zig").create_tape_project;
 
 /// Errors that can occur when running TAPE in REPL mode.
 const TapeReplError = error{
@@ -45,7 +46,7 @@ const Command = struct {
     /// The description of the command.
     description: []const u8,
     /// The handler function for the command.
-    handler: *const fn (io: std.Io, [][]const u8) anyerror!void,
+    handler: *const fn (io: std.Io, [][]const u8, allocator: std.mem.Allocator) anyerror!void,
     /// The options of the command. The arguments needed to execute the command.
     options: []const CommandOption,
 };
@@ -89,53 +90,55 @@ const commands: []const Command = &[_]Command{
     },
 };
 
-pub fn run_repl(io: std.Io, parsed_args: [][]const u8) anyerror!void {
+pub fn run_repl(io: std.Io, parsed_args: [][]const u8, allocator: std.mem.Allocator) anyerror!void {
     _ = parsed_args;
     const stdout = std.Io.File.stdout();
-    const stdin = std.Io.File.stdin();
-    _ = stdin;
+    _ = allocator;
     try stdout.writeStreamingAll(io, "This is the TAPE REPL. Type 'exit' to quit.");
 }
 
-pub fn run_file(io: std.Io, parsed_args: [][]const u8) anyerror!void {
+pub fn run_file(io: std.Io, parsed_args: [][]const u8, allocator: std.mem.Allocator) anyerror!void {
     const stdout = std.Io.File.stdout();
-    const stdin = std.Io.File.stdin();
-    _ = stdin;
+    _ = allocator;
     try stdout.writeStreamingAll(io, "Run a file");
     for (parsed_args) |arg| {
         try stdout.writeStreamingAll(io, arg);
     }
 }
 
-pub fn run_check(io: std.Io, parsed_args: [][]const u8) anyerror!void {
+pub fn run_check(io: std.Io, parsed_args: [][]const u8, allocator: std.mem.Allocator) anyerror!void {
     const stdout = std.Io.File.stdout();
-    const stdin = std.Io.File.stdin();
-    _ = stdin;
+    _ = allocator;
     try stdout.writeStreamingAll(io, "Run the parser and type checker.");
     for (parsed_args) |arg| {
         try stdout.writeStreamingAll(io, arg);
     }
 }
 
-pub fn get_version(io: std.Io, parsed_args: [][]const u8) anyerror!void {
+pub fn get_version(io: std.Io, parsed_args: [][]const u8, allocator: std.mem.Allocator) anyerror!void {
     _ = parsed_args;
+    _ = allocator;
     const stdout = std.Io.File.stdout();
     const version = options.version;
     try stdout.writeStreamingAll(io, version);
 }
 
-pub fn init_project(io: std.Io, parsed_args: [][]const u8) anyerror!void {
+pub fn init_project(io: std.Io, parsed_args: [][]const u8, allocator: std.mem.Allocator) anyerror!void {
     const stdout = std.Io.File.stdout();
-    const stdin = std.Io.File.stdin();
-    _ = stdin;
-    try stdout.writeStreamingAll(io, "Init a new TAPE project.");
-    for (parsed_args) |arg| {
-        try stdout.writeStreamingAll(io, arg);
+    var new_project_name: []const u8 = "tape_project";
+    if (parsed_args.len > 0) {
+        new_project_name = parsed_args[0];
     }
+    create_tape_project(io, allocator, new_project_name) catch {
+        try stdout.writeStreamingAll(io, "Failed to initialize TAPE project.\n");
+        return;
+    };
+    try stdout.writeStreamingAll(io, "Initialized a new TAPE project.");
 }
 
-pub fn get_help(io: std.Io, parsed_args: [][]const u8) anyerror!void {
+pub fn get_help(io: std.Io, parsed_args: [][]const u8, allocator: std.mem.Allocator) anyerror!void {
     _ = parsed_args;
+    _ = allocator;
     const stdout = std.Io.File.stdout();
 
     try stdout.writeStreamingAll(io, "Usage: TAPE <command> [args]\n\n");
@@ -213,7 +216,7 @@ pub fn cli_main(args: []const []const u8, allocator: std.mem.Allocator, io: std.
     var parsed_args: std.ArrayList([]const u8) = .empty;
     defer parsed_args.deinit(allocator);
     if (args.len == 1) {
-        return try run_repl(io, parsed_args.items);
+        return try run_repl(io, parsed_args.items, allocator);
     }
 
     var selected_command: ?Command = null;
@@ -269,7 +272,7 @@ pub fn cli_main(args: []const []const u8, allocator: std.mem.Allocator, io: std.
     }
 
     if (selected_command) |cmd| {
-        try cmd.handler(io, parsed_args.items);
+        try cmd.handler(io, parsed_args.items, allocator);
     } else {
         return CliError.InvalidCommand;
     }
