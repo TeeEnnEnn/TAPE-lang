@@ -82,19 +82,27 @@ pub const TypeChecker = struct {
                 }
 
                 // Register shape type under the struct name
-                const shape_id = try self.registry.add_shape_type(try field_types.toOwnedSlice(self.allocator));
-                try self.environment.define(decl.name.lexeme, shape_id);
+                const struct_id = try self.registry.add_struct_type(decl.name.lexeme, try field_types.toOwnedSlice(self.allocator));
+                try self.environment.define(decl.name.lexeme, struct_id);
             },
             .type_decl => |decl| {
                 const type_id = try self.registry.resolve(decl.type_annotation);
                 try self.environment.define(decl.name.lexeme, type_id);
             },
             .enum_decl => |decl| {
-                const enum_id = try self.registry.add_identifier_type(decl.name.lexeme, null);
+                var variants: std.ArrayList([]const u8) = .empty;
+                for (decl.variants) |variant| {
+                    try variants.append(self.allocator, variant.lexeme);
+                }
+                const enum_id = try self.registry.add_enum_type(decl.name.lexeme, try variants.toOwnedSlice(self.allocator));
                 try self.environment.define(decl.name.lexeme, enum_id);
             },
             .error_decl => |decl| {
-                const error_id = try self.registry.add_identifier_type(decl.name.lexeme, null);
+                var variants: std.ArrayList([]const u8) = .empty;
+                for (decl.variants) |variant| {
+                    try variants.append(self.allocator, variant.lexeme);
+                }
+                const error_id = try self.registry.add_error_type(decl.name.lexeme, try variants.toOwnedSlice(self.allocator));
                 try self.environment.define(decl.name.lexeme, error_id);
             },
             else => {},
@@ -150,11 +158,51 @@ pub const TypeChecker = struct {
 
                 try self.check(decl.body);
             },
-            .type_decl => {},
-            .struct_decl => {},
-            .co_decl => {},
-            .enum_decl => {},
-            .error_decl => {},
+            .type_decl => |decl| {
+                try self.check(decl.type_annotation);
+            },
+            .struct_decl => |decl| {
+                for (decl.fields) |field| {
+                    try self.check(field.type_annotation);
+                }
+                for (decl.methods) |method| {
+                    try self.check(method);
+                }
+            },
+            .co_decl => |decl| {
+                const fn_id = self.environment.lookup(decl.name.lexeme) catch {
+                    return TypeCheckerError.UndefinedSymbol;
+                };
+
+                const type_info = self.registry.get_type_info(fn_id);
+                if (type_info != .coroutine) return TypeCheckerError.NotCallable;
+
+                // Track expected return type
+                const prev_return = self.expected_return_type;
+                self.expected_return_type = type_info.coroutine.ret;
+                defer self.expected_return_type = prev_return;
+
+                // track expected yield type
+                const prev_yield = self.expected_return_type;
+                self.expected_return_type = type_info.coroutine.yield;
+                defer self.expected_return_type = prev_yield;
+
+                // Push function scope
+                var local_env = Environment.init(self.allocator, self.environment);
+                defer local_env.deinit();
+                const prev_env = self.environment;
+                self.environment = &local_env;
+                defer self.environment = prev_env;
+
+                // Define params locally
+                for (decl.params, type_info.coroutine.args) |param, param_id| {
+                    try self.environment.define(param.name.lexeme, param_id);
+                }
+
+                try self.check(decl.body);
+            },
+            .enum_decl => {}, // fully handled in the hoist phase
+            .error_decl => {}, // fully handled in the hoist phase
             .use_decl => {
                 // TODO: compilation of imported script
             },
@@ -296,8 +344,8 @@ pub const TypeChecker = struct {
                 }
             },
             .binary_expr => |expr| {
-                const left_type = try self.check_expression(expr.left);
-                const right_type = try self.check_expression(expr.right);
+                const left_type: AST.TypeId = try self.check_expression(expr.left);
+                const right_type: AST.TypeId = try self.check_expression(expr.right);
                 const op = expr.operator.lexeme;
 
                 if (std.mem.eql(u8, op, "+") or std.mem.eql(u8, op, "-") or std.mem.eql(u8, op, "*") or std.mem.eql(u8, op, "/") or std.mem.eql(u8, op, "%")) {
@@ -324,6 +372,20 @@ pub const TypeChecker = struct {
                 } else if (std.mem.eql(u8, op, "and") or std.mem.eql(u8, op, "or")) {
                     if (left_type != @intFromEnum(PrimitiveType.Bool) or right_type != @intFromEnum(PrimitiveType.Bool)) return TypeCheckerError.TypeMismatch;
                     expr.resolved_type = @intFromEnum(PrimitiveType.Bool);
+                    return expr.resolved_type;
+                } else if (std.mem.eql(u8, op, "++")) { // string concatenation
+                    if (left_type != @intFromEnum(PrimitiveType.String) or right_type != @intFromEnum(PrimitiveType.String)) return TypeCheckerError.TypeMismatch;
+                    expr.resolved_type = @intFromEnum(PrimitiveType.String);
+                    return expr.resolved_type;
+                } else if (std.mem.eql(u8, op, "..")) { // range expression
+                    if (left_type != @intFromEnum(PrimitiveType.Int) or right_type != @intFromEnum(PrimitiveType.Int)) return TypeCheckerError.TypeMismatch;
+                    const range_type = try self.registry.add_range_type(left_type, right_type);
+
+                    expr.resolved_type = range_type;
+                    return expr.resolved_type;
+                } else if (std.mem.eql(u8, op, ">>") or std.mem.eql(u8, op, "<<") or std.mem.eql(u8, op, "|") or std.mem.eql(u8, op, "&") or std.mem.eql(u8, op, "^")) {
+                    if (left_type != @intFromEnum(PrimitiveType.Int) or right_type != @intFromEnum(PrimitiveType.Int)) return TypeCheckerError.TypeMismatch;
+                    expr.resolved_type = @intFromEnum(PrimitiveType.Int);
                     return expr.resolved_type;
                 }
                 return TypeCheckerError.InvalidOperation;
@@ -411,20 +473,35 @@ pub const TypeChecker = struct {
                 const obj_type = try self.check_expression(expr.expr);
                 const type_info = self.registry.get_type_info(obj_type);
 
-                if (type_info == .shape) {
-                    for (type_info.shape) |field| {
-                        if (std.mem.eql(u8, field.name, expr.member.lexeme)) {
-                            expr.resolved_type = field.type;
-                            return field.type;
+                switch (type_info) {
+                    .shape => |shape| {
+                        for (shape) |field| {
+                            if (std.mem.eql(u8, field.name, expr.member.lexeme)) {
+                                expr.resolved_type = field.type;
+                                return field.type;
+                            }
                         }
-                    }
-                } else if (type_info == .tuple) {
-                    const index_value = std.fmt.parseInt(u8, expr.member.lexeme, 10) catch {
+                    },
+                    .tuple => |tuple| {
+                        const index_value = std.fmt.parseInt(u8, expr.member.lexeme, 10) catch {
+                            return TypeCheckerError.InvalidMemberAccess;
+                        };
+                        if (index_value >= tuple.len) return TypeCheckerError.IndexOutOfBounds;
+                        expr.resolved_type = tuple[index_value];
+                        return tuple[index_value];
+                    },
+                    ._struct => |_struct| {
+                        for (_struct.fields) |field| {
+                            if (std.mem.eql(u8, field.name, expr.member.lexeme)) {
+                                expr.resolved_type = field.type;
+                                return field.type;
+                            }
+                        }
                         return TypeCheckerError.InvalidMemberAccess;
-                    };
-                    if (index_value >= type_info.tuple.len) return TypeCheckerError.IndexOutOfBounds;
-                    expr.resolved_type = type_info.tuple[index_value];
-                    return type_info.tuple[index_value];
+                    },
+                    else => {
+                        return TypeCheckerError.InvalidMemberAccess;
+                    },
                 }
                 return TypeCheckerError.InvalidMemberAccess;
             },
@@ -432,13 +509,32 @@ pub const TypeChecker = struct {
                 const obj_type = try self.check_expression(expr.expr);
                 const type_info = self.registry.get_type_info(obj_type);
 
-                if (type_info == .shape) {
-                    for (type_info.shape) |field| {
-                        if (std.mem.eql(u8, field.name, expr.member.lexeme)) {
-                            expr.resolved_type = field.type;
-                            return field.type;
+                switch (type_info) {
+                    .shape => |shape| {
+                        for (shape) |field| {
+                            if (std.mem.eql(u8, field.name, expr.member.lexeme)) {
+                                expr.resolved_type = field.type;
+                                return field.type;
+                            }
                         }
-                    }
+                    },
+                    ._error => |existing_error| {
+                        for (existing_error.variants) |variant| {
+                            if (std.mem.eql(u8, variant, expr.member.lexeme)) {
+                                expr.resolved_type = obj_type;
+                                return obj_type;
+                            }
+                        }
+                    },
+                    ._enum => |existing_enum| {
+                        for (existing_enum.variants) |variant| {
+                            if (std.mem.eql(u8, variant, expr.member.lexeme)) {
+                                expr.resolved_type = obj_type;
+                                return obj_type;
+                            }
+                        }
+                    },
+                    else => {},
                 }
                 return TypeCheckerError.InvalidMemberAccess;
             },
@@ -532,9 +628,9 @@ pub const TypeChecker = struct {
                 };
 
                 const type_info = self.registry.get_type_info(struct_typeid);
-                if (type_info != .shape) return TypeCheckerError.InvalidOperation;
+                if (type_info != ._struct) return TypeCheckerError.InvalidOperation;
 
-                const shape_fields = type_info.shape;
+                const shape_fields = type_info._struct.fields;
                 var provided_count: usize = 0;
 
                 for (expr.fields) |provided_field| {
@@ -632,6 +728,11 @@ pub const TypeChecker = struct {
 
     fn is_compatible(self: *TypeChecker, target: AST.TypeId, source: AST.TypeId) TypeCheckerError!bool {
         if (target == source) return true;
+
+        const source_info = self.registry.get_type_info(source);
+        if (source_info == ._union) {
+            return (try self.is_compatible(target, source_info._union.left)) and (try self.is_compatible(target, source_info._union.right));
+        }
 
         const target_info = self.registry.get_type_info(target);
         return switch (target_info) {

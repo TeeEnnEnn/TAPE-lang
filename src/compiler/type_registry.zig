@@ -10,6 +10,7 @@ pub const ShapeField = struct {
 
 pub const TypeRegistryError = error{
     UnknownType,
+    TypeResolutionConflict,
 } || std.mem.Allocator.Error;
 
 pub const PrimitiveType = enum(TypeId) {
@@ -32,6 +33,10 @@ pub const TypeInfo = union(enum) {
     option: TypeId,
     result: struct { ok: TypeId, err: TypeId },
     _union: struct { left: TypeId, right: TypeId },
+    _error: struct { name: []const u8, variants: [][]const u8 },
+    _enum: struct { name: []const u8, variants: [][]const u8 },
+    _struct: struct { name: []const u8, fields: []ShapeField },
+    _type: struct { name: []const u8, resolved_type: TypeId },
     shape: []ShapeField,
     identifier: struct { name: []const u8, generics: ?[]TypeId }, // errors, enums, structs
 };
@@ -116,17 +121,23 @@ pub const TypeRegistry = struct {
 
             .identifier_type => |identifier| {
                 const name = identifier.name.lexeme;
-                const generics = identifier.generic_args;
+                // const generics = identifier.generic_args;
 
-                if (generics) |args| {
-                    var resolved_generics: std.ArrayList(TypeId) = .empty;
-                    for (args) |arg| {
-                        const arg_id = try self.resolve(arg);
-                        try resolved_generics.append(self.allocator, arg_id);
-                    }
-                    return try self.add_identifier_type(name, try resolved_generics.toOwnedSlice(self.allocator));
+                // if (generics) |args| {
+                //     var resolved_generics: std.ArrayList(TypeId) = .empty;
+                //     for (args) |arg| {
+                //         const arg_id = try self.resolve(arg);
+                //         try resolved_generics.append(self.allocator, arg_id);
+                //     }
+                //     return try self.add_identifier_type(name, try resolved_generics.toOwnedSlice(self.allocator));
+                // }
+                // return try self.add_identifier_type(name, null);
+
+                const existing_type = self.get_named_type(name);
+                if (existing_type) |id| {
+                    return id;
                 }
-                return try self.add_identifier_type(name, null);
+                return TypeRegistryError.UnknownType;
             },
             .union_type => |union_node| {
                 const left_id = try self.resolve(union_node.left);
@@ -333,7 +344,136 @@ pub const TypeRegistry = struct {
         return id;
     }
 
+    pub fn add_type_type(self: *TypeRegistry, name: []const u8, resolved_type: TypeId) !TypeId {
+        for (self.types.items, 0..) |info, index| {
+            switch (info) {
+                ._type => |existing_type| {
+                    if (!std.mem.eql(u8, existing_type.name, name)) continue;
+                    if (existing_type.resolved_type != resolved_type) {
+                        return TypeRegistryError.TypeResolutionConflict; // names are the same but the resolved types differ
+                    }
+                    return @as(TypeId, @intCast(index));
+                },
+                else => continue,
+            }
+        }
+
+        // add new type
+        const id = @as(TypeId, @intCast(self.types.items.len));
+        try self.types.append(self.allocator, .{ ._type = .{ .name = name, .resolved_type = resolved_type } });
+        return id;
+    }
+
+    pub fn add_struct_type(self: *TypeRegistry, name: []const u8, fields: []ShapeField) !TypeId {
+        for (self.types.items, 0..) |info, index| {
+            switch (info) {
+                ._struct => |existing_struct| {
+                    if (!std.mem.eql(u8, existing_struct.name, name)) continue;
+                    if (existing_struct.fields.len != fields.len) {
+                        return TypeRegistryError.TypeResolutionConflict; // names are the same but the number of fields differ
+                    }
+
+                    var match = true;
+                    for (existing_struct.fields, 0..) |ef, i| {
+                        if (!std.mem.eql(u8, ef.name, fields[i].name) or ef.type != fields[i].type) {
+                            match = false;
+                            break;
+                        }
+                    }
+                    if (match) return @as(TypeId, @intCast(index));
+                },
+                else => continue,
+            }
+        }
+
+        // add new type
+        const id = @as(TypeId, @intCast(self.types.items.len));
+        try self.types.append(self.allocator, .{ ._struct = .{ .name = name, .fields = fields } });
+        return id;
+    }
+
+    pub fn add_error_type(self: *TypeRegistry, name: []const u8, variants: [][]const u8) !TypeId {
+        for (self.types.items, 0..) |info, index| {
+            switch (info) {
+                ._error => |existing_error| {
+                    if (!std.mem.eql(u8, existing_error.name, name)) continue;
+                    if (existing_error.variants.len != variants.len) {
+                        return TypeRegistryError.TypeResolutionConflict; // names are the same but the number of variants differ
+                    }
+
+                    var match = true;
+                    for (existing_error.variants, 0..) |ev, i| {
+                        if (!std.mem.eql(u8, ev, variants[i])) {
+                            match = false;
+                            break;
+                        }
+                    }
+                    if (match) return @as(TypeId, @intCast(index));
+                },
+                else => continue,
+            }
+        }
+
+        // add new type
+        const id = @as(TypeId, @intCast(self.types.items.len));
+        try self.types.append(self.allocator, .{ ._error = .{ .name = name, .variants = variants } });
+        return id;
+    }
+
+    pub fn add_enum_type(self: *TypeRegistry, name: []const u8, variants: [][]const u8) !TypeId {
+        for (self.types.items, 0..) |info, index| {
+            switch (info) {
+                ._enum => |existing_enum| {
+                    if (!std.mem.eql(u8, existing_enum.name, name)) continue;
+                    if (existing_enum.variants.len != variants.len) {
+                        return TypeRegistryError.TypeResolutionConflict; // names are the same but the number of variants differ
+                    }
+
+                    var match = true;
+                    for (existing_enum.variants, 0..) |ev, i| {
+                        if (!std.mem.eql(u8, ev, variants[i])) {
+                            match = false;
+                            break;
+                        }
+                    }
+                    if (match) return @as(TypeId, @intCast(index));
+                },
+                else => continue,
+            }
+        }
+
+        // add new type
+        const id = @as(TypeId, @intCast(self.types.items.len));
+        try self.types.append(self.allocator, .{ ._enum = .{ .name = name, .variants = variants } });
+        return id;
+    }
+
     pub fn get_type_info(self: *TypeRegistry, id: TypeId) TypeInfo {
         return self.types.items[id];
+    }
+
+    pub fn get_named_type(self: *TypeRegistry, name: []const u8) ?TypeId {
+        for (self.types.items, 0..) |info, index| {
+            switch (info) {
+                ._enum => |enum_info| {
+                    if (!std.mem.eql(u8, enum_info.name, name)) continue;
+                    return @as(TypeId, @intCast(index));
+                },
+                ._struct => |struct_info| {
+                    if (!std.mem.eql(u8, struct_info.name, name)) continue;
+                    return @as(TypeId, @intCast(index));
+                },
+                ._type => |type_info| {
+                    if (!std.mem.eql(u8, type_info.name, name)) continue;
+                    return @as(TypeId, @intCast(index));
+                },
+                ._error => |error_info| {
+                    if (!std.mem.eql(u8, error_info.name, name)) continue;
+                    return @as(TypeId, @intCast(index));
+                },
+                else => continue,
+            }
+        }
+        return null;
     }
 };
