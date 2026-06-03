@@ -607,6 +607,22 @@ pub const Parser = struct {
         return named_field;
     }
 
+    fn parse_struct_field(self: *Parser, is_public: bool, is_static: bool) ParserError!*AST.TypedNamedStructField {
+        try self.consume(.IDENTIFIER);
+        const token = self.previous;
+        try self.consume(.COLON);
+        const type_ = try self.parse_type_expression();
+        var has_default = false;
+        var default_value: ?*AST.ASTNode = null;
+        if (try self.match(.EQUAL)) {
+            default_value = try self.parse_expression();
+            has_default = true;
+        }
+        const field = try self.allocator.create(AST.TypedNamedStructField);
+        field.* = .{ .name = token, .type_annotation = type_, .default_value = default_value, .has_default = has_default, .is_pub = is_public, .is_static = is_static };
+        return field;
+    }
+
     fn parse_type_expression(self: *Parser) ParserError!*AST.ASTNode {
         var left: *AST.ASTNode = undefined;
 
@@ -1222,36 +1238,43 @@ pub const Parser = struct {
         try self.consume(.IDENTIFIER);
         const name = self.previous;
         try self.consume(.LEFT_BRACE);
-        var fields: std.ArrayList(*AST.TypedNamedField) = .empty;
-        var methods: std.ArrayList(*AST.ASTNode) = .empty;
+        var fields: std.ArrayList(*AST.TypedNamedStructField) = .empty;
+        var methods: std.ArrayList(*AST.StructMethodField) = .empty;
 
         while (!self.check(.RIGHT_BRACE) and !self.check(.EOF)) {
-            if (try self.match(.STATIC)) {
-                if (try self.match(.CO)) {
-                    const method = try self.parse_coroutine_declaration(false, true);
-                    try methods.append(self.allocator, method);
-                } else if (try self.match(.FN)) {
-                    const method = try self.parse_function_declaration(false, true);
-                    try methods.append(self.allocator, method);
-                } else {
-                    return ParserError.UnexpectedToken;
-                }
-                _ = try self.match(.COMMA);
-                continue;
+            var is_static = false;
+            var is_public = false;
+
+            if (try self.match(.PUB)) {
+                is_public = true;
             }
+
+            if (try self.match(.STATIC)) {
+                is_static = true;
+            }
+
+            if (is_public and is_static) {
+                return ParserError.UnexpectedToken; // 'pub static' / 'static pub' is not allowed
+            }
+
             if (try self.match(.CO)) {
-                const method = try self.parse_coroutine_declaration(false, false);
-                try methods.append(self.allocator, method);
+                const method = try self.parse_coroutine_declaration(is_public, is_static);
+                const struct_method = try self.allocator.create(AST.StructMethodField);
+                struct_method.* = .{ .is_static = is_static, .method = method, .is_pub = is_public, .name = method.co_decl.name };
+                try methods.append(self.allocator, struct_method);
                 _ = try self.match(.COMMA);
                 continue;
             }
             if (try self.match(.FN)) {
-                const method = try self.parse_function_declaration(false, false);
-                try methods.append(self.allocator, method);
+                const method = try self.parse_function_declaration(is_public, is_static);
+                const struct_method = try self.allocator.create(AST.StructMethodField);
+                struct_method.* = .{ .is_static = is_static, .method = method, .is_pub = is_public, .name = method.fn_decl.name };
+                try methods.append(self.allocator, struct_method);
                 _ = try self.match(.COMMA);
                 continue;
             }
-            const field = try self.parse_typed_named_field();
+
+            const field = try self.parse_struct_field(is_public, is_static);
             try fields.append(self.allocator, field);
             if (self.check(.RIGHT_BRACE)) {
                 break;

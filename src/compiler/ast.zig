@@ -179,7 +179,12 @@ pub const TypeDecl = struct {
 ///     'methods'
 /// }
 /// ```
-pub const StructDecl = struct { modifier_pub: bool, name: Token, fields: []*TypedNamedField, methods: []*ASTNode };
+pub const StructDecl = struct {
+    modifier_pub: bool,
+    name: Token,
+    fields: []*TypedNamedStructField,
+    methods: []*StructMethodField,
+};
 
 /// Enum declaration node.
 ///
@@ -436,16 +441,6 @@ pub const StaticMemberExpr = struct {
     resolved_type: TypeId = 0,
 };
 
-/// Error unwrap expression node.
-///
-/// ```
-/// expr?
-/// ```
-pub const ErrorUnwrapExpr = struct {
-    expr: *ASTNode,
-    resolved_type: TypeId = 0,
-};
-
 /// Group expression node.
 ///
 /// ```
@@ -535,6 +530,22 @@ pub const AnonFnExpr = struct {
 pub const TypedNamedField = struct {
     name: Token,
     type_annotation: *ASTNode,
+};
+
+pub const TypedNamedStructField = struct {
+    name: Token,
+    type_annotation: *ASTNode,
+    is_static: bool,
+    is_pub: bool,
+    has_default: bool,
+    default_value: ?*ASTNode,
+};
+
+pub const StructMethodField = struct {
+    name: Token,
+    method: *ASTNode,
+    is_static: bool,
+    is_pub: bool,
 };
 
 pub const ImportItem = struct {

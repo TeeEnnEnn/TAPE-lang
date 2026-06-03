@@ -6,6 +6,8 @@ const Environment = @import("environment.zig").Environment;
 const EnvironmentError = @import("environment.zig").EnvironmentError;
 const TypeRegistryError = TypeRegistry.TypeRegistryError;
 const ShapeField = TypeRegistry.ShapeField;
+const StructMethod = TypeRegistry.StructMethod;
+const StructField = TypeRegistry.StructField;
 
 pub const TypeCheckerError = error{
     /// The type of an expression does not match the expected type.
@@ -74,15 +76,20 @@ pub const TypeChecker = struct {
                 try self.environment.define(decl.name.lexeme, co_id);
             },
             .struct_decl => |decl| {
-                var field_types: std.ArrayList(ShapeField) = .empty;
+                var field_types: std.ArrayList(StructField) = .empty;
+                var method_types: std.ArrayList(StructMethod) = .empty;
 
                 for (decl.fields) |field| {
                     const field_type = try self.registry.resolve(field.type_annotation);
-                    try field_types.append(self.allocator, .{ .name = field.name.lexeme, .type = field_type });
+                    try field_types.append(self.allocator, .{ .name = field.name.lexeme, .type = field_type, .is_static = field.is_static, .is_pub = field.is_pub });
+                }
+                for (decl.methods) |method| {
+                    const method_type = try self.check_expression(method.method);
+                    try method_types.append(self.allocator, .{ .name = method.name.lexeme, .type = method_type, .is_static = method.is_static, .is_pub = method.is_pub });
                 }
 
                 // Register shape type under the struct name
-                const struct_id = try self.registry.add_struct_type(decl.name.lexeme, try field_types.toOwnedSlice(self.allocator));
+                const struct_id = try self.registry.add_struct_type(decl.name.lexeme, try field_types.toOwnedSlice(self.allocator), try method_types.toOwnedSlice(self.allocator));
                 try self.environment.define(decl.name.lexeme, struct_id);
             },
             .type_decl => |decl| {
@@ -166,7 +173,7 @@ pub const TypeChecker = struct {
                     try self.check(field.type_annotation);
                 }
                 for (decl.methods) |method| {
-                    try self.check(method);
+                    try self.check(method.method);
                 }
             },
             .co_decl => |decl| {
@@ -183,9 +190,9 @@ pub const TypeChecker = struct {
                 defer self.expected_return_type = prev_return;
 
                 // track expected yield type
-                const prev_yield = self.expected_return_type;
-                self.expected_return_type = type_info.coroutine.yield;
-                defer self.expected_return_type = prev_yield;
+                const prev_yield = self.expected_yield_type;
+                self.expected_yield_type = type_info.coroutine.yield;
+                defer self.expected_yield_type = prev_yield;
 
                 // Push function scope
                 var local_env = Environment.init(self.allocator, self.environment);
@@ -264,7 +271,15 @@ pub const TypeChecker = struct {
                 try self.check(stmt.body);
             },
             .for_stmt => |stmt| {
-                _ = stmt;
+                var local_env = Environment.init(self.allocator, self.environment);
+                defer local_env.deinit();
+
+                const prev_env = self.environment;
+                self.environment = &local_env;
+                defer self.environment = prev_env;
+
+                try self.environment.define(stmt.iterator_name.lexeme, @intFromEnum(PrimitiveType.Int));
+                try self.check(stmt.body);
             },
             .if_stmt => |stmt| {
                 const condition_type = try self.check_expression(stmt.condition);
@@ -492,9 +507,19 @@ pub const TypeChecker = struct {
                     },
                     ._struct => |_struct| {
                         for (_struct.fields) |field| {
-                            if (std.mem.eql(u8, field.name, expr.member.lexeme)) {
+                            if (std.mem.eql(u8, field.name, expr.member.lexeme) and !field.is_static) {
                                 expr.resolved_type = field.type;
                                 return field.type;
+                            }
+                        }
+                        for (_struct.methods) |method| {
+                            if (std.mem.eql(u8, method.name, expr.member.lexeme) and !method.is_static) {
+                                const method_type = self.registry.get_type_info(method.type);
+                                if (method_type != .function and method_type != .coroutine) {
+                                    return TypeCheckerError.InvalidMemberAccess;
+                                }
+                                expr.resolved_type = method.type;
+                                return method.type;
                             }
                         }
                         return TypeCheckerError.InvalidMemberAccess;
@@ -510,9 +535,15 @@ pub const TypeChecker = struct {
                 const type_info = self.registry.get_type_info(obj_type);
 
                 switch (type_info) {
-                    .shape => |shape| {
-                        for (shape) |field| {
-                            if (std.mem.eql(u8, field.name, expr.member.lexeme)) {
+                    ._struct => |_struct| {
+                        for (_struct.methods) |method| {
+                            if (std.mem.eql(u8, method.name, expr.member.lexeme) and method.is_static) {
+                                expr.resolved_type = method.type;
+                                return method.type;
+                            }
+                        }
+                        for (_struct.fields) |field| {
+                            if (std.mem.eql(u8, field.name, expr.member.lexeme) and field.is_static) {
                                 expr.resolved_type = field.type;
                                 return field.type;
                             }

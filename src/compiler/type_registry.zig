@@ -8,6 +8,20 @@ pub const ShapeField = struct {
     type: TypeId,
 };
 
+pub const StructField = struct {
+    name: []const u8,
+    type: TypeId,
+    is_static: bool,
+    is_pub: bool,
+};
+
+pub const StructMethod = struct {
+    name: []const u8,
+    type: TypeId,
+    is_static: bool,
+    is_pub: bool,
+};
+
 pub const TypeRegistryError = error{
     UnknownType,
     TypeResolutionConflict,
@@ -35,7 +49,7 @@ pub const TypeInfo = union(enum) {
     _union: struct { left: TypeId, right: TypeId },
     _error: struct { name: []const u8, variants: [][]const u8 },
     _enum: struct { name: []const u8, variants: [][]const u8 },
-    _struct: struct { name: []const u8, fields: []ShapeField },
+    _struct: struct { name: []const u8, fields: []StructField, methods: []StructMethod },
     _type: struct { name: []const u8, resolved_type: TypeId },
     shape: []ShapeField,
     identifier: struct { name: []const u8, generics: ?[]TypeId }, // errors, enums, structs
@@ -121,17 +135,6 @@ pub const TypeRegistry = struct {
 
             .identifier_type => |identifier| {
                 const name = identifier.name.lexeme;
-                // const generics = identifier.generic_args;
-
-                // if (generics) |args| {
-                //     var resolved_generics: std.ArrayList(TypeId) = .empty;
-                //     for (args) |arg| {
-                //         const arg_id = try self.resolve(arg);
-                //         try resolved_generics.append(self.allocator, arg_id);
-                //     }
-                //     return try self.add_identifier_type(name, try resolved_generics.toOwnedSlice(self.allocator));
-                // }
-                // return try self.add_identifier_type(name, null);
 
                 const existing_type = self.get_named_type(name);
                 if (existing_type) |id| {
@@ -364,18 +367,24 @@ pub const TypeRegistry = struct {
         return id;
     }
 
-    pub fn add_struct_type(self: *TypeRegistry, name: []const u8, fields: []ShapeField) !TypeId {
+    pub fn add_struct_type(self: *TypeRegistry, name: []const u8, fields: []StructField, methods: []StructMethod) !TypeId {
         for (self.types.items, 0..) |info, index| {
             switch (info) {
                 ._struct => |existing_struct| {
                     if (!std.mem.eql(u8, existing_struct.name, name)) continue;
-                    if (existing_struct.fields.len != fields.len) {
-                        return TypeRegistryError.TypeResolutionConflict; // names are the same but the number of fields differ
+                    if (existing_struct.fields.len != fields.len or existing_struct.methods.len != methods.len) {
+                        return TypeRegistryError.TypeResolutionConflict; // names are the same but the number of fields or methods differ
                     }
 
                     var match = true;
                     for (existing_struct.fields, 0..) |ef, i| {
                         if (!std.mem.eql(u8, ef.name, fields[i].name) or ef.type != fields[i].type) {
+                            match = false;
+                            break;
+                        }
+                    }
+                    for (existing_struct.methods, 0..) |em, i| {
+                        if (!std.mem.eql(u8, em.name, methods[i].name) or em.type != methods[i].type) {
                             match = false;
                             break;
                         }
@@ -388,7 +397,7 @@ pub const TypeRegistry = struct {
 
         // add new type
         const id = @as(TypeId, @intCast(self.types.items.len));
-        try self.types.append(self.allocator, .{ ._struct = .{ .name = name, .fields = fields } });
+        try self.types.append(self.allocator, .{ ._struct = .{ .name = name, .fields = fields, .methods = methods } });
         return id;
     }
 

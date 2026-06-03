@@ -247,6 +247,6 @@ test "Parser can parse struct methods" {
     const struct_decl = node.struct_decl;
     try std.testing.expectEqual(@as(usize, 1), struct_decl.fields.len);
     try std.testing.expectEqual(@as(usize, 1), struct_decl.methods.len);
-    try std.testing.expect(struct_decl.methods[0].* == .fn_decl);
-    try std.testing.expectEqualStrings("next", struct_decl.methods[0].fn_decl.name.lexeme);
+    try std.testing.expect(struct_decl.methods[0].method.* == .fn_decl);
+    try std.testing.expectEqualStrings("next", struct_decl.methods[0].method.fn_decl.name.lexeme);
 }
