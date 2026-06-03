@@ -43,33 +43,25 @@ test "Scanner Emits Error For Unterminated String" {
 }
 
 test "Scanner Keywords" {
-    const source = "and as break co continue default else false for fn from give if impl in match native new nil not or orelse panic pub return shape static struct typeof true type use var while";
+    const source = "resume and as break co continue default else false for fn from give if in match native new nil not or orelse panic pub return shape static struct typeof true type use var while";
     const expected = [_]TokenType{
-        .AND, .AS, .BREAK, .CO, .CONTINUE, .DEFAULT, .ELSE, .FALSE, .FOR, .FN, .FROM, .GIVE, .IF, .IMPL, .IN, .MATCH, .NATIVE, .NEW, .NIL, .NOT, .OR, .ORELSE, .PANIC, .PUB, .RETURN, .SHAPE, .STATIC, .STRUCT, .TYPEOF, .TRUE, .TYPE, .USE, .VAR, .WHILE,
-    };
-    try checkTokens(source, &expected);
-}
-
-test "Scanner Capitalized Keywords" {
-    const source = "Err Ok Some None";
-    const expected = [_]TokenType{
-        .ERR, .OK, .SOME, .NONE,
+        .RESUME, .AND, .AS, .BREAK, .CO, .CONTINUE, .DEFAULT, .ELSE, .FALSE, .FOR, .FN, .FROM, .GIVE, .IF, .IN, .MATCH, .NATIVE, .NEW, .NIL, .NOT, .OR, .ORELSE, .PANIC, .PUB, .RETURN, .SHAPE, .STATIC, .STRUCT, .TYPEOF, .TRUE, .TYPE, .USE, .VAR, .WHILE,
     };
     try checkTokens(source, &expected);
 }
 
 test "Scanner Type Keywords" {
-    const source = "Nil Bool Int Float String Array Table Error Result Buffer Range Never Option";
+    const source = "Nil Bool Int Float String Array Table Error Buffer Range Never Coroutine";
     const expected = [_]TokenType{
-        .NIL_TYPE, .BOOL_TYPE, .INT_TYPE, .FLOAT_TYPE, .STRING_TYPE, .ARRAY_TYPE, .TABLE_TYPE, .ERROR_TYPE, .RESULT_TYPE, .BUFFER_TYPE, .RANGE_TYPE, .NEVER_TYPE, .OPTION_TYPE,
+        .NIL_TYPE, .BOOL_TYPE, .INT_TYPE, .FLOAT_TYPE, .STRING_TYPE, .ARRAY_TYPE, .TABLE_TYPE, .ERROR_TYPE, .BUFFER_TYPE, .RANGE_TYPE, .NEVER_TYPE, .COROUTINE_TYPE,
     };
     try checkTokens(source, &expected);
 }
 
 test "Scanner Operators and Punctuation" {
-    const source = "( ) { } [ ] , . .. - + ; / \\ * ** % : -> != = == => > >= < <= << >> & ^ | ~ += -= *= /= \\= %= ? ::";
+    const source = "( ) { } [ ] , . .. - + ; / * ** % : -> != = == => > >= < <= << >> & ^ | ~ += -= *= /= %= ? ::";
     const expected = [_]TokenType{
-        .LEFT_PAREN, .RIGHT_PAREN, .LEFT_BRACE, .RIGHT_BRACE, .LEFT_SQUARE, .RIGHT_SQUARE, .COMMA, .DOT, .DOT_DOT, .MINUS, .PLUS, .SEMICOLON, .SLASH, .BACKSLASH, .STAR, .STAR_STAR, .PERCENT, .COLON, .ARROW, .NOT_EQUAL, .EQUAL, .EQUAL_EQUAL, .EQUAL_ARROW, .GREATER, .GREATER_EQUAL, .LESS, .LESS_EQUAL, .LEFT_SHIFT, .RIGHT_SHIFT, .AMPERSAND, .CARET, .PIPE, .TILDE, .PLUS_EQUAL, .MINUS_EQUAL, .STAR_EQUAL, .SLASH_EQUAL, .BACK_SLASH_EQUAL, .PERCENT_EQUAL, .QUESTION_MARK, .COLON_COLON,
+        .LEFT_PAREN, .RIGHT_PAREN, .LEFT_BRACE, .RIGHT_BRACE, .LEFT_SQUARE, .RIGHT_SQUARE, .COMMA, .DOT, .DOT_DOT, .MINUS, .PLUS, .SEMICOLON, .SLASH, .STAR, .STAR_STAR, .PERCENT, .COLON, .ARROW, .NOT_EQUAL, .EQUAL, .EQUAL_EQUAL, .EQUAL_ARROW, .GREATER, .GREATER_EQUAL, .LESS, .LESS_EQUAL, .LEFT_SHIFT, .RIGHT_SHIFT, .AMPERSAND, .CARET, .PIPE, .TILDE, .PLUS_EQUAL, .MINUS_EQUAL, .STAR_EQUAL, .SLASH_EQUAL, .PERCENT_EQUAL, .QUESTION_MARK, .COLON_COLON,
     };
     try checkTokens(source, &expected);
 }

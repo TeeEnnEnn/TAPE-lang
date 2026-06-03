@@ -2,114 +2,200 @@ const std = @import("std");
 const ascii = std.ascii;
 const mem = std.mem;
 
+/// Types of tokens that can be parsed by the scanner.
 pub const TokenType = enum {
-    // Single-character tokens
+    /// '('
     LEFT_PAREN,
+    /// ')'
     RIGHT_PAREN,
+    /// '{'
     LEFT_BRACE,
+    /// '}'
     RIGHT_BRACE,
+    /// '['
     LEFT_SQUARE,
+    /// ']'
     RIGHT_SQUARE,
+    /// ','
     COMMA,
+    /// '.'
     DOT,
+    /// '..' used for range expressions (e.g. `1..5`)
     DOT_DOT,
+    /// '-'
     MINUS,
+    /// '+'
     PLUS,
-    SEMICOLON,
-    SLASH,
-    BACKSLASH,
-    STAR,
-    STAR_STAR,
-    PERCENT,
-    COLON,
-    // One or two character tokens
-    ARROW,
-    NOT_EQUAL,
-    EQUAL,
-    EQUAL_EQUAL,
-    EQUAL_ARROW,
-    GREATER,
-    GREATER_EQUAL,
-    LESS,
-    LESS_EQUAL,
-    LEFT_SHIFT,
-    RIGHT_SHIFT,
-    AMPERSAND,
-    CARET,
-    PIPE,
-    TILDE,
-    PLUS_EQUAL,
-    MINUS_EQUAL,
-    STAR_EQUAL,
-    SLASH_EQUAL,
-    BACK_SLASH_EQUAL,
-    PERCENT_EQUAL,
+    /// '?'
     QUESTION_MARK,
+    /// ';'
+    SEMICOLON,
+    /// '/'
+    SLASH,
+    /// '*'
+    STAR,
+    /// '**' Used for exponentiation (e.g. `2 ** 3`)
+    STAR_STAR,
+    /// '++' Use for concatenation (e.g. `a ++ b`)
+    PLUS_PLUS,
+    /// '%'
+    PERCENT,
+    /// ':'
+    COLON,
+    /// '->'
+    ARROW,
+    /// '!='
+    NOT_EQUAL,
+    /// '='
+    EQUAL,
+    /// '=='
+    EQUAL_EQUAL,
+    /// '=>'
+    EQUAL_ARROW,
+    /// '>'
+    GREATER,
+    /// '>='
+    GREATER_EQUAL,
+    /// '<'
+    LESS,
+    /// '<='
+    LESS_EQUAL,
+    /// '<<'
+    LEFT_SHIFT,
+    /// '>>'
+    RIGHT_SHIFT,
+    /// '&'
+    AMPERSAND,
+    /// '^'
+    CARET,
+    /// '|'
+    PIPE,
+    /// '~'
+    TILDE,
+    /// '+='
+    PLUS_EQUAL,
+    /// '-='
+    MINUS_EQUAL,
+    /// '*='
+    STAR_EQUAL,
+    /// '/='
+    SLASH_EQUAL,
+    /// '%='
+    PERCENT_EQUAL,
+    /// '::'
     COLON_COLON,
-    // Literals
+    /// A sequence of alphanumeric characters (e.g. `foo`, `bar`) starting with a letter or underscore
     IDENTIFIER,
+    /// A string literal which may start with a single or double quote
     STRING,
+    /// An integer literal
     INT,
+    /// A floating point literal
     FLOAT,
+    /// A binary integer literal (e.g. `0b1010`)
     BINARY_INT,
+    /// A hexadecimal integer literal (e.g. `0x1A`)
     HEX_INT,
-    // Keywords
+    /// 'and'
     AND,
+    /// 'not'
     NOT,
+    /// 'else'
     ELSE,
+    /// 'false'
     FALSE,
+    /// 'for'
     FOR,
+    /// 'fn'
     FN,
+    /// 'if'
     IF,
+    /// 'in'
     IN,
+    /// 'nil'
     NIL,
+    /// 'or'
     OR,
+    /// 'orelse'
     ORELSE,
+    /// 'return'
     RETURN,
+    /// 'true'
     TRUE,
+    /// 'var'
     VAR,
+    /// 'while'
     WHILE,
+    /// 'break'
     BREAK,
+    /// 'continue'
     CONTINUE,
+    /// 'yield'
     YIELD,
+    /// 'use'
     USE,
+    /// 'from'
     FROM,
+    /// 'pub'
     PUB,
+    /// 'as'
     AS,
+    /// 'match'
     MATCH,
-    OK,
-    ERR,
-    NONE,
-    SOME,
+    /// 'default'
     DEFAULT,
+    /// 'give'
     GIVE,
+    /// 'typeof'
     TYPEOF,
+    /// 'new'
     NEW,
+    /// 'panic'
     PANIC,
+    /// 'struct'
     STRUCT,
+    /// 'shape'
     SHAPE,
-    IMPL,
+    /// 'type'
     TYPE,
+    /// 'native'
     NATIVE,
+    /// 'static'
     STATIC,
+    /// 'co'
     CO,
+    /// 'enum'
     ENUM,
+    /// 'error'
     ERROR,
-    // Type keywords
+    /// 'resume'
+    RESUME,
+
+    /// 'Nil'
     NIL_TYPE,
+    /// 'Bool'
     BOOL_TYPE,
+    /// 'Int'
     INT_TYPE,
+    /// 'Float'
     FLOAT_TYPE,
+    /// 'String'
     STRING_TYPE,
+    /// 'Array'
     ARRAY_TYPE,
+    /// 'Table'
     TABLE_TYPE,
+    /// 'Error'
     ERROR_TYPE,
-    RESULT_TYPE,
+    /// 'Buffer'
     BUFFER_TYPE,
+    /// 'Range'
     RANGE_TYPE,
+    /// 'Never'
     NEVER_TYPE,
-    OPTION_TYPE,
-    // Special
+    /// 'Coroutine'
+    COROUTINE_TYPE,
+    /// 'EOF'
     EOF,
 };
 
@@ -176,16 +262,16 @@ pub const Scanner = struct {
         };
     }
 
-    inline fn is_identifier_starter(c: u8) bool {
-        return ascii.isAlphabetic(c) or c == '_';
-    }
-
     inline fn is_alpha(c: u8) bool {
         return ascii.isAlphabetic(c) or c == '_';
     }
 
     inline fn is_digit(c: u8) bool {
         return ascii.isDigit(c);
+    }
+
+    inline fn is_binary_digit(c: u8) bool {
+        return c == '0' or c == '1';
     }
 
     inline fn is_hex_digit(c: u8) bool {
@@ -201,12 +287,9 @@ pub const Scanner = struct {
                     _ = self.advance();
                 },
                 '/' => {
-                    if (self.peek_next() == '/') {
-                        while (self.peek() != '\n' and !self.is_at_end())
-                            _ = self.advance();
-                    } else {
-                        return;
-                    }
+                    if (self.peek_next() != '/') return;
+                    while (self.peek() != '\n' and !self.is_at_end())
+                        _ = self.advance();
                 },
                 else => return,
             }
@@ -226,229 +309,120 @@ pub const Scanner = struct {
 
     fn identifier_type(self: *Scanner) TokenType {
         const len = self.current - self.start;
-        switch (self.source[self.start]) {
+        const source = self.source[self.start..self.current];
+
+        return switch (source[0]) {
             // Type annotations
-            'N' => {
-                if (len > 1) switch (self.source[self.start + 1]) {
-                    'i' => return self.check_keyword(2, "l", .NIL_TYPE),
-                    'e' => return self.check_keyword(2, "ver", .NEVER_TYPE),
-                    'o' => return self.check_keyword(2, "ne", .NONE),
-                    else => {},
-                };
-            },
-            'B' => {
-                if (len > 1) switch (self.source[self.start + 1]) {
-                    'o' => return self.check_keyword(2, "ol", .BOOL_TYPE),
-                    'u' => return self.check_keyword(2, "ffer", .BUFFER_TYPE),
-                    else => {},
-                };
-            },
-            'I' => {
-                if (len > 1) switch (self.source[self.start + 1]) {
-                    'n' => return self.check_keyword(2, "t", .INT_TYPE),
-                    else => {},
-                };
-            },
-            'E' => {
-                if (len > 1) switch (self.source[self.start + 1]) {
-                    'r' => {
-                        if (len == 3) return self.check_keyword(2, "r", .ERR);
-                        if (len > 3) switch (self.source[self.start + 3]) {
-                            'o' => return self.check_keyword(4, "r", .ERROR_TYPE),
-                            else => {},
-                        };
-                    },
-                    else => {},
-                };
-            },
-            'F' => {
-                if (len > 1) switch (self.source[self.start + 1]) {
-                    'l' => return self.check_keyword(2, "oat", .FLOAT_TYPE),
-                    else => {},
-                };
-            },
-            'S' => {
-                if (len > 1) switch (self.source[self.start + 1]) {
-                    't' => return self.check_keyword(2, "ring", .STRING_TYPE),
-                    'o' => return self.check_keyword(2, "me", .SOME),
-                    else => {},
-                };
-            },
-            'T' => {
-                if (len > 1) switch (self.source[self.start + 1]) {
-                    'a' => return self.check_keyword(2, "ble", .TABLE_TYPE),
-                    else => {},
-                };
-            },
-            'R' => {
-                if (len > 1) switch (self.source[self.start + 1]) {
-                    'a' => {
-                        if (len > 2) switch (self.source[self.start + 2]) {
-                            'n' => {
-                                if (len > 3) switch (self.source[self.start + 3]) {
-                                    'g' => return self.check_keyword(4, "e", .RANGE_TYPE),
-                                    else => {},
-                                };
-                            },
-                            else => {},
-                        };
-                    },
-                    'e' => return self.check_keyword(2, "sult", .RESULT_TYPE),
-                    else => {},
-                };
-            },
-            'A' => {
-                if (len > 1) switch (self.source[self.start + 1]) {
-                    'r' => return self.check_keyword(2, "ray", .ARRAY_TYPE),
-                    else => {},
-                };
-            },
+            'A' => self.check_keyword(1, "rray", .ARRAY_TYPE),
+            'B' => if (len > 1) switch (source[1]) {
+                'o' => self.check_keyword(2, "ol", .BOOL_TYPE),
+                'u' => self.check_keyword(2, "ffer", .BUFFER_TYPE),
+                else => .IDENTIFIER,
+            } else .IDENTIFIER,
+            'E' => self.check_keyword(1, "rror", .ERROR_TYPE),
+            'F' => self.check_keyword(1, "loat", .FLOAT_TYPE),
+            'I' => self.check_keyword(1, "nt", .INT_TYPE),
+            'N' => if (len > 1) switch (source[1]) {
+                'i' => self.check_keyword(2, "l", .NIL_TYPE),
+                'e' => self.check_keyword(2, "ver", .NEVER_TYPE),
+                else => .IDENTIFIER,
+            } else .IDENTIFIER,
+            'R' => self.check_keyword(1, "ange", .RANGE_TYPE),
+            'S' => self.check_keyword(1, "tring", .STRING_TYPE),
+            'T' => self.check_keyword(1, "able", .TABLE_TYPE),
+            'C' => self.check_keyword(1, "oroutine", .COROUTINE_TYPE),
+
             // Language keywords
-            'a' => {
-                if (len > 1) switch (self.source[self.start + 1]) {
-                    's' => return self.check_keyword(2, "", .AS),
-                    'n' => return self.check_keyword(2, "d", .AND),
-                    else => {},
-                };
-            },
-            'b' => return self.check_keyword(1, "reak", .BREAK),
-            'c' => {
-                if (len > 1) switch (self.source[self.start + 1]) {
-                    'o' => {
-                        if (len == 2) return .CO;
-                        if (len > 2) switch (self.source[self.start + 2]) {
-                            'n' => return self.check_keyword(3, "tinue", .CONTINUE),
-                            else => {},
-                        };
-                    },
-                    else => {},
-                };
-            },
-            'd' => return self.check_keyword(1, "efault", .DEFAULT),
-            'e' => {
-                if (len > 1) switch (self.source[self.start + 1]) {
-                    'l' => return self.check_keyword(2, "se", .ELSE),
-                    'n' => return self.check_keyword(2, "um", .ENUM),
-                    'r' => return self.check_keyword(2, "ror", .ERROR),
-                    else => {},
-                };
-            },
-            'g' => return self.check_keyword(1, "ive", .GIVE),
-            'i' => {
-                if (len > 1) switch (self.source[self.start + 1]) {
-                    'm' => return self.check_keyword(2, "pl", .IMPL),
-                    'f' => return self.check_keyword(2, "", .IF),
-                    'n' => return self.check_keyword(2, "", .IN),
-                    else => {},
-                };
-            },
-            'n' => {
-                if (len > 1) switch (self.source[self.start + 1]) {
-                    'o' => return self.check_keyword(2, "t", .NOT),
-                    'i' => return self.check_keyword(2, "l", .NIL),
-                    'e' => return self.check_keyword(2, "w", .NEW),
-                    'a' => return self.check_keyword(2, "tive", .NATIVE),
-                    else => {},
-                };
-            },
-            'o' => {
-                if (len > 1) switch (self.source[self.start + 1]) {
-                    'r' => {
-                        if (len == 2) return .OR;
-                        if (len > 2) switch (self.source[self.start + 2]) {
-                            'e' => return self.check_keyword(3, "lse", .ORELSE),
-                            else => {},
-                        };
-                    },
-                    else => {},
-                };
-            },
-            'r' => return self.check_keyword(1, "eturn", .RETURN),
-            's' => {
-                if (len > 1) switch (self.source[self.start + 1]) {
-                    't' => {
-                        if (len > 2) switch (self.source[self.start + 2]) {
-                            'a' => return self.check_keyword(3, "tic", .STATIC),
-                            'r' => return self.check_keyword(3, "uct", .STRUCT),
-                            else => {},
-                        };
-                    },
-                    'h' => return self.check_keyword(2, "ape", .SHAPE),
-                    else => {},
-                };
-            },
-            'w' => return self.check_keyword(1, "hile", .WHILE),
-            'v' => return self.check_keyword(1, "ar", .VAR),
-            'y' => return self.check_keyword(1, "ield", .YIELD),
-            'f' => {
-                if (len > 1) switch (self.source[self.start + 1]) {
-                    'a' => return self.check_keyword(2, "lse", .FALSE),
-                    'o' => return self.check_keyword(2, "r", .FOR),
-                    'n' => return self.check_keyword(2, "", .FN),
-                    'r' => return self.check_keyword(2, "om", .FROM),
-                    else => {},
-                };
-            },
-            'm' => return self.check_keyword(1, "atch", .MATCH),
-            't' => {
-                if (len > 1) switch (self.source[self.start + 1]) {
-                    'r' => return self.check_keyword(2, "ue", .TRUE),
-                    'y' => {
-                        if (len > 2 and self.source[self.start + 2] == 'p') {
-                            if (len > 3 and self.source[self.start + 3] == 'e') {
-                                if (len == 4) return .TYPE;
-                                return self.check_keyword(4, "of", .TYPEOF);
-                            }
-                        }
-                    },
-                    else => {},
-                };
-            },
-            'u' => return self.check_keyword(1, "se", .USE),
-            'p' => {
-                if (len > 1) switch (self.source[self.start + 1]) {
-                    'a' => return self.check_keyword(2, "nic", .PANIC),
-                    'u' => return self.check_keyword(2, "b", .PUB),
-                    else => {},
-                };
-            },
-            'O' => {
-                if (len > 1) switch (self.source[self.start + 1]) {
-                    'k' => return self.check_keyword(2, "", .OK),
-                    'p' => return self.check_keyword(2, "tion", .OPTION_TYPE),
-                    else => {},
-                };
-            },
-            else => {},
-        }
-        return .IDENTIFIER;
+            'a' => if (len > 1) switch (source[1]) {
+                's' => self.check_keyword(2, "", .AS),
+                'n' => self.check_keyword(2, "d", .AND),
+                else => .IDENTIFIER,
+            } else .IDENTIFIER,
+            'b' => self.check_keyword(1, "reak", .BREAK),
+            'c' => if (len > 1) switch (source[1]) {
+                'o' => if (len == 2) .CO else self.check_keyword(2, "ntinue", .CONTINUE),
+                else => .IDENTIFIER,
+            } else .IDENTIFIER,
+            'd' => self.check_keyword(1, "efault", .DEFAULT),
+            'e' => if (len > 1) switch (source[1]) {
+                'l' => self.check_keyword(2, "se", .ELSE),
+                'n' => self.check_keyword(2, "um", .ENUM),
+                'r' => self.check_keyword(2, "ror", .ERROR),
+                else => .IDENTIFIER,
+            } else .IDENTIFIER,
+            'f' => if (len > 1) switch (source[1]) {
+                'a' => self.check_keyword(2, "lse", .FALSE),
+                'n' => self.check_keyword(2, "", .FN),
+                'o' => self.check_keyword(2, "r", .FOR),
+                'r' => self.check_keyword(2, "om", .FROM),
+                else => .IDENTIFIER,
+            } else .IDENTIFIER,
+            'g' => self.check_keyword(1, "ive", .GIVE),
+            'i' => if (len > 1) switch (source[1]) {
+                'f' => self.check_keyword(2, "", .IF),
+                'n' => self.check_keyword(2, "", .IN),
+                else => .IDENTIFIER,
+            } else .IDENTIFIER,
+            'm' => self.check_keyword(1, "atch", .MATCH),
+            'n' => if (len > 1) switch (source[1]) {
+                'o' => self.check_keyword(2, "t", .NOT),
+                'i' => self.check_keyword(2, "l", .NIL),
+                'e' => self.check_keyword(2, "w", .NEW),
+                'a' => self.check_keyword(2, "tive", .NATIVE),
+                else => .IDENTIFIER,
+            } else .IDENTIFIER,
+            'o' => if (len > 1) switch (source[1]) {
+                'r' => if (len == 2) .OR else self.check_keyword(2, "else", .ORELSE),
+                else => .IDENTIFIER,
+            } else .IDENTIFIER,
+            'p' => if (len > 1) switch (source[1]) {
+                'a' => self.check_keyword(2, "nic", .PANIC),
+                'u' => self.check_keyword(2, "b", .PUB),
+                else => .IDENTIFIER,
+            } else .IDENTIFIER,
+            'r' => if (len > 1) switch (source[1]) {
+                'e' => if (len > 2) switch (source[2]) {
+                    't' => self.check_keyword(3, "urn", .RETURN),
+                    's' => self.check_keyword(3, "ume", .RESUME),
+                    else => .IDENTIFIER,
+                } else .IDENTIFIER,
+                else => .IDENTIFIER,
+            } else .IDENTIFIER,
+            's' => if (len > 1) switch (source[1]) {
+                't' => if (len > 2) switch (source[2]) {
+                    'a' => self.check_keyword(3, "tic", .STATIC),
+                    'r' => self.check_keyword(3, "uct", .STRUCT),
+                    else => .IDENTIFIER,
+                } else .IDENTIFIER,
+                'h' => self.check_keyword(2, "ape", .SHAPE),
+                else => .IDENTIFIER,
+            } else .IDENTIFIER,
+            'w' => self.check_keyword(1, "hile", .WHILE),
+            'v' => self.check_keyword(1, "ar", .VAR),
+            'y' => self.check_keyword(1, "ield", .YIELD),
+            't' => if (len > 1) switch (source[1]) {
+                'r' => self.check_keyword(2, "ue", .TRUE),
+                'y' => if (len >= 4 and source[2] == 'p' and source[3] == 'e')
+                    (if (len == 4) .TYPE else self.check_keyword(4, "of", .TYPEOF))
+                else
+                    .IDENTIFIER,
+                else => .IDENTIFIER,
+            } else .IDENTIFIER,
+            'u' => self.check_keyword(1, "se", .USE),
+            else => .IDENTIFIER,
+        };
     }
 
-    fn single_string(self: *Scanner) ScannerError!Token {
+    fn string(self: *Scanner, quote: u8) ScannerError!Token {
         while (!self.is_at_end()) {
-            if (self.peek() == '\'') break;
-            if (self.peek() == '\\') {
+            const c = self.peek();
+            if (c == quote) break;
+            if (c == '\\') {
                 _ = self.advance();
                 if (!self.is_at_end()) _ = self.advance();
                 continue;
             }
-            if (self.peek() == '\n') self.line += 1;
-            _ = self.advance();
-        }
-        if (self.is_at_end()) return ScannerError.UnterminatedString;
-        _ = self.advance(); // closing quote
-        return self.make_token(.STRING);
-    }
-
-    fn double_string(self: *Scanner) ScannerError!Token {
-        while (!self.is_at_end()) {
-            if (self.peek() == '"') break;
-            if (self.peek() == '\\') {
-                _ = self.advance();
-                if (!self.is_at_end()) _ = self.advance();
-                continue;
-            }
-            if (self.peek() == '\n') self.line += 1;
+            if (c == '\n') self.line += 1;
             _ = self.advance();
         }
         if (self.is_at_end()) return ScannerError.UnterminatedString;
@@ -457,29 +431,22 @@ pub const Scanner = struct {
     }
 
     fn number(self: *Scanner) Token {
-        var fp_found = false;
-        var bin_found = false;
-        var hex_found = false;
-
         while (is_digit(self.peek())) _ = self.advance();
 
         if (self.peek() == '.' and is_digit(self.peek_next())) {
-            fp_found = true;
             _ = self.advance();
-            while (is_digit(self.peek())) _ = self.advance();
-        } else if (self.peek() == 'b' and is_digit(self.peek_next())) {
-            bin_found = true;
+            while (is_digit(self.peek()) or self.peek() == 'e' or self.peek() == 'E') _ = self.advance();
+            return self.make_token(.FLOAT);
+        } else if (self.peek() == 'b' and is_binary_digit(self.peek_next())) {
             _ = self.advance();
-            while (is_digit(self.peek())) _ = self.advance();
+            while (is_binary_digit(self.peek())) _ = self.advance();
+            return self.make_token(.BINARY_INT);
         } else if (self.peek() == 'x' and is_hex_digit(self.peek_next())) {
-            hex_found = true;
             _ = self.advance();
             while (is_hex_digit(self.peek())) _ = self.advance();
+            return self.make_token(.HEX_INT);
         }
 
-        if (fp_found) return self.make_token(.FLOAT);
-        if (bin_found) return self.make_token(.BINARY_INT);
-        if (hex_found) return self.make_token(.HEX_INT);
         return self.make_token(.INT);
     }
 
@@ -497,10 +464,9 @@ pub const Scanner = struct {
         const c = self.advance();
 
         if (is_digit(c)) return self.number();
-        if (is_identifier_starter(c)) return self.identifier();
+        if (is_alpha(c)) return self.identifier();
 
         return switch (c) {
-            ':' => self.make_token(if (self.match(':')) .COLON_COLON else .COLON),
             '(' => self.make_token(.LEFT_PAREN),
             ')' => self.make_token(.RIGHT_PAREN),
             '{' => self.make_token(.LEFT_BRACE),
@@ -509,14 +475,14 @@ pub const Scanner = struct {
             ']' => self.make_token(.RIGHT_SQUARE),
             ';' => self.make_token(.SEMICOLON),
             ',' => self.make_token(.COMMA),
+            ':' => self.make_token(if (self.match(':')) .COLON_COLON else .COLON),
             '.' => self.make_token(if (self.match('.')) .DOT_DOT else .DOT),
             '-' => if (self.match('>'))
                 self.make_token(.ARROW)
             else
                 self.make_token(if (self.match('=')) .MINUS_EQUAL else .MINUS),
-            '+' => self.make_token(if (self.match('=')) .PLUS_EQUAL else .PLUS),
+            '+' => self.make_token(if (self.match('=')) .PLUS_EQUAL else if (self.match('+')) .PLUS_PLUS else .PLUS),
             '/' => self.make_token(if (self.match('=')) .SLASH_EQUAL else .SLASH),
-            '\\' => self.make_token(if (self.match('=')) .BACK_SLASH_EQUAL else .BACKSLASH),
             '*' => if (self.match('*'))
                 self.make_token(.STAR_STAR)
             else
@@ -537,8 +503,7 @@ pub const Scanner = struct {
                 self.make_token(.RIGHT_SHIFT)
             else
                 self.make_token(if (self.match('=')) .GREATER_EQUAL else .GREATER),
-            '"' => try self.double_string(),
-            '\'' => try self.single_string(),
+            '"', '\'' => |q| self.string(q),
             '?' => self.make_token(.QUESTION_MARK),
             '&' => self.make_token(.AMPERSAND),
             '|' => self.make_token(.PIPE),

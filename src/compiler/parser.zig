@@ -207,7 +207,7 @@ pub const Parser = struct {
 
     fn parse_equality(self: *Parser) ParserError!*AST.ASTNode {
         var left = try self.parse_comparison();
-        while (self.check(.EQUAL) or self.check(.NOT_EQUAL)) {
+        while (self.check(.EQUAL_EQUAL) or self.check(.NOT_EQUAL)) {
             const operator = self.current;
             try self.advance();
             const right = try self.parse_comparison();
@@ -270,7 +270,7 @@ pub const Parser = struct {
 
     fn parse_term(self: *Parser) ParserError!*AST.ASTNode {
         var left = try self.parse_factor();
-        while (self.check(.PLUS) or self.check(.MINUS)) {
+        while (self.check(.PLUS) or self.check(.MINUS) or self.check(.PLUS_PLUS)) {
             const operator = self.current;
             try self.advance();
             const right = try self.parse_factor();
@@ -376,14 +376,14 @@ pub const Parser = struct {
                 node.* = .{ .index_expr = index_expr };
                 expr = node;
             } else if (try self.match(.DOT)) {
-                // Instance Member
+                // dot member access
                 try self.consume(.IDENTIFIER);
                 const member = self.previous;
 
-                const inst_expr = try self.allocator.create(AST.InstanceMemberExpr);
+                const inst_expr = try self.allocator.create(AST.DotExpr);
                 inst_expr.* = .{ .expr = expr, .member = member };
                 const node = try self.allocator.create(AST.ASTNode);
-                node.* = .{ .instance_member_expr = inst_expr };
+                node.* = .{ .dot_expr = inst_expr };
                 expr = node;
             } else if (try self.match(.COLON_COLON)) {
                 // Static Member
@@ -394,13 +394,6 @@ pub const Parser = struct {
                 static_expr.* = .{ .expr = expr, .member = member };
                 const node = try self.allocator.create(AST.ASTNode);
                 node.* = .{ .static_member_expr = static_expr };
-                expr = node;
-            } else if (try self.match(.QUESTION_MARK)) {
-                // Unwrap Error
-                const unwrap = try self.allocator.create(AST.ErrorUnwrapExpr);
-                unwrap.* = .{ .expr = expr };
-                const node = try self.allocator.create(AST.ASTNode);
-                node.* = .{ .error_unwrap_expr = unwrap };
                 expr = node;
             } else {
                 break;
@@ -631,15 +624,37 @@ pub const Parser = struct {
             }
             try self.consume(.RIGHT_PAREN);
 
-            var return_type: ?*AST.ASTNode = null;
-            if (try self.match(.ARROW)) {
-                return_type = try self.parse_type_expression();
-            }
+            try self.consume(.ARROW);
+            const return_type = try self.parse_type_expression();
 
             const fn_type = try self.allocator.create(AST.FnType);
             fn_type.* = .{ .params = try params.toOwnedSlice(self.allocator), .return_type = return_type };
             const node = try self.allocator.create(AST.ASTNode);
             node.* = .{ .fn_type = fn_type };
+            left = node;
+        } else if (try self.match(.CO)) {
+            // Coroutine Type: co (Int, Float) -> (Bool, Int)
+            try self.consume(.LEFT_PAREN);
+            var params: std.ArrayList(*AST.ASTNode) = .empty;
+            if (!self.check(.RIGHT_PAREN)) {
+                while (true) {
+                    try params.append(self.allocator, try self.parse_type_expression());
+                    if (!try self.match(.COMMA)) break;
+                }
+            }
+            try self.consume(.RIGHT_PAREN);
+
+            try self.consume(.ARROW);
+            try self.consume(.LEFT_PAREN);
+            const yield_type = try self.parse_type_expression();
+            try self.consume(.COMMA);
+            const return_type = try self.parse_type_expression();
+            try self.consume(.RIGHT_PAREN);
+
+            const co_type = try self.allocator.create(AST.CoType);
+            co_type.* = .{ .params = try params.toOwnedSlice(self.allocator), .return_type = return_type, .yield_type = yield_type };
+            const node = try self.allocator.create(AST.ASTNode);
+            node.* = .{ .co_type = co_type };
             left = node;
         } else if (try self.match(.NIL_TYPE)) {
             const nil_type = try self.allocator.create(AST.NilType);
@@ -670,12 +685,6 @@ pub const Parser = struct {
             string_type.* = .{};
             const node = try self.allocator.create(AST.ASTNode);
             node.* = .{ .string_type = string_type };
-            left = node;
-        } else if (try self.match(.BUFFER_TYPE)) {
-            const buffer_type = try self.allocator.create(AST.BufferType);
-            buffer_type.* = .{};
-            const node = try self.allocator.create(AST.ASTNode);
-            node.* = .{ .buffer_type = buffer_type };
             left = node;
         } else if (try self.match(.NEVER_TYPE)) {
             const never_type = try self.allocator.create(AST.NeverType);
@@ -718,26 +727,6 @@ pub const Parser = struct {
             range_type.* = .{ .start = start, .end = end, .step = step };
             const node = try self.allocator.create(AST.ASTNode);
             node.* = .{ .range_type = range_type };
-            left = node;
-        } else if (try self.match(.OPTION_TYPE)) {
-            try self.consume(.LEFT_SQUARE);
-            const some = try self.parse_type_expression();
-            try self.consume(.RIGHT_SQUARE);
-            const opt_type = try self.allocator.create(AST.OptionType);
-            opt_type.* = .{ .element_type = some };
-            const node = try self.allocator.create(AST.ASTNode);
-            node.* = .{ .option_type = opt_type };
-            left = node;
-        } else if (try self.match(.RESULT_TYPE)) {
-            try self.consume(.LEFT_SQUARE);
-            const ok = try self.parse_type_expression();
-            try self.consume(.COMMA);
-            const err = try self.parse_type_expression();
-            try self.consume(.RIGHT_SQUARE);
-            const res_type = try self.allocator.create(AST.ResultType);
-            res_type.* = .{ .ok_type = ok, .err_type = err };
-            const node = try self.allocator.create(AST.ASTNode);
-            node.* = .{ .result_type = res_type };
             left = node;
         } else if (try self.match(.LEFT_PAREN)) {
             // Tuple type: (Int, Float)
@@ -870,7 +859,7 @@ pub const Parser = struct {
         return node;
     }
 
-    fn parse_function_declaration(self: *Parser, is_pub: bool, is_static: bool, is_co: bool) ParserError!*AST.ASTNode {
+    fn parse_function_declaration(self: *Parser, is_pub: bool, is_static: bool) ParserError!*AST.ASTNode {
         try self.consume(.IDENTIFIER);
         const name = self.previous;
 
@@ -886,11 +875,8 @@ pub const Parser = struct {
         }
         try self.consume(.RIGHT_PAREN);
 
-        // Optional return type
-        var return_type: ?*AST.ASTNode = null;
-        if (try self.match(.ARROW)) {
-            return_type = try self.parse_type_expression();
-        }
+        try self.consume(.ARROW);
+        const return_type = try self.parse_type_expression();
 
         const body = try self.parse_statement();
 
@@ -898,7 +884,6 @@ pub const Parser = struct {
         fn_decl.* = .{
             .modifier_pub = is_pub,
             .modifier_static = is_static,
-            .modifier_co = is_co,
             .name = name,
             .params = try params.toOwnedSlice(self.allocator),
             .return_type_annotation = return_type,
@@ -908,6 +893,46 @@ pub const Parser = struct {
         const node = try self.allocator.create(AST.ASTNode);
         node.* = .{ .fn_decl = fn_decl };
 
+        return node;
+    }
+
+    fn parse_coroutine_declaration(self: *Parser, is_pub: bool, is_static: bool) ParserError!*AST.ASTNode {
+        try self.consume(.IDENTIFIER);
+        const name = self.previous;
+
+        try self.consume(.LEFT_PAREN);
+        var params: std.ArrayList(*AST.TypedNamedField) = .empty;
+
+        if (!self.check(.RIGHT_PAREN)) {
+            while (true) {
+                const param = try self.parse_typed_named_field();
+                try params.append(self.allocator, param);
+                if (!try self.match(.COMMA)) break;
+            }
+        }
+        try self.consume(.RIGHT_PAREN);
+
+        try self.consume(.ARROW);
+        try self.consume(.LEFT_PAREN);
+        const yield_type = try self.parse_type_expression();
+        try self.consume(.COMMA);
+        const return_type = try self.parse_type_expression();
+        try self.consume(.RIGHT_PAREN);
+
+        const body = try self.parse_statement();
+
+        const co_decl = try self.allocator.create(AST.CoDecl);
+        co_decl.* = .{
+            .modifier_pub = is_pub,
+            .name = name,
+            .params = params.items,
+            .modifier_static = is_static,
+            .yield_type_annotation = yield_type,
+            .return_type_annotation = return_type,
+            .body = body,
+        };
+        const node = try self.allocator.create(AST.ASTNode);
+        node.* = .{ .co_decl = co_decl };
         return node;
     }
 
@@ -954,52 +979,18 @@ pub const Parser = struct {
         return ParserError.UnexpectedToken;
     }
 
-    fn parse_impl_declaration(self: *Parser, is_pub: bool) ParserError!*AST.ASTNode {
-        _ = is_pub;
-        try self.consume(.IDENTIFIER);
-        const name = self.previous;
-        var is_static = false;
-        var is_coroutine = false;
-        try self.consume(.LEFT_BRACE);
-        var methods: std.ArrayList(*AST.ASTNode) = .empty;
-
-        while (!self.check(.RIGHT_BRACE) and !self.check(.EOF)) {
-            if (self.check(.STATIC)) {
-                try self.consume(.STATIC);
-                is_static = true;
-            } else {
-                is_static = false;
-            }
-            if (self.check(.CO)) {
-                try self.consume(.CO);
-                is_coroutine = true;
-            } else {
-                is_coroutine = false;
-            }
-            try self.consume(.FN);
-            const fn_decl = try self.parse_function_declaration(false, is_static, is_coroutine);
-            try methods.append(self.allocator, fn_decl);
-        }
-        try self.consume(.RIGHT_BRACE);
-
-        const impl_decl = try self.allocator.create(AST.ImplDecl);
-        impl_decl.* = .{ .name = name, .methods = try methods.toOwnedSlice(self.allocator) };
-
-        const node = try self.allocator.create(AST.ASTNode);
-        node.* = .{ .impl_decl = impl_decl };
-        return node;
-    }
-
     fn parse_for_statement(self: *Parser) ParserError!*AST.ASTNode {
         try self.consume(.LEFT_PAREN);
+        try self.consume(.VAR);
         try self.consume(.IDENTIFIER);
-        const iterator_name = self.previous;
+        const iterator_name = self.previous; // the type of this is var will be int
         try self.consume(.IN);
-        const iterator_expr = try self.parse_expression();
+        // for now, assume the iterator expression is a range expression
+        const range_expr = try self.parse_expression();
         try self.consume(.RIGHT_PAREN);
-        const body = try self.parse_block_statement();
+        const body = try self.parse_statement();
         const for_stmt = try self.allocator.create(AST.ForStmt);
-        for_stmt.* = .{ .iterator_name = iterator_name, .iterator_expr = iterator_expr, .body = body };
+        for_stmt.* = .{ .iterator_name = iterator_name, .iterator_expr = range_expr, .body = body };
         const node = try self.allocator.create(AST.ASTNode);
         node.* = .{ .for_stmt = for_stmt };
         return node;
@@ -1094,6 +1085,7 @@ pub const Parser = struct {
     }
 
     fn parse_block_statement(self: *Parser) ParserError!*AST.ASTNode {
+        try self.consume(.LEFT_BRACE);
         var statements: std.ArrayList(*AST.ASTNode) = .empty;
         while (!self.check(.RIGHT_BRACE) and !self.check(.EOF)) {
             const stmt = try self.parse_declaration();
@@ -1167,13 +1159,26 @@ pub const Parser = struct {
         return node;
     }
 
+    fn parse_resume_statement(self: *Parser) ParserError!*AST.ASTNode {
+        try self.consume(.RESUME);
+        const expr = try self.parse_expression();
+        try self.consume(.SEMICOLON);
+
+        const resume_stmt = try self.allocator.create(AST.ResumeStmt);
+        resume_stmt.* = .{ .expr = expr };
+
+        const node = try self.allocator.create(AST.ASTNode);
+        node.* = .{ .resume_stmt = resume_stmt };
+        return node;
+    }
+
     fn parse_error_declaration(self: *Parser, is_pub: bool) ParserError!*AST.ASTNode {
         try self.consume(.IDENTIFIER);
         const token = self.previous;
 
         try self.consume(.LEFT_BRACE);
         var variants: std.ArrayList(Token) = .empty;
-        while (true) {
+        while (!try self.match(.RIGHT_BRACE) and !try self.match(.EOF)) {
             try self.consume(.IDENTIFIER);
             const variant = self.previous;
             try variants.append(self.allocator, variant);
@@ -1196,7 +1201,7 @@ pub const Parser = struct {
 
         try self.consume(.LEFT_BRACE);
         var variants: std.ArrayList(Token) = .empty;
-        while (true) {
+        while (!try self.match(.RIGHT_BRACE) and !try self.match(.EOF)) {
             try self.consume(.IDENTIFIER);
             const variant = self.previous;
             try variants.append(self.allocator, variant);
@@ -1218,7 +1223,34 @@ pub const Parser = struct {
         const name = self.previous;
         try self.consume(.LEFT_BRACE);
         var fields: std.ArrayList(*AST.TypedNamedField) = .empty;
-        while (true) {
+        var methods: std.ArrayList(*AST.ASTNode) = .empty;
+
+        while (!self.check(.RIGHT_BRACE) and !self.check(.EOF)) {
+            if (try self.match(.STATIC)) {
+                if (try self.match(.CO)) {
+                    const method = try self.parse_coroutine_declaration(false, true);
+                    try methods.append(self.allocator, method);
+                } else if (try self.match(.FN)) {
+                    const method = try self.parse_function_declaration(false, true);
+                    try methods.append(self.allocator, method);
+                } else {
+                    return ParserError.UnexpectedToken;
+                }
+                _ = try self.match(.COMMA);
+                continue;
+            }
+            if (try self.match(.CO)) {
+                const method = try self.parse_coroutine_declaration(false, false);
+                try methods.append(self.allocator, method);
+                _ = try self.match(.COMMA);
+                continue;
+            }
+            if (try self.match(.FN)) {
+                const method = try self.parse_function_declaration(false, false);
+                try methods.append(self.allocator, method);
+                _ = try self.match(.COMMA);
+                continue;
+            }
             const field = try self.parse_typed_named_field();
             try fields.append(self.allocator, field);
             if (self.check(.RIGHT_BRACE)) {
@@ -1232,6 +1264,7 @@ pub const Parser = struct {
             .modifier_pub = is_pub,
             .name = name,
             .fields = try fields.toOwnedSlice(self.allocator),
+            .methods = try methods.toOwnedSlice(self.allocator),
         };
         const node = try self.allocator.create(AST.ASTNode);
         node.* = .{
@@ -1342,7 +1375,6 @@ pub const Parser = struct {
             if (self.is_table_literal_lookahead()) {
                 return try self.parse_expression_statement();
             }
-            try self.advance();
             return try self.parse_block_statement();
         } else if (try self.match(.FOR)) {
             return try self.parse_for_statement();
@@ -1352,6 +1384,8 @@ pub const Parser = struct {
             return try self.parse_return_statement();
         } else if (try self.match(.YIELD)) {
             return try self.parse_yield_statement();
+        } else if (try self.match(.RESUME)) {
+            return try self.parse_resume_statement();
         } else if (try self.match(.USE)) {
             return try self.parse_use_statement();
         } else if (try self.match(.GIVE)) {
@@ -1369,24 +1403,20 @@ pub const Parser = struct {
 
     fn parse_declaration(self: *Parser) ParserError!*AST.ASTNode {
         var is_pub = false;
-        var is_coroutine = false;
         if (try self.match(.PUB)) {
             is_pub = true;
-        }
-        if (try self.match(.CO)) {
-            is_coroutine = true;
         }
 
         if (try self.match(.VAR)) {
             return try self.parse_var_declaration(is_pub);
         } else if (try self.match(.FN)) {
-            return try self.parse_function_declaration(is_pub, false, is_coroutine);
+            return try self.parse_function_declaration(is_pub, false);
+        } else if (try self.match(.CO)) {
+            return try self.parse_coroutine_declaration(is_pub, false);
         } else if (try self.match(.STRUCT)) {
             return try self.parse_struct_declaration(is_pub);
         } else if (try self.match(.TYPE)) {
             return try self.parse_type_declaration(is_pub);
-        } else if (try self.match(.IMPL)) {
-            return try self.parse_impl_declaration(is_pub);
         } else if (try self.match(.ENUM)) {
             return try self.parse_enum_declaration(is_pub);
         } else if (try self.match(.ERROR)) {
@@ -1398,6 +1428,14 @@ pub const Parser = struct {
     }
 
     pub fn parse(self: *Parser) ParserError!*AST.ASTNode {
-        return try self.parse_declaration();
+        const program = try self.allocator.create(AST.Program);
+        var declarations: std.ArrayList(*AST.ASTNode) = .empty;
+        while (!self.check(.EOF)) {
+            try declarations.append(self.allocator, try self.parse_declaration());
+        }
+        program.* = .{ .declarations = try declarations.toOwnedSlice(self.allocator) };
+        const node = try self.allocator.create(AST.ASTNode);
+        node.* = .{ .program = program };
+        return node;
     }
 };

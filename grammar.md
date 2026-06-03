@@ -1,28 +1,28 @@
 program         ::= declaration* EOF
 
 /* --- Declarations --- */
-declaration     ::= modifier* ( var_decl | fn_decl | type_decl | struct_decl | enum_decl | impl_decl )
+declaration     ::= modifier* ( var_decl | fn_decl | type_decl | struct_decl | enum_decl | co_decl )
                   | use_decl
                   | statement
 
-modifier        ::= 'pub' | 'co' | 'static'
+modifier        ::= 'pub' | 'static'
 
 use_decl        ::= 'use' import_item (',' import_item)* 'from' STRING ';'
 
 
 var_decl        ::= 'var' IDENTIFIER (':' type_expr)? '=' expression ';'
 
-fn_decl         ::= 'fn' IDENTIFIER '(' parameters? ')' ('->' type_expr)? block
+fn_decl         ::= 'fn' IDENTIFIER '(' parameters? ')' ('->' type_expr) statement
+
+co_decl         ::= 'co' IDENTIFIER '(' parameters? ')' ('->' '(' type_expr ',' type_expr ')' statement)
 
 type_decl       ::= 'type' IDENTIFIER '=' type_expr ';'
 
-struct_decl     ::= 'struct' IDENTIFIER '{' struct_fields? '}'
+struct_decl     ::= 'struct' IDENTIFIER '{' struct_fields? fn_decl? co_decl? '}'
 
 enum_decl       ::= 'enum' IDENTIFIER '{' enum_variants? '}'
 
 error_decl      ::= 'error' IDENTIFIER '{' enum_variants? '}'
-
-impl_decl       ::= 'impl' IDENTIFIER '{' (modifier* fn_decl)* '}'
 
 /* --- Types --- */
 type_expr       ::= IDENTIFIER ('[' type_expr (',' type_expr)* ']')?  /* Generics e.g. Array[Int] */

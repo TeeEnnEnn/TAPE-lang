@@ -28,6 +28,7 @@ pub const TypeInfo = union(enum) {
     range: struct { start: TypeId, end: TypeId },
     table: struct { key: TypeId, value: TypeId },
     function: struct { args: []TypeId, ret: TypeId },
+    coroutine: struct { args: []TypeId, ret: TypeId, yield: TypeId },
     option: TypeId,
     result: struct { ok: TypeId, err: TypeId },
     _union: struct { left: TypeId, right: TypeId },
@@ -93,26 +94,26 @@ pub const TypeRegistry = struct {
                     const arg_id = try self.resolve(arg);
                     try arg_ids.append(self.allocator, arg_id);
                 }
-                if (function.return_type) |ret| {
-                    const ret_id = try self.resolve(ret);
-                    return try self.add_function_type(try arg_ids.toOwnedSlice(self.allocator), ret_id);
+                const ret_id = try self.resolve(function.return_type);
+                return try self.add_function_type(try arg_ids.toOwnedSlice(self.allocator), ret_id);
+            },
+            .co_type => |co| {
+                const args = co.params;
+                var arg_ids: std.ArrayList(TypeId) = .empty;
+                for (args) |arg| {
+                    const arg_id = try self.resolve(arg);
+                    try arg_ids.append(self.allocator, arg_id);
                 }
-                return try self.add_function_type(try arg_ids.toOwnedSlice(self.allocator), @intFromEnum(PrimitiveType.Nil));
+                const ret_id = try self.resolve(co.return_type);
+                const yield_id = try self.resolve(co.yield_type);
+                return try self.add_coroutine_type(try arg_ids.toOwnedSlice(self.allocator), ret_id, yield_id);
             },
             .range_type => |range| {
                 const start_id = try self.resolve(range.start);
                 const end_id = try self.resolve(range.end);
                 return try self.add_range_type(start_id, end_id);
             },
-            .result_type => |result| {
-                const ok_id = try self.resolve(result.ok_type);
-                const err_id = try self.resolve(result.err_type);
-                return try self.add_result_type(ok_id, err_id);
-            },
-            .option_type => |option| {
-                const element_id = try self.resolve(option.element_type);
-                return try self.add_option_type(element_id);
-            },
+
             .identifier_type => |identifier| {
                 const name = identifier.name.lexeme;
                 const generics = identifier.generic_args;
@@ -229,6 +230,24 @@ pub const TypeRegistry = struct {
         return id;
     }
 
+    pub fn add_coroutine_type(self: *TypeRegistry, args: []TypeId, ret: TypeId, yield: TypeId) !TypeId {
+        for (self.types.items, 0..) |info, index| {
+            switch (info) {
+                .coroutine => |c| {
+                    if (std.mem.eql(TypeId, c.args, args) and c.ret == ret and c.yield == yield) {
+                        return @as(TypeId, @intCast(index));
+                    }
+                },
+                else => continue,
+            }
+        }
+
+        // add new type
+        const id = @as(TypeId, @intCast(self.types.items.len));
+        try self.types.append(self.allocator, .{ .coroutine = .{ .args = args, .ret = ret, .yield = yield } });
+        return id;
+    }
+
     pub fn add_range_type(self: *TypeRegistry, start: TypeId, end: TypeId) !TypeId {
         for (self.types.items, 0..) |info, index| {
             switch (info) {
@@ -244,42 +263,6 @@ pub const TypeRegistry = struct {
         // add new type
         const id = @as(TypeId, @intCast(self.types.items.len));
         try self.types.append(self.allocator, .{ .range = .{ .start = start, .end = end } });
-        return id;
-    }
-
-    pub fn add_result_type(self: *TypeRegistry, ok_type: TypeId, err_type: TypeId) !TypeId {
-        for (self.types.items, 0..) |info, index| {
-            switch (info) {
-                .result => |r| {
-                    if (r.ok == ok_type and r.err == err_type) {
-                        return @as(TypeId, @intCast(index));
-                    }
-                },
-                else => continue,
-            }
-        }
-
-        // add new type
-        const id = @as(TypeId, @intCast(self.types.items.len));
-        try self.types.append(self.allocator, .{ .result = .{ .ok = ok_type, .err = err_type } });
-        return id;
-    }
-
-    pub fn add_option_type(self: *TypeRegistry, some_type: TypeId) !TypeId {
-        for (self.types.items, 0..) |info, index| {
-            switch (info) {
-                .option => |existing_some_type| {
-                    if (existing_some_type == some_type) {
-                        return @as(TypeId, @intCast(index));
-                    }
-                },
-                else => continue,
-            }
-        }
-
-        // add new type
-        const id = @as(TypeId, @intCast(self.types.items.len));
-        try self.types.append(self.allocator, .{ .option = some_type });
         return id;
     }
 

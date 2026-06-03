@@ -8,17 +8,27 @@ const TypeRegistryError = TypeRegistry.TypeRegistryError;
 const ShapeField = TypeRegistry.ShapeField;
 
 pub const TypeCheckerError = error{
+    /// The type of an expression does not match the expected type.
     TypeMismatch,
+    /// The symbol is not defined in the current scope.
     UndefinedSymbol,
+    /// The symbol is defined more than once in the current scope.
     DuplicateSymbol,
+    /// The symbol is not callable.
     NotCallable,
+    /// The number of arguments does not match the expected number.
     InvalidArgumentCount,
+    /// The condition is not a boolean.
     NonBooleanCondition,
+    /// The member access is not valid for the given type.
     InvalidMemberAccess,
     MissingReturn,
     ImmutableAssignment,
     NonExhaustiveMatch,
     InvalidOperation,
+    UnknownExpression,
+    /// The index is out of bounds for the given type.
+    IndexOutOfBounds,
 } || EnvironmentError || TypeRegistryError || std.mem.Allocator.Error;
 
 pub const TypeChecker = struct {
@@ -36,31 +46,43 @@ pub const TypeChecker = struct {
 
     pub fn hoist(self: *TypeChecker, node: *AST.ASTNode) TypeCheckerError!void {
         switch (node.*) {
+            .program => |program| for (program.declarations) |decl| try self.hoist(decl),
             .fn_decl => |decl| {
-                var param_types = std.ArrayList(AST.TypeId).init(self.allocator);
-                defer param_types.deinit();
+                var param_types: std.ArrayList(AST.TypeId) = .empty;
 
                 for (decl.params) |param| {
-                    const param_id = try self.check_expression(param.type_annotation);
-                    try param_types.append(param_id);
+                    const param_id = try self.registry.resolve(param.type_annotation);
+                    try param_types.append(self.allocator, param_id);
                 }
 
                 const return_id = try self.registry.resolve(decl.return_type_annotation);
 
-                const fn_id = try self.registry.add_function_type(param_types.items, return_id);
+                const fn_id = try self.registry.add_function_type(try param_types.toOwnedSlice(self.allocator), return_id);
                 try self.environment.define(decl.name.lexeme, fn_id);
             },
+            .co_decl => |decl| {
+                var param_types: std.ArrayList(AST.TypeId) = .empty;
+
+                for (decl.params) |param| {
+                    const param_id = try self.registry.resolve(param.type_annotation);
+                    try param_types.append(self.allocator, param_id);
+                }
+
+                const return_id = try self.registry.resolve(decl.return_type_annotation);
+                const yield_id = try self.registry.resolve(decl.yield_type_annotation);
+                const co_id = try self.registry.add_coroutine_type(try param_types.toOwnedSlice(self.allocator), return_id, yield_id);
+                try self.environment.define(decl.name.lexeme, co_id);
+            },
             .struct_decl => |decl| {
-                var field_types = std.ArrayList(ShapeField).init(self.allocator);
-                defer field_types.deinit();
+                var field_types: std.ArrayList(ShapeField) = .empty;
 
                 for (decl.fields) |field| {
                     const field_type = try self.registry.resolve(field.type_annotation);
-                    try field_types.append(.{ .name = field.name.lexeme, .type = field_type });
+                    try field_types.append(self.allocator, .{ .name = field.name.lexeme, .type = field_type });
                 }
 
                 // Register shape type under the struct name
-                const shape_id = try self.registry.add_shape_type(field_types.items);
+                const shape_id = try self.registry.add_shape_type(try field_types.toOwnedSlice(self.allocator));
                 try self.environment.define(decl.name.lexeme, shape_id);
             },
             .type_decl => |decl| {
@@ -75,37 +97,39 @@ pub const TypeChecker = struct {
                 const error_id = try self.registry.add_identifier_type(decl.name.lexeme, null);
                 try self.environment.define(decl.name.lexeme, error_id);
             },
-            .impl_decl => |decl| {
-                // a struct's impl block must be called after the struct
-                self.environment.lookup(decl.name.lexeme) catch {
-                    return TypeCheckerError.UndefinedSymbol;
-                };
-                // TODO: update the struct's shape with the new functions
-
-            },
+            else => {},
         }
     }
 
     pub fn check(self: *TypeChecker, node: *AST.ASTNode) TypeCheckerError!void {
         switch (node.*) {
+            .program => |program| {
+                try self.hoist(node);
+                for (program.declarations) |decl| try self.check(decl);
+            },
             .var_decl => |decl| {
                 const expr_type = try self.check_expression(decl.initializer);
                 var target_type = expr_type;
 
                 if (decl.type_annotation) |annotated| {
                     target_type = try self.registry.resolve(annotated);
-                    if (!try self.is_compatible(expr_type, target_type)) {
+                    if (!try self.is_compatible(target_type, expr_type)) {
                         return TypeCheckerError.TypeMismatch;
                     }
                 }
-                try self.environment.define(decl.name.lexeme, target_type);
+                if (self.environment.lookup(decl.name.lexeme)) |_| {
+                    return;
+                } else |_| {
+                    try self.environment.define(decl.name.lexeme, target_type);
+                }
             },
             .fn_decl => |decl| {
                 const fn_id = self.environment.lookup(decl.name.lexeme) catch {
                     return TypeCheckerError.UndefinedSymbol;
                 };
 
-                const type_info = self.registry.getTypeInfo(fn_id);
+                const type_info = self.registry.get_type_info(fn_id);
+                if (type_info != .function) return TypeCheckerError.NotCallable;
 
                 // Track expected return type
                 const prev_return = self.expected_return_type;
@@ -128,13 +152,9 @@ pub const TypeChecker = struct {
             },
             .type_decl => {},
             .struct_decl => {},
+            .co_decl => {},
             .enum_decl => {},
             .error_decl => {},
-            .impl_decl => |decl| {
-                for (decl.methods) |method| {
-                    try self.check(method);
-                }
-            },
             .use_decl => {
                 // TODO: compilation of imported script
             },
@@ -178,10 +198,7 @@ pub const TypeChecker = struct {
                 }
             },
             .give_stmt => |stmt| {
-                var provided_type = @intFromEnum(PrimitiveType.Nil);
-                if (stmt.expr) |v| {
-                    provided_type = try self.check_expression(v);
-                }
+                const provided_type = try self.check_expression(stmt.expr);
 
                 if (self.expected_give_type) |expected_type| {
                     if (!try self.is_compatible(expected_type, provided_type)) {
@@ -212,10 +229,10 @@ pub const TypeChecker = struct {
                 }
             },
             .expr_stmt => |stmt| {
-                try self.check_expression(stmt.expr);
+                _ = try self.check_expression(stmt.expr); // any expression type is allowed - so we can ignore the result
             },
             .panic_stmt => |stmt| {
-                try self.check_expression(stmt.expr);
+                _ = try self.check_expression(stmt.expr); // any expression type is allowed - so we can ignore the result
             },
             else => {},
         }
@@ -227,7 +244,7 @@ pub const TypeChecker = struct {
                 const right_type = try self.check_expression(expr.right);
 
                 // if assigning to a variable
-                if (expr.left.* == .identifier_expr or expr.left.* == .instance_member_expr) {
+                if (expr.left.* == .identifier_expr or expr.left.* == .dot_expr) {
                     const left_type = try self.check_expression(expr.left);
                     if (!try self.is_compatible(left_type, right_type)) {
                         return TypeCheckerError.TypeMismatch;
@@ -249,7 +266,7 @@ pub const TypeChecker = struct {
                 const left_type = try self.check_expression(expr.expr);
                 const right_type = try self.registry.resolve(expr.type);
 
-                if (!self.is_compatible(left_type, right_type)) return TypeCheckerError.TypeMismatch;
+                if (!try self.is_compatible(right_type, left_type)) return TypeCheckerError.TypeMismatch;
                 expr.resolved_type = right_type;
                 return right_type;
             },
@@ -262,19 +279,20 @@ pub const TypeChecker = struct {
                         return expr_type;
                     }
                     return TypeCheckerError.InvalidOperation;
-                }
-                if (std.mem.eql(u8, token.lexeme, "~")) {
+                } else if (std.mem.eql(u8, token.lexeme, "~")) {
                     if (expr_type == @intFromEnum(PrimitiveType.Int)) {
                         expr.resolved_type = expr_type;
                         return expr_type;
                     }
                     return TypeCheckerError.InvalidOperation;
-                }
-                if (std.mem.eql(u8, token.lexeme, "not")) {
+                } else if (std.mem.eql(u8, token.lexeme, "not")) {
                     if (expr_type == @intFromEnum(PrimitiveType.Bool)) {
                         expr.resolved_type = expr_type;
                         return expr_type;
                     }
+                    return TypeCheckerError.InvalidOperation;
+                } else {
+                    return TypeCheckerError.InvalidOperation;
                 }
             },
             .binary_expr => |expr| {
@@ -327,10 +345,26 @@ pub const TypeChecker = struct {
                         }
                         expr.resolved_type = info.ret;
                     },
+                    .coroutine => |info| {
+                        if (expr.args.len != info.args.len) {
+                            return TypeCheckerError.InvalidArgumentCount;
+                        }
+                        for (expr.args, 0..) |arg, index| {
+                            const arg_type = try self.check_expression(arg);
+                            if (arg_type != info.args[index]) {
+                                return TypeCheckerError.TypeMismatch;
+                            }
+                        }
+
+                        // union type of return and yield type
+                        const union_type = try self.registry.add_union_type(info.ret, info.yield);
+                        expr.resolved_type = union_type;
+                    },
                     else => {
                         return TypeCheckerError.InvalidOperation;
                     },
                 }
+                return TypeCheckerError.InvalidOperation;
             },
             .index_expr => |expr| {
                 // check if the index target is an indexable type. Otherwise error
@@ -354,13 +388,6 @@ pub const TypeChecker = struct {
                         expr.resolved_type = tbl_info.value;
                         return tbl_info.value;
                     },
-                    .tuple => |tup_info| {
-                        if (index_type != @intFromEnum(PrimitiveType.Int)) {
-                            return TypeCheckerError.TypeMismatch;
-                        }
-                        // TODO: make a union type of the possible tuple value types
-                        return tup_info[0];
-                    },
                     .primitive => |prim| {
                         switch (prim) {
                             .String => {
@@ -380,9 +407,9 @@ pub const TypeChecker = struct {
                     },
                 }
             },
-            .instance_member_expr => |expr| {
+            .dot_expr => |expr| {
                 const obj_type = try self.check_expression(expr.expr);
-                const type_info = self.registry.getTypeInfo(obj_type);
+                const type_info = self.registry.get_type_info(obj_type);
 
                 if (type_info == .shape) {
                     for (type_info.shape) |field| {
@@ -391,12 +418,19 @@ pub const TypeChecker = struct {
                             return field.type;
                         }
                     }
+                } else if (type_info == .tuple) {
+                    const index_value = std.fmt.parseInt(u8, expr.member.lexeme, 10) catch {
+                        return TypeCheckerError.InvalidMemberAccess;
+                    };
+                    if (index_value >= type_info.tuple.len) return TypeCheckerError.IndexOutOfBounds;
+                    expr.resolved_type = type_info.tuple[index_value];
+                    return type_info.tuple[index_value];
                 }
                 return TypeCheckerError.InvalidMemberAccess;
             },
             .static_member_expr => |expr| {
                 const obj_type = try self.check_expression(expr.expr);
-                const type_info = self.registry.getTypeInfo(obj_type);
+                const type_info = self.registry.get_type_info(obj_type);
 
                 if (type_info == .shape) {
                     for (type_info.shape) |field| {
@@ -408,44 +442,32 @@ pub const TypeChecker = struct {
                 }
                 return TypeCheckerError.InvalidMemberAccess;
             },
-            .error_unwrap_expr => |expr| {
-                const expr_type = try self.check_expression(expr.expr);
-                const type_info = self.registry.get_type_info(expr_type);
-                switch (type_info) {
-                    .result => |result| {
-                        expr.resolved_type = result.ok;
-                        return result.ok;
-                    },
-                    else => {
-                        return TypeCheckerError.InvalidOperation;
-                    },
-                }
-            },
+
             .array_expr => |expr| {
-                var current_id = null;
+                var current_id: ?AST.TypeId = null;
                 for (expr.elements) |element| {
                     if (current_id == null) {
                         current_id = try self.check_expression(element);
                         continue;
                     }
-                    if (!self.is_compatible(current_id, try self.check_expression(element))) {
+                    if (!try self.is_compatible(current_id.?, try self.check_expression(element))) {
                         return TypeCheckerError.TypeMismatch;
                     }
                 }
                 if (current_id == null) {
                     current_id = @intFromEnum(PrimitiveType.Nil); // nil
                 }
-                const array_type = try self.registry.add_array_type(current_id);
+                const array_type = try self.registry.add_array_type(current_id.?);
                 expr.resolved_type = array_type;
                 return array_type;
             },
             .shape_expr => |expr| {
-                var field_types = std.ArrayList(ShapeField).init(self.allocator);
-                defer field_types.deinit();
+                var field_types: std.ArrayList(ShapeField) = .empty;
+                defer field_types.deinit(self.allocator);
 
                 for (expr.fields) |field| {
                     const field_type = try self.registry.resolve(field.type_annotation);
-                    try field_types.append(.{ .name = field.name.lexeme, .type = field_type });
+                    try field_types.append(self.allocator, .{ .name = field.name.lexeme, .type = field_type });
                 }
 
                 const shape_type = try self.registry.add_shape_type(field_types.items);
@@ -458,12 +480,13 @@ pub const TypeChecker = struct {
                 return expr_type;
             },
             .tuple_expr => |expr| {
-                const inner_types = try std.ArrayList(u32).init(self.allocator);
+                var inner_types: std.ArrayList(AST.TypeId) = .empty;
+                defer inner_types.deinit(self.allocator);
                 for (expr.exprs) |v| {
                     const expr_type = try self.check_expression(v);
-                    try inner_types.append(expr_type);
+                    try inner_types.append(self.allocator, expr_type);
                 }
-                const tuple_type = self.registry.add_tuple_type(inner_types.items);
+                const tuple_type = try self.registry.add_tuple_type(inner_types.items);
                 expr.resolved_type = tuple_type;
                 return tuple_type;
             },
@@ -499,7 +522,7 @@ pub const TypeChecker = struct {
                 if (value_type == null) {
                     return TypeCheckerError.UnknownType;
                 }
-                const table_type = try self.registry.add_table_type(key_type, value_type);
+                const table_type = try self.registry.add_table_type(key_type.?, value_type.?);
                 expr.resolved_type = table_type;
                 return table_type;
             },
@@ -508,7 +531,7 @@ pub const TypeChecker = struct {
                     return TypeCheckerError.UndefinedSymbol;
                 };
 
-                const type_info = self.registry.getTypeInfo(struct_typeid);
+                const type_info = self.registry.get_type_info(struct_typeid);
                 if (type_info != .shape) return TypeCheckerError.InvalidOperation;
 
                 const shape_fields = type_info.shape;
@@ -535,25 +558,41 @@ pub const TypeChecker = struct {
                 return struct_typeid;
             },
             .match_expr => |expr| {
-                _ = expr;
-                // expr.cases: []*MatchCase
-                // expr.expr: *ASTNode
-                // expr.resolved_type: u32
+                // TODO: add exhaustive checks
+                defer self.expected_give_type = null;
+                const expr_typeid = try self.check_expression(expr.expr);
+                for (expr.cases) |case| {
+                    // check if the case and the expression are compatible
+                    const case_typeid = try self.check_expression(case.pattern);
+                    if (!try self.is_compatible(expr_typeid, case_typeid)) {
+                        return TypeCheckerError.TypeMismatch;
+                    }
+                    _ = try self.check_expression(case.stmts); // check the body of the case
+                    // we are interested in the give type
+                }
+                if (self.expected_give_type) |typeid| {
+                    expr.resolved_type = typeid;
+                    return typeid;
+                } else {
+                    // there was not a give type, so we return nil
+                    expr.resolved_type = @intFromEnum(PrimitiveType.Nil);
+                    return @intFromEnum(PrimitiveType.Nil);
+                }
             },
             .anon_fn_expr => |expr| {
-                var arg_types = std.ArrayList(u32).init(self.allocator);
-                defer arg_types.deinit();
+                var arg_types: std.ArrayList(u32) = .empty;
+                defer arg_types.deinit(self.allocator);
 
                 for (expr.params) |param| {
                     const param_typeid = try self.registry.resolve(param.type_annotation);
-                    try arg_types.append(param_typeid);
+                    try arg_types.append(self.allocator, param_typeid);
                 }
                 var ret_typeid = @intFromEnum(PrimitiveType.Nil);
                 if (expr.return_type_annotation) |ret_annot| {
                     ret_typeid = try self.registry.resolve(ret_annot);
                 }
 
-                const function_typeid = try self.registry.add_function_type(try arg_types.toOwnedSlice(), ret_typeid);
+                const function_typeid = try self.registry.add_function_type(try arg_types.toOwnedSlice(self.allocator), ret_typeid);
 
                 // Typecheck inner body
                 const prev_ret = self.expected_return_type;
@@ -585,7 +624,9 @@ pub const TypeChecker = struct {
                 lit.resolved_type = @intFromEnum(PrimitiveType.Nil);
                 return lit.resolved_type;
             },
-            else => {},
+            else => {
+                return TypeCheckerError.UnknownExpression;
+            },
         };
     }
 

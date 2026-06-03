@@ -8,7 +8,7 @@ fn resolveType(allocator: std.mem.Allocator, registry: *TypeRegistry, type_str: 
     const source = try std.fmt.allocPrint(allocator, "var x: {s} = 0;", .{type_str});
     var p = try Parser.init(allocator, source);
     const node = try p.parse();
-    const var_decl = node.var_decl;
+    const var_decl = node.program.declarations[0].var_decl;
     return try registry.resolve(var_decl.type_annotation.?);
 }
 

@@ -4,6 +4,7 @@ const Token = @import("scanner.zig").Token;
 pub const TypeId = u32;
 
 pub const ASTNode = union(enum) {
+    program: *Program,
     /// Variable Declaration
     var_decl: *VarDecl,
     /// Function Declaration
@@ -16,9 +17,8 @@ pub const ASTNode = union(enum) {
     enum_decl: *EnumDecl,
     /// Error declaration
     error_decl: *ErrorDecl,
-
-    /// Struct Implementation Declaration
-    impl_decl: *ImplDecl,
+    /// Coroutine declaration
+    co_decl: *CoDecl,
     /// Use declaration
     use_decl: *UseDecl,
 
@@ -28,8 +28,13 @@ pub const ASTNode = union(enum) {
     return_stmt: *ReturnStmt,
     /// `yield value`
     yield_stmt: *YieldStmt,
+    /// `resume value`
+    resume_stmt: *ResumeStmt,
+    /// `give value`
     give_stmt: *GiveStmt,
+    /// `break`
     break_stmt: *BreakStmt,
+    /// `continue`
     continue_stmt: *ContinueStmt,
     while_stmt: *WhileStmt,
     for_stmt: *ForStmt,
@@ -52,9 +57,8 @@ pub const ASTNode = union(enum) {
     // postfix
     call_expr: *CallExpr, // ()
     index_expr: *IndexExpr, // []
-    instance_member_expr: *InstanceMemberExpr, // .
+    dot_expr: *DotExpr, // .
     static_member_expr: *StaticMemberExpr, // ::
-    error_unwrap_expr: *ErrorUnwrapExpr, // ?
 
     // primary
     /// Array expression node.
@@ -90,19 +94,26 @@ pub const ASTNode = union(enum) {
     bool_type: *BoolType,
     array_type: *ArrayType,
     table_type: *TableType,
-    buffer_type: *BufferType,
     range_type: *RangeType,
-    option_type: *OptionType,
-    result_type: *ResultType,
     never_type: *NeverType,
     tuple_type: *TupleType,
     identifier_type: *IdentifierType,
     fn_type: *FnType,
+    co_type: *CoType,
     union_type: *UnionType,
     shape_type: *ShapeType,
 };
 
 // Node Types
+
+/// Program node.
+///
+/// ```
+///
+/// ```
+pub const Program = struct {
+    declarations: []*ASTNode,
+};
 
 /// Variable declaration node.
 ///
@@ -126,10 +137,26 @@ pub const VarDecl = struct {
 pub const FnDecl = struct {
     modifier_pub: bool,
     modifier_static: bool,
-    modifier_co: bool,
     name: Token,
     params: []*TypedNamedField,
-    return_type_annotation: ?*ASTNode,
+    return_type_annotation: *ASTNode,
+    body: *ASTNode,
+};
+
+/// Function declaration node.
+///
+/// ```
+/// co 'name'('params') -> '(yield_type, return_type)' {
+///     'body'
+/// }
+/// ```
+pub const CoDecl = struct {
+    modifier_pub: bool,
+    modifier_static: bool,
+    name: Token,
+    params: []*TypedNamedField,
+    return_type_annotation: *ASTNode,
+    yield_type_annotation: *ASTNode,
     body: *ASTNode,
 };
 
@@ -149,13 +176,10 @@ pub const TypeDecl = struct {
 /// ```
 /// struct 'name' {
 ///     'fields'
+///     'methods'
 /// }
 /// ```
-pub const StructDecl = struct {
-    modifier_pub: bool,
-    name: Token,
-    fields: []*TypedNamedField,
-};
+pub const StructDecl = struct { modifier_pub: bool, name: Token, fields: []*TypedNamedField, methods: []*ASTNode };
 
 /// Enum declaration node.
 ///
@@ -183,18 +207,6 @@ pub const ErrorDecl = struct {
     variants: []Token,
 };
 
-/// Impl declaration node.
-///
-/// ```
-/// impl 'name' {
-///     'methods'
-/// }
-/// ```
-pub const ImplDecl = struct {
-    name: Token,
-    methods: []*ASTNode,
-};
-
 /// Block statement node.
 ///
 /// ```
@@ -211,6 +223,15 @@ pub const BlockStmt = struct {
 /// ```
 pub const ReturnStmt = struct {
     expr: ?*ASTNode,
+};
+
+/// Resume statement node.
+///
+/// ```
+/// resume 'expr';
+/// ```
+pub const ResumeStmt = struct {
+    expr: *ASTNode,
 };
 
 /// Yield statement node.
@@ -393,12 +414,12 @@ pub const ArrayExpr = struct {
     resolved_type: TypeId = 0,
 };
 
-/// Instance member expression node.
+/// dot expression node.
 ///
 /// ```
 /// expr.member
 /// ```
-pub const InstanceMemberExpr = struct {
+pub const DotExpr = struct {
     expr: *ASTNode,
     member: Token,
     resolved_type: TypeId = 0,
@@ -565,8 +586,6 @@ pub const StringType = struct {};
 
 pub const BoolType = struct {};
 
-pub const FileType = struct {};
-
 pub const ArrayType = struct {
     element_type: *ASTNode,
 };
@@ -576,21 +595,10 @@ pub const TableType = struct {
     element_type: *ASTNode,
 };
 
-pub const BufferType = struct {};
-
 pub const RangeType = struct {
     start: *ASTNode,
     end: *ASTNode,
     step: u32 = 1,
-};
-
-pub const OptionType = struct {
-    element_type: *ASTNode,
-};
-
-pub const ResultType = struct {
-    ok_type: *ASTNode,
-    err_type: *ASTNode,
 };
 
 pub const NeverType = struct {};
@@ -601,7 +609,13 @@ pub const TupleType = struct {
 
 pub const FnType = struct {
     params: []*ASTNode,
-    return_type: ?*ASTNode,
+    return_type: *ASTNode,
+};
+
+pub const CoType = struct {
+    params: []*ASTNode,
+    return_type: *ASTNode,
+    yield_type: *ASTNode,
 };
 
 pub const IdentifierType = struct {
