@@ -43,9 +43,7 @@ pub const TypeInfo = union(enum) {
     range: struct { start: TypeId, end: TypeId },
     table: struct { key: TypeId, value: TypeId },
     function: struct { args: []TypeId, ret: TypeId },
-    coroutine: struct { args: []TypeId, ret: TypeId, yield: TypeId },
-    option: TypeId,
-    result: struct { ok: TypeId, err: TypeId },
+    coroutine: struct { args: []TypeId, ret: TypeId, yield: TypeId, instantiated: bool },
     _union: struct { left: TypeId, right: TypeId },
     _error: struct { name: []const u8, variants: [][]const u8 },
     _enum: struct { name: []const u8, variants: [][]const u8 },
@@ -125,7 +123,7 @@ pub const TypeRegistry = struct {
                 }
                 const ret_id = try self.resolve(co.return_type);
                 const yield_id = try self.resolve(co.yield_type);
-                return try self.add_coroutine_type(try arg_ids.toOwnedSlice(self.allocator), ret_id, yield_id);
+                return try self.add_coroutine_type(try arg_ids.toOwnedSlice(self.allocator), ret_id, yield_id, false);
             },
             .range_type => |range| {
                 const start_id = try self.resolve(range.start);
@@ -244,7 +242,7 @@ pub const TypeRegistry = struct {
         return id;
     }
 
-    pub fn add_coroutine_type(self: *TypeRegistry, args: []TypeId, ret: TypeId, yield: TypeId) !TypeId {
+    pub fn add_coroutine_type(self: *TypeRegistry, args: []TypeId, ret: TypeId, yield: TypeId, instantiated: bool) !TypeId {
         for (self.types.items, 0..) |info, index| {
             switch (info) {
                 .coroutine => |c| {
@@ -258,7 +256,7 @@ pub const TypeRegistry = struct {
 
         // add new type
         const id = @as(TypeId, @intCast(self.types.items.len));
-        try self.types.append(self.allocator, .{ .coroutine = .{ .args = args, .ret = ret, .yield = yield } });
+        try self.types.append(self.allocator, .{ .coroutine = .{ .args = args, .ret = ret, .yield = yield, .instantiated = instantiated } });
         return id;
     }
 

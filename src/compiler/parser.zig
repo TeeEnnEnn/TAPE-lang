@@ -313,7 +313,7 @@ pub const Parser = struct {
     }
 
     fn parse_unary(self: *Parser) ParserError!*AST.ASTNode {
-        if (self.check(.TILDE) or self.check(.MINUS) or self.check(.NOT)) {
+        if (self.check(.TILDE) or self.check(.MINUS) or self.check(.NOT) or self.check(.RESUME)) {
             const operator = self.current;
             try self.advance();
             // chaining unaries
@@ -661,11 +661,12 @@ pub const Parser = struct {
             try self.consume(.RIGHT_PAREN);
 
             try self.consume(.ARROW);
-            try self.consume(.LEFT_PAREN);
+            try self.consume(.CO);
+            try self.consume(.LEFT_SQUARE);
             const yield_type = try self.parse_type_expression();
             try self.consume(.COMMA);
             const return_type = try self.parse_type_expression();
-            try self.consume(.RIGHT_PAREN);
+            try self.consume(.RIGHT_SQUARE);
 
             const co_type = try self.allocator.create(AST.CoType);
             co_type.* = .{ .params = try params.toOwnedSlice(self.allocator), .return_type = return_type, .yield_type = yield_type };

@@ -27,6 +27,8 @@ pub const TypeCheckerError = error{
     MissingReturn,
     ImmutableAssignment,
     NonExhaustiveMatch,
+    BreakOutsideLoop,
+    ContinueOutsideLoop,
     InvalidOperation,
     UnknownExpression,
     /// The index is out of bounds for the given type.
@@ -41,6 +43,8 @@ pub const TypeChecker = struct {
     expected_return_type: ?AST.TypeId = null,
     expected_give_type: ?AST.TypeId = null,
     expected_yield_type: ?AST.TypeId = null,
+
+    in_loop: bool = false,
 
     pub fn init(allocator: std.mem.Allocator, registry: *TypeRegistry.TypeRegistry, global_environment: *Environment) TypeChecker {
         return .{ .allocator = allocator, .registry = registry, .environment = global_environment };
@@ -72,7 +76,7 @@ pub const TypeChecker = struct {
 
                 const return_id = try self.registry.resolve(decl.return_type_annotation);
                 const yield_id = try self.registry.resolve(decl.yield_type_annotation);
-                const co_id = try self.registry.add_coroutine_type(try param_types.toOwnedSlice(self.allocator), return_id, yield_id);
+                const co_id = try self.registry.add_coroutine_type(try param_types.toOwnedSlice(self.allocator), return_id, yield_id, false);
                 try self.environment.define(decl.name.lexeme, co_id);
             },
             .struct_decl => |decl| {
@@ -84,7 +88,7 @@ pub const TypeChecker = struct {
                     try field_types.append(self.allocator, .{ .name = field.name.lexeme, .type = field_type, .is_static = field.is_static, .is_pub = field.is_pub });
                 }
                 for (decl.methods) |method| {
-                    const method_type = try self.check_expression(method.method);
+                    const method_type = try self.check_declaration_type(method.method);
                     try method_types.append(self.allocator, .{ .name = method.name.lexeme, .type = method_type, .is_static = method.is_static, .is_pub = method.is_pub });
                 }
 
@@ -268,7 +272,9 @@ pub const TypeChecker = struct {
                 if (condition_type != @intFromEnum(PrimitiveType.Bool)) {
                     return TypeCheckerError.TypeMismatch;
                 }
+                self.in_loop = true;
                 try self.check(stmt.body);
+                self.in_loop = false;
             },
             .for_stmt => |stmt| {
                 var local_env = Environment.init(self.allocator, self.environment);
@@ -279,7 +285,9 @@ pub const TypeChecker = struct {
                 defer self.environment = prev_env;
 
                 try self.environment.define(stmt.iterator_name.lexeme, @intFromEnum(PrimitiveType.Int));
+                self.in_loop = true;
                 try self.check(stmt.body);
+                self.in_loop = false;
             },
             .if_stmt => |stmt| {
                 const condition_type = try self.check_expression(stmt.condition);
@@ -291,6 +299,12 @@ pub const TypeChecker = struct {
                     try self.check(else_branch);
                 }
             },
+            .break_stmt => {
+                if (!self.in_loop) return TypeCheckerError.BreakOutsideLoop;
+            },
+            .continue_stmt => {
+                if (!self.in_loop) return TypeCheckerError.ContinueOutsideLoop;
+            },
             .expr_stmt => |stmt| {
                 _ = try self.check_expression(stmt.expr); // any expression type is allowed - so we can ignore the result
             },
@@ -298,6 +312,37 @@ pub const TypeChecker = struct {
                 _ = try self.check_expression(stmt.expr); // any expression type is allowed - so we can ignore the result
             },
             else => {},
+        }
+    }
+
+    fn check_declaration_type(self: *TypeChecker, node: *AST.ASTNode) TypeCheckerError!AST.TypeId {
+        switch (node.*) {
+            .fn_decl => |decl| {
+                var param_types: std.ArrayList(AST.TypeId) = .empty;
+                defer param_types.deinit(self.allocator);
+                for (decl.params) |param| {
+                    const param_type = try self.registry.resolve(param.type_annotation);
+                    try param_types.append(self.allocator, param_type);
+                }
+                const return_type = try self.registry.resolve(decl.return_type_annotation);
+                const fn_type = try self.registry.add_function_type(try param_types.toOwnedSlice(self.allocator), return_type);
+                return fn_type;
+            },
+            .co_decl => |decl| {
+                var param_types: std.ArrayList(AST.TypeId) = .empty;
+                defer param_types.deinit(self.allocator);
+                for (decl.params) |param| {
+                    const param_type = try self.registry.resolve(param.type_annotation);
+                    try param_types.append(self.allocator, param_type);
+                }
+                const return_type = try self.registry.resolve(decl.return_type_annotation);
+                const yield_type = try self.registry.resolve(decl.yield_type_annotation);
+                const co_type = try self.registry.add_coroutine_type(try param_types.toOwnedSlice(self.allocator), return_type, yield_type, false);
+                return co_type;
+            },
+            else => {
+                return TypeCheckerError.UnknownExpression;
+            },
         }
     }
 
@@ -354,6 +399,17 @@ pub const TypeChecker = struct {
                         return expr_type;
                     }
                     return TypeCheckerError.InvalidOperation;
+                } else if (std.mem.eql(u8, token.lexeme, "resume")) {
+                    const type_info = self.registry.get_type_info(expr_type);
+                    switch (type_info) {
+                        .coroutine => |co| {
+                            if (!co.instantiated) return TypeCheckerError.InvalidOperation;
+                            const yield_ret_union = try self.registry.add_union_type(co.yield, co.ret);
+                            expr.resolved_type = yield_ret_union;
+                            return yield_ret_union;
+                        },
+                        else => return TypeCheckerError.InvalidOperation,
+                    }
                 } else {
                     return TypeCheckerError.InvalidOperation;
                 }
@@ -423,6 +479,10 @@ pub const TypeChecker = struct {
                         expr.resolved_type = info.ret;
                     },
                     .coroutine => |info| {
+                        if (info.instantiated) {
+                            return TypeCheckerError.InvalidOperation;
+                            // cannot call a coroutine that has already been instantiated - must use resume
+                        }
                         if (expr.args.len != info.args.len) {
                             return TypeCheckerError.InvalidArgumentCount;
                         }
@@ -432,16 +492,14 @@ pub const TypeChecker = struct {
                                 return TypeCheckerError.TypeMismatch;
                             }
                         }
-
-                        // union type of return and yield type
-                        const union_type = try self.registry.add_union_type(info.ret, info.yield);
-                        expr.resolved_type = union_type;
+                        self.registry.types.items[expr_type].coroutine.instantiated = true;
+                        expr.resolved_type = expr_type;
                     },
                     else => {
                         return TypeCheckerError.InvalidOperation;
                     },
                 }
-                return TypeCheckerError.InvalidOperation;
+                return expr.resolved_type;
             },
             .index_expr => |expr| {
                 // check if the index target is an indexable type. Otherwise error
@@ -523,6 +581,15 @@ pub const TypeChecker = struct {
                             }
                         }
                         return TypeCheckerError.InvalidMemberAccess;
+                    },
+                    .coroutine => {
+                        // corotines have suspended, finished, and running members - which are boolean values
+                        if (std.mem.eql(u8, expr.member.lexeme, "suspended") or std.mem.eql(u8, expr.member.lexeme, "finished") or std.mem.eql(u8, expr.member.lexeme, "running")) {
+                            expr.resolved_type = @intFromEnum(PrimitiveType.Bool);
+                            return @intFromEnum(PrimitiveType.Bool);
+                        } else {
+                            return TypeCheckerError.InvalidMemberAccess;
+                        }
                     },
                     else => {
                         return TypeCheckerError.InvalidMemberAccess;
@@ -770,10 +837,6 @@ pub const TypeChecker = struct {
             ._union => |u| {
                 // source is compatible if it fits either side of target union
                 return (try self.is_compatible(u.left, source)) or (try self.is_compatible(u.right, source));
-            },
-            .option => |opt| {
-                if (source == @intFromEnum(PrimitiveType.Nil)) return true; // Nil is compatible with Option (None)
-                return try self.is_compatible(opt, source);
             },
             else => return false,
         };
