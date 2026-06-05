@@ -43,17 +43,17 @@ test "Scanner Emits Error For Unterminated String" {
 }
 
 test "Scanner Keywords" {
-    const source = "resume and as break co continue default else false for fn from give if in match native new nil not or orelse panic pub return shape static struct typeof true type use var while";
+    const source = "resume and as break co continue default else false for fn from give if in match new nil not or orelse panic pub return shape static struct true type use var while try";
     const expected = [_]TokenType{
-        .RESUME, .AND, .AS, .BREAK, .CO, .CONTINUE, .DEFAULT, .ELSE, .FALSE, .FOR, .FN, .FROM, .GIVE, .IF, .IN, .MATCH, .NATIVE, .NEW, .NIL, .NOT, .OR, .ORELSE, .PANIC, .PUB, .RETURN, .SHAPE, .STATIC, .STRUCT, .TYPEOF, .TRUE, .TYPE, .USE, .VAR, .WHILE,
+        .RESUME, .AND, .AS, .BREAK, .CO, .CONTINUE, .DEFAULT, .ELSE, .FALSE, .FOR, .FN, .FROM, .GIVE, .IF, .IN, .MATCH, .NEW, .NIL, .NOT, .OR, .ORELSE, .PANIC, .PUB, .RETURN, .SHAPE, .STATIC, .STRUCT, .TRUE, .TYPE, .USE, .VAR, .WHILE, .TRY,
     };
     try checkTokens(source, &expected);
 }
 
 test "Scanner Type Keywords" {
-    const source = "Nil Bool Int Float String Array Table Error Buffer Range Never Coroutine";
+    const source = "Nil Bool Int Float String Array Table Error Range Never";
     const expected = [_]TokenType{
-        .NIL_TYPE, .BOOL_TYPE, .INT_TYPE, .FLOAT_TYPE, .STRING_TYPE, .ARRAY_TYPE, .TABLE_TYPE, .ERROR_TYPE, .BUFFER_TYPE, .RANGE_TYPE, .NEVER_TYPE, .COROUTINE_TYPE,
+        .NIL_TYPE, .BOOL_TYPE, .INT_TYPE, .FLOAT_TYPE, .STRING_TYPE, .ARRAY_TYPE, .TABLE_TYPE, .ERROR_TYPE, .RANGE_TYPE, .NEVER_TYPE,
     };
     try checkTokens(source, &expected);
 }

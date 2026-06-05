@@ -146,8 +146,6 @@ pub const TokenType = enum {
     DEFAULT,
     /// 'give'
     GIVE,
-    /// 'typeof'
-    TYPEOF,
     /// 'new'
     NEW,
     /// 'panic'
@@ -158,8 +156,6 @@ pub const TokenType = enum {
     SHAPE,
     /// 'type'
     TYPE,
-    /// 'native'
-    NATIVE,
     /// 'static'
     STATIC,
     /// 'co'
@@ -170,6 +166,8 @@ pub const TokenType = enum {
     ERROR,
     /// 'resume'
     RESUME,
+    /// 'try'
+    TRY,
 
     /// 'Nil'
     NIL_TYPE,
@@ -187,14 +185,10 @@ pub const TokenType = enum {
     TABLE_TYPE,
     /// 'Error'
     ERROR_TYPE,
-    /// 'Buffer'
-    BUFFER_TYPE,
     /// 'Range'
     RANGE_TYPE,
     /// 'Never'
     NEVER_TYPE,
-    /// 'Coroutine'
-    COROUTINE_TYPE,
     /// 'EOF'
     EOF,
 };
@@ -316,7 +310,6 @@ pub const Scanner = struct {
             'A' => self.check_keyword(1, "rray", .ARRAY_TYPE),
             'B' => if (len > 1) switch (source[1]) {
                 'o' => self.check_keyword(2, "ol", .BOOL_TYPE),
-                'u' => self.check_keyword(2, "ffer", .BUFFER_TYPE),
                 else => .IDENTIFIER,
             } else .IDENTIFIER,
             'E' => self.check_keyword(1, "rror", .ERROR_TYPE),
@@ -330,7 +323,6 @@ pub const Scanner = struct {
             'R' => self.check_keyword(1, "ange", .RANGE_TYPE),
             'S' => self.check_keyword(1, "tring", .STRING_TYPE),
             'T' => self.check_keyword(1, "able", .TABLE_TYPE),
-            'C' => self.check_keyword(1, "oroutine", .COROUTINE_TYPE),
 
             // Language keywords
             'a' => if (len > 1) switch (source[1]) {
@@ -368,7 +360,6 @@ pub const Scanner = struct {
                 'o' => self.check_keyword(2, "t", .NOT),
                 'i' => self.check_keyword(2, "l", .NIL),
                 'e' => self.check_keyword(2, "w", .NEW),
-                'a' => self.check_keyword(2, "tive", .NATIVE),
                 else => .IDENTIFIER,
             } else .IDENTIFIER,
             'o' => if (len > 1) switch (source[1]) {
@@ -401,11 +392,12 @@ pub const Scanner = struct {
             'v' => self.check_keyword(1, "ar", .VAR),
             'y' => self.check_keyword(1, "ield", .YIELD),
             't' => if (len > 1) switch (source[1]) {
-                'r' => self.check_keyword(2, "ue", .TRUE),
-                'y' => if (len >= 4 and source[2] == 'p' and source[3] == 'e')
-                    (if (len == 4) .TYPE else self.check_keyword(4, "of", .TYPEOF))
-                else
-                    .IDENTIFIER,
+                'r' => if (len > 2) switch (source[2]) {
+                    'u' => self.check_keyword(3, "e", .TRUE),
+                    'y' => self.check_keyword(3, "e", .TRY),
+                    else => .IDENTIFIER,
+                } else .IDENTIFIER,
+                'y' => self.check_keyword(2, "pe", .TYPE),
                 else => .IDENTIFIER,
             } else .IDENTIFIER,
             'u' => self.check_keyword(1, "se", .USE),

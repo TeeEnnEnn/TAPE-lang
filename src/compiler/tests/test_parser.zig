@@ -114,6 +114,22 @@ test "Parser can parse operator precedence" {
     try std.testing.expectEqual(@as(i64, 4), right_bin.right.int_lit.value);
 }
 
+test "Parser can parse exponentiation **" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const allocator = arena.allocator();
+
+    const source = "2 ** 3;";
+    const node = try parseFirstDecl(allocator, source);
+
+    try std.testing.expect(node.* == .expr_stmt);
+    const expr = node.expr_stmt.expr;
+    try std.testing.expect(expr.* == .binary_expr);
+    try std.testing.expectEqualStrings("**", expr.binary_expr.operator.lexeme);
+    try std.testing.expectEqual(@as(i64, 2), expr.binary_expr.left.int_lit.value);
+    try std.testing.expectEqual(@as(i64, 3), expr.binary_expr.right.int_lit.value);
+}
+
 test "Parser can parse unary expressions" {
     var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
     defer arena.deinit();
@@ -206,6 +222,35 @@ test "Parser can parse empty error" {
     try std.testing.expectEqual(@as(usize, 0), error_decl.variants.len);
 }
 
+test "Parser can parse enum with variants" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const allocator = arena.allocator();
+
+    const node = try parseFirstDecl(allocator, "enum Color { Red, Green, Blue }");
+    try std.testing.expect(node.* == .enum_decl);
+    const enum_decl = node.enum_decl;
+    try std.testing.expectEqualStrings("Color", enum_decl.name.lexeme);
+    try std.testing.expectEqual(@as(usize, 3), enum_decl.variants.len);
+    try std.testing.expectEqualStrings("Red", enum_decl.variants[0].lexeme);
+    try std.testing.expectEqualStrings("Green", enum_decl.variants[1].lexeme);
+    try std.testing.expectEqualStrings("Blue", enum_decl.variants[2].lexeme);
+}
+
+test "Parser can parse error with variants" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const allocator = arena.allocator();
+
+    const node = try parseFirstDecl(allocator, "error HttpError { NotFound, Unauthorized }");
+    try std.testing.expect(node.* == .error_decl);
+    const error_decl = node.error_decl;
+    try std.testing.expectEqualStrings("HttpError", error_decl.name.lexeme);
+    try std.testing.expectEqual(@as(usize, 2), error_decl.variants.len);
+    try std.testing.expectEqualStrings("NotFound", error_decl.variants[0].lexeme);
+    try std.testing.expectEqualStrings("Unauthorized", error_decl.variants[1].lexeme);
+}
+
 test "Parser can parse coroutine" {
     var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
     defer arena.deinit();
@@ -233,6 +278,17 @@ test "Parser can parse for statement with var iterator" {
     try std.testing.expectEqualStrings("i", node.for_stmt.iterator_name.lexeme);
     try std.testing.expect(node.for_stmt.iterator_expr.* == .binary_expr);
     try std.testing.expectEqualStrings("..", node.for_stmt.iterator_expr.binary_expr.operator.lexeme);
+}
+
+test "Parser can parse Color::Red expression" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const allocator = arena.allocator();
+
+    const node = try parseFirstDecl(allocator, "Color::Red;");
+    try std.testing.expect(node.* == .expr_stmt);
+    try std.testing.expect(node.expr_stmt.expr.* == .static_member_expr);
+    try std.testing.expectEqualStrings("Red", node.expr_stmt.expr.static_member_expr.member.lexeme);
 }
 
 test "Parser can parse struct methods" {

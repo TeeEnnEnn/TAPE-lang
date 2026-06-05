@@ -292,7 +292,7 @@ pub const Parser = struct {
 
     fn parse_factor(self: *Parser) ParserError!*AST.ASTNode {
         var left = try self.parse_unary();
-        while (self.check(.STAR) or self.check(.PERCENT) or self.check(.SLASH)) {
+        while (self.check(.STAR) or self.check(.STAR_STAR) or self.check(.PERCENT) or self.check(.SLASH)) {
             const operator = self.current;
             try self.advance();
             const right = try self.parse_unary();
@@ -313,19 +313,43 @@ pub const Parser = struct {
     }
 
     fn parse_unary(self: *Parser) ParserError!*AST.ASTNode {
-        if (self.check(.TILDE) or self.check(.MINUS) or self.check(.NOT) or self.check(.RESUME)) {
+        if (self.check(.TILDE) or self.check(.MINUS) or self.check(.NOT) or self.check(.RESUME) or self.check(.TRY)) {
             const operator = self.current;
             try self.advance();
-            // chaining unaries
+
+            // Unaries chain right-to-left
             const right = try self.parse_unary();
 
-            const unary = try self.allocator.create(AST.UnaryExpr);
-            unary.* = .{ .operator = operator, .expr = right };
-            const node = try self.allocator.create(AST.ASTNode);
-            node.* = .{ .unary_expr = unary };
-            return node;
+            switch (operator.token_type) {
+                .RESUME => {
+                    const resume_node = try self.allocator.create(AST.ResumeExpr);
+                    resume_node.* = .{ .expr = right };
+
+                    const node = try self.allocator.create(AST.ASTNode);
+                    node.* = .{ .resume_expr = resume_node };
+                    return node;
+                },
+                .TRY => {
+                    const try_node = try self.allocator.create(AST.TryExpr);
+                    try_node.* = .{ .expr = right };
+
+                    const node = try self.allocator.create(AST.ASTNode);
+                    node.* = .{ .try_expr = try_node };
+                    return node;
+                },
+                else => {
+                    // standard mathematical/logical unaries (~, -, not)
+                    const unary = try self.allocator.create(AST.UnaryExpr);
+                    unary.* = .{ .operator = operator, .expr = right };
+
+                    const node = try self.allocator.create(AST.ASTNode);
+                    node.* = .{ .unary_expr = unary };
+                    return node;
+                },
+            }
         }
-        // if no unary go to next precedence
+
+        // If no unary, go to next precedence
         return try self.parse_cast();
     }
 
@@ -1151,7 +1175,6 @@ pub const Parser = struct {
     }
 
     fn parse_give_statement(self: *Parser) ParserError!*AST.ASTNode {
-        try self.consume(.GIVE);
         const expr = try self.parse_expression();
         try self.consume(.SEMICOLON);
 
@@ -1164,7 +1187,6 @@ pub const Parser = struct {
     }
 
     fn parse_yield_statement(self: *Parser) ParserError!*AST.ASTNode {
-        try self.consume(.YIELD);
         const expr = try self.parse_expression();
         try self.consume(.SEMICOLON);
 
@@ -1176,16 +1198,15 @@ pub const Parser = struct {
         return node;
     }
 
-    fn parse_resume_statement(self: *Parser) ParserError!*AST.ASTNode {
-        try self.consume(.RESUME);
+    fn parse_resume_expression(self: *Parser) ParserError!*AST.ASTNode {
         const expr = try self.parse_expression();
         try self.consume(.SEMICOLON);
 
-        const resume_stmt = try self.allocator.create(AST.ResumeStmt);
-        resume_stmt.* = .{ .expr = expr };
+        const resume_expr = try self.allocator.create(AST.ResumeExpr);
+        resume_expr.* = .{ .expr = expr };
 
         const node = try self.allocator.create(AST.ASTNode);
-        node.* = .{ .resume_stmt = resume_stmt };
+        node.* = .{ .resume_expr = resume_expr };
         return node;
     }
 
@@ -1195,7 +1216,7 @@ pub const Parser = struct {
 
         try self.consume(.LEFT_BRACE);
         var variants: std.ArrayList(Token) = .empty;
-        while (!try self.match(.RIGHT_BRACE) and !try self.match(.EOF)) {
+        while (!self.check(.RIGHT_BRACE) and !self.check(.EOF)) {
             try self.consume(.IDENTIFIER);
             const variant = self.previous;
             try variants.append(self.allocator, variant);
@@ -1204,6 +1225,7 @@ pub const Parser = struct {
             }
             try self.consume(.COMMA);
         }
+        try self.consume(.RIGHT_BRACE);
 
         const error_decl = try self.allocator.create(AST.ErrorDecl);
         error_decl.* = .{ .name = token, .variants = try variants.toOwnedSlice(self.allocator), .modifier_pub = is_pub };
@@ -1218,7 +1240,7 @@ pub const Parser = struct {
 
         try self.consume(.LEFT_BRACE);
         var variants: std.ArrayList(Token) = .empty;
-        while (!try self.match(.RIGHT_BRACE) and !try self.match(.EOF)) {
+        while (!self.check(.RIGHT_BRACE) and !self.check(.EOF)) {
             try self.consume(.IDENTIFIER);
             const variant = self.previous;
             try variants.append(self.allocator, variant);
@@ -1227,6 +1249,7 @@ pub const Parser = struct {
             }
             try self.consume(.COMMA);
         }
+        try self.consume(.RIGHT_BRACE);
 
         const enum_decl = try self.allocator.create(AST.EnumDecl);
         enum_decl.* = .{ .name = token, .variants = try variants.toOwnedSlice(self.allocator), .modifier_pub = is_pub };
@@ -1408,8 +1431,6 @@ pub const Parser = struct {
             return try self.parse_return_statement();
         } else if (try self.match(.YIELD)) {
             return try self.parse_yield_statement();
-        } else if (try self.match(.RESUME)) {
-            return try self.parse_resume_statement();
         } else if (try self.match(.USE)) {
             return try self.parse_use_statement();
         } else if (try self.match(.GIVE)) {

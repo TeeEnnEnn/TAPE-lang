@@ -28,8 +28,7 @@ pub const ASTNode = union(enum) {
     return_stmt: *ReturnStmt,
     /// `yield value`
     yield_stmt: *YieldStmt,
-    /// `resume value`
-    resume_stmt: *ResumeStmt,
+
     /// `give value`
     give_stmt: *GiveStmt,
     /// `break`
@@ -60,6 +59,11 @@ pub const ASTNode = union(enum) {
     dot_expr: *DotExpr, // .
     static_member_expr: *StaticMemberExpr, // ::
 
+    // unary
+    try_expr: *TryExpr, // try
+    /// `resume value`
+    resume_expr: *ResumeExpr,
+
     // primary
     /// Array expression node.
     ///
@@ -73,6 +77,7 @@ pub const ASTNode = union(enum) {
     /// shape {  }
     /// ```
     shape_expr: *ShapeExpr,
+
     group_expr: *GroupExpr, // ( )
     tuple_expr: *TupleExpr, // ( )
     table_expr: *TableExpr, // { }
@@ -230,13 +235,24 @@ pub const ReturnStmt = struct {
     expr: ?*ASTNode,
 };
 
-/// Resume statement node.
+/// Resume Expression node.
 ///
 /// ```
-/// resume 'expr';
+/// resume 'expr'
 /// ```
-pub const ResumeStmt = struct {
+pub const ResumeExpr = struct {
     expr: *ASTNode,
+    resolved_type: TypeId = 0,
+};
+
+/// Try expression node.
+///
+/// ```
+/// try 'expr'
+/// ```
+pub const TryExpr = struct {
+    expr: *ASTNode,
+    resolved_type: TypeId = 0,
 };
 
 /// Yield statement node.

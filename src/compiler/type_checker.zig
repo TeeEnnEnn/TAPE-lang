@@ -24,16 +24,29 @@ pub const TypeCheckerError = error{
     NonBooleanCondition,
     /// The member access is not valid for the given type.
     InvalidMemberAccess,
+    /// A return statement is missing in a function or coroutine.
     MissingReturn,
-    ImmutableAssignment,
+    /// The match expression is not exhaustive.
     NonExhaustiveMatch,
+    /// The break statement is outside of a loop.
     BreakOutsideLoop,
+    /// The continue statement is outside of a loop.
     ContinueOutsideLoop,
+    /// The operation is not valid for the given type.
     InvalidOperation,
+    /// The given expression is unknown.
     UnknownExpression,
     /// The index is out of bounds for the given type.
     IndexOutOfBounds,
 } || EnvironmentError || TypeRegistryError || std.mem.Allocator.Error;
+
+pub const StatementTermination = struct {
+    return_: bool,
+    break_: bool,
+    continue_: bool,
+    yield_: bool,
+    give_: bool,
+};
 
 pub const TypeChecker = struct {
     allocator: std.mem.Allocator,
@@ -44,7 +57,12 @@ pub const TypeChecker = struct {
     expected_give_type: ?AST.TypeId = null,
     expected_yield_type: ?AST.TypeId = null,
 
+    termination: StatementTermination = .{ .return_ = false, .break_ = false, .continue_ = false, .yield_ = false, .give_ = false },
+
     in_loop: bool = false,
+    in_coroutine: bool = false,
+    in_function: bool = false,
+    in_match: bool = false,
 
     pub fn init(allocator: std.mem.Allocator, registry: *TypeRegistry.TypeRegistry, global_environment: *Environment) TypeChecker {
         return .{ .allocator = allocator, .registry = registry, .environment = global_environment };
@@ -76,7 +94,7 @@ pub const TypeChecker = struct {
 
                 const return_id = try self.registry.resolve(decl.return_type_annotation);
                 const yield_id = try self.registry.resolve(decl.yield_type_annotation);
-                const co_id = try self.registry.add_coroutine_type(try param_types.toOwnedSlice(self.allocator), return_id, yield_id, false);
+                const co_id = try self.registry.add_coroutine_type(try param_types.toOwnedSlice(self.allocator), return_id, yield_id);
                 try self.environment.define(decl.name.lexeme, co_id);
             },
             .struct_decl => |decl| {
@@ -167,11 +185,23 @@ pub const TypeChecker = struct {
                     try self.environment.define(param.name.lexeme, param_id);
                 }
 
+                const prev_termination = self.termination;
+                self.termination = .{ .return_ = false, .break_ = false, .continue_ = false, .yield_ = false, .give_ = false };
+                defer self.termination = prev_termination;
+
+                const prev_in_func = self.in_function;
+                self.in_function = true;
+                defer self.in_function = prev_in_func;
                 try self.check(decl.body);
+
+                const needs_return = type_info.function.ret != @intFromEnum(PrimitiveType.Nil) and type_info.function.ret != @intFromEnum(PrimitiveType.Never);
+
+                if (needs_return and !self.termination.return_) {
+                    return TypeCheckerError.MissingReturn;
+                }
             },
-            .type_decl => |decl| {
-                try self.check(decl.type_annotation);
-            },
+            .type_decl => {}, // handled at hoist phase
+
             .struct_decl => |decl| {
                 for (decl.fields) |field| {
                     try self.check(field.type_annotation);
@@ -214,8 +244,11 @@ pub const TypeChecker = struct {
             },
             .enum_decl => {}, // fully handled in the hoist phase
             .error_decl => {}, // fully handled in the hoist phase
-            .use_decl => {
-                // TODO: compilation of imported script
+            .use_decl => |decl| {
+                if (decl.module.lexeme.len == 0) return TypeCheckerError.InvalidOperation;
+                for (decl.items) |item| {
+                    if (item.name.lexeme.len == 0) return TypeCheckerError.InvalidOperation;
+                }
             },
             .block_stmt => |stmt| {
                 var local_env = Environment.init(self.allocator, self.environment);
@@ -264,7 +297,8 @@ pub const TypeChecker = struct {
                         return TypeCheckerError.TypeMismatch;
                     }
                 } else {
-                    return TypeCheckerError.InvalidOperation; // give outside of match
+                    // first give in a match — set the expected type
+                    self.expected_give_type = provided_type;
                 }
             },
             .while_stmt => |stmt| {
@@ -337,7 +371,7 @@ pub const TypeChecker = struct {
                 }
                 const return_type = try self.registry.resolve(decl.return_type_annotation);
                 const yield_type = try self.registry.resolve(decl.yield_type_annotation);
-                const co_type = try self.registry.add_coroutine_type(try param_types.toOwnedSlice(self.allocator), return_type, yield_type, false);
+                const co_type = try self.registry.add_coroutine_type(try param_types.toOwnedSlice(self.allocator), return_type, yield_type);
                 return co_type;
             },
             else => {
@@ -357,6 +391,20 @@ pub const TypeChecker = struct {
                     if (!try self.is_compatible(left_type, right_type)) {
                         return TypeCheckerError.TypeMismatch;
                     }
+
+                    const op = expr.operator.lexeme;
+                    if (!std.mem.eql(u8, op, "=")) {
+                        const is_numeric = left_type == @intFromEnum(PrimitiveType.Int) or left_type == @intFromEnum(PrimitiveType.Float);
+
+                        if (std.mem.eql(u8, op, "-=") or std.mem.eql(u8, op, "*=") or std.mem.eql(u8, op, "/=") or std.mem.eql(u8, op, "+=")) {
+                            if (!is_numeric) {
+                                return TypeCheckerError.InvalidOperation;
+                            }
+                        }
+                        expr.resolved_type = left_type;
+                        return left_type;
+                    }
+
                     expr.resolved_type = right_type;
                     return right_type;
                 }
@@ -399,27 +447,36 @@ pub const TypeChecker = struct {
                         return expr_type;
                     }
                     return TypeCheckerError.InvalidOperation;
-                } else if (std.mem.eql(u8, token.lexeme, "resume")) {
-                    const type_info = self.registry.get_type_info(expr_type);
-                    switch (type_info) {
-                        .coroutine => |co| {
-                            if (!co.instantiated) return TypeCheckerError.InvalidOperation;
-                            const yield_ret_union = try self.registry.add_union_type(co.yield, co.ret);
-                            expr.resolved_type = yield_ret_union;
-                            return yield_ret_union;
-                        },
-                        else => return TypeCheckerError.InvalidOperation,
-                    }
                 } else {
                     return TypeCheckerError.InvalidOperation;
                 }
             },
+            .resume_expr => |expr| {
+                const expr_typeid = try self.check_expression(expr.expr);
+                const type_info = self.registry.get_type_info(expr_typeid);
+                if (type_info != .coroutine) return TypeCheckerError.InvalidOperation;
+                const union_type = try self.registry.add_union_type(type_info.coroutine.yield, type_info.coroutine.ret);
+                expr.resolved_type = union_type;
+                return union_type;
+            },
+            .try_expr => |expr| {
+                const expr_typeid = try self.check_expression(expr.expr);
+                const type_info = self.registry.get_type_info(expr_typeid);
+                if (type_info != ._union) return TypeCheckerError.InvalidOperation;
+                const left_err = self.registry.get_type_info(type_info._union.left) == ._error;
+                const right_err = self.registry.get_type_info(type_info._union.right) == ._error;
+                if (!left_err and !right_err) return TypeCheckerError.InvalidOperation;
+                const union_type = try self.registry.add_union_type(type_info._union.left, type_info._union.right);
+                expr.resolved_type = union_type;
+                return union_type;
+            },
+
             .binary_expr => |expr| {
                 const left_type: AST.TypeId = try self.check_expression(expr.left);
                 const right_type: AST.TypeId = try self.check_expression(expr.right);
                 const op = expr.operator.lexeme;
 
-                if (std.mem.eql(u8, op, "+") or std.mem.eql(u8, op, "-") or std.mem.eql(u8, op, "*") or std.mem.eql(u8, op, "/") or std.mem.eql(u8, op, "%")) {
+                if (std.mem.eql(u8, op, "+") or std.mem.eql(u8, op, "-") or std.mem.eql(u8, op, "*") or std.mem.eql(u8, op, "**") or std.mem.eql(u8, op, "/") or std.mem.eql(u8, op, "%")) {
                     const is_int = left_type == @intFromEnum(PrimitiveType.Int) and right_type == @intFromEnum(PrimitiveType.Int);
                     const is_float = (left_type == @intFromEnum(PrimitiveType.Float) or left_type == @intFromEnum(PrimitiveType.Int)) and
                         (right_type == @intFromEnum(PrimitiveType.Float) or right_type == @intFromEnum(PrimitiveType.Int));
@@ -429,10 +486,6 @@ pub const TypeChecker = struct {
                         return expr.resolved_type;
                     } else if (is_float) {
                         expr.resolved_type = @intFromEnum(PrimitiveType.Float);
-                        return expr.resolved_type;
-                    }
-                    if (std.mem.eql(u8, op, "+") and left_type == @intFromEnum(PrimitiveType.String) and right_type == @intFromEnum(PrimitiveType.String)) {
-                        expr.resolved_type = @intFromEnum(PrimitiveType.String);
                         return expr.resolved_type;
                     }
                     return TypeCheckerError.InvalidOperation;
@@ -458,8 +511,33 @@ pub const TypeChecker = struct {
                     if (left_type != @intFromEnum(PrimitiveType.Int) or right_type != @intFromEnum(PrimitiveType.Int)) return TypeCheckerError.TypeMismatch;
                     expr.resolved_type = @intFromEnum(PrimitiveType.Int);
                     return expr.resolved_type;
+                } else if (std.mem.eql(u8, op, "orelse")) {
+                    // orelse is only valid for T | Nil and T | Error
+                    const left_type_info = self.registry.get_type_info(left_type);
+                    const right_type_info = self.registry.get_type_info(right_type);
+
+                    const left_nil = left_type == @intFromEnum(PrimitiveType.Nil);
+                    const right_nil = right_type == @intFromEnum(PrimitiveType.Nil);
+                    const left_error = left_type_info == ._error;
+                    const right_error = right_type_info == ._error;
+                    if (!(left_nil or right_nil) and !(left_error or right_error)) return TypeCheckerError.TypeMismatch;
+                    if (left_nil) {
+                        expr.resolved_type = right_type;
+                        return expr.resolved_type;
+                    } else if (right_nil) {
+                        expr.resolved_type = left_type;
+                        return expr.resolved_type;
+                    } else if (left_error) {
+                        expr.resolved_type = right_type;
+                        return expr.resolved_type;
+                    } else if (right_error) {
+                        expr.resolved_type = left_type;
+                        return expr.resolved_type;
+                    }
+                    return TypeCheckerError.TypeMismatch;
+                } else {
+                    return TypeCheckerError.InvalidOperation;
                 }
-                return TypeCheckerError.InvalidOperation;
             },
             .call_expr => |expr| {
                 // check if the call target is a callable type. Otherwise error
@@ -479,10 +557,6 @@ pub const TypeChecker = struct {
                         expr.resolved_type = info.ret;
                     },
                     .coroutine => |info| {
-                        if (info.instantiated) {
-                            return TypeCheckerError.InvalidOperation;
-                            // cannot call a coroutine that has already been instantiated - must use resume
-                        }
                         if (expr.args.len != info.args.len) {
                             return TypeCheckerError.InvalidArgumentCount;
                         }
@@ -492,7 +566,6 @@ pub const TypeChecker = struct {
                                 return TypeCheckerError.TypeMismatch;
                             }
                         }
-                        self.registry.types.items[expr_type].coroutine.instantiated = true;
                         expr.resolved_type = expr_type;
                     },
                     else => {
@@ -752,16 +825,18 @@ pub const TypeChecker = struct {
                 return struct_typeid;
             },
             .match_expr => |expr| {
-                // TODO: add exhaustive checks
-                defer self.expected_give_type = null;
+                const prev_give = self.expected_give_type;
+                self.expected_give_type = null;
+                defer self.expected_give_type = prev_give;
                 const expr_typeid = try self.check_expression(expr.expr);
+                try self.check_match_exhaustiveness(expr_typeid, expr);
                 for (expr.cases) |case| {
                     // check if the case and the expression are compatible
                     const case_typeid = try self.check_expression(case.pattern);
                     if (!try self.is_compatible(expr_typeid, case_typeid)) {
                         return TypeCheckerError.TypeMismatch;
                     }
-                    _ = try self.check_expression(case.stmts); // check the body of the case
+                    try self.check(case.stmts); // check the body of the case
                     // we are interested in the give type
                 }
                 if (self.expected_give_type) |typeid| {
@@ -822,6 +897,46 @@ pub const TypeChecker = struct {
                 return TypeCheckerError.UnknownExpression;
             },
         };
+    }
+
+    fn check_match_exhaustiveness(self: *TypeChecker, matched_type: AST.TypeId, expr: *AST.MatchExpr) TypeCheckerError!void {
+        const type_info = self.registry.get_type_info(matched_type);
+        const variants: []const []const u8 = switch (type_info) {
+            ._enum => |e| e.variants,
+            ._error => |e| e.variants,
+            else => return, // not an enum/error, skip exhaustiveness check
+        };
+
+        // If any case pattern is not a static_member_expr, assume catch-all and skip
+        var has_catch_all = false;
+        for (expr.cases) |case| {
+            if (case.pattern.* != .static_member_expr) {
+                has_catch_all = true;
+                break;
+            }
+        }
+        if (has_catch_all) return;
+
+        // Collect covered variants
+        var covered = std.ArrayList([]const u8).empty;
+        defer covered.deinit(self.allocator);
+        for (expr.cases) |case| {
+            if (case.pattern.* == .static_member_expr) {
+                try covered.append(self.allocator, case.pattern.static_member_expr.member.lexeme);
+            }
+        }
+
+        // Check all variants are covered
+        for (variants) |variant| {
+            var found = false;
+            for (covered.items) |covered_variant| {
+                if (std.mem.eql(u8, covered_variant, variant)) {
+                    found = true;
+                    break;
+                }
+            }
+            if (!found) return TypeCheckerError.NonExhaustiveMatch;
+        }
     }
 
     fn is_compatible(self: *TypeChecker, target: AST.TypeId, source: AST.TypeId) TypeCheckerError!bool {

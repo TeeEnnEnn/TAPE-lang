@@ -80,6 +80,95 @@ test "Type Checker - rejects function return mismatch" {
     try std.testing.expectError(TypeCheckerError.TypeMismatch, checkSource(allocator, "fn bad() -> String { return 1; }"));
 }
 
+test "Type Checker - match exhaustiveness" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const allocator = arena.allocator();
+
+    // valid: exhaustive match on enum with returns
+    _ = try checkSource(allocator, "enum Color { Red, Green, Blue } fn f(c: Color) -> Int { match (c) { Color::Red => { return 1; }, Color::Green => { return 2; }, Color::Blue => { return 3; }, }; }");
+    // valid: match on non-enum type (no exhaustiveness check needed)
+    _ = try checkSource(allocator, "fn f(x: Int) -> Int { match (x) { 1 => { return 10; }, 2 => { return 20; }, }; }");
+
+    // invalid: non-exhaustive match on enum
+    try std.testing.expectError(TypeCheckerError.NonExhaustiveMatch, checkSource(allocator, "enum Color { Red, Green, Blue } fn f(c: Color) -> Int { match (c) { Color::Red => { return 1; }, Color::Green => { return 2; }, }; }"));
+
+    // invalid: non-exhaustive match on error
+    try std.testing.expectError(TypeCheckerError.NonExhaustiveMatch, checkSource(allocator, "error HttpError { NotFound, Unauthorized } fn f(e: HttpError) -> Int { match (e) { HttpError::NotFound => { return 404; }, }; }"));
+
+    // valid: nested match with give — context isolation
+    _ = try checkSource(allocator,
+        \\enum Inner { A, B }
+        \\enum Outer { X, Y }
+        \\fn f(o: Outer) -> Int {
+        \\  match (o) {
+        \\    Outer::X => {
+        \\      match (Inner::A) {
+        \\        Inner::A => { give 1; },
+        \\        Inner::B => { give 2; },
+        \\      };
+        \\    },
+        \\    Outer::Y => { return 3; },
+        \\  };
+        \\  return 0;
+        \\}
+    );
+}
+
+test "Type Checker - missing return detection" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const allocator = arena.allocator();
+
+    // valid: explicit return
+    _ = try checkSource(allocator, "fn f() -> Int { return 1; }");
+    // valid: no return needed for Nil return type
+    _ = try checkSource(allocator, "fn f() -> Nil { var x = 1; }");
+    // valid: if-else both return
+    _ = try checkSource(allocator, "fn f(x: Bool) -> Int { if (x) { return 1; } else { return 2; } }");
+    // valid: panic is acceptable
+    _ = try checkSource(allocator, "fn f() -> Int { panic \"no\"; }");
+    // valid: return in block
+    _ = try checkSource(allocator, "fn f() -> Int { { return 1; } }");
+
+    // invalid: missing return
+    try std.testing.expectError(TypeCheckerError.MissingReturn, checkSource(allocator, "fn f() -> Int { var x = 1; }"));
+    // invalid: if without else
+    try std.testing.expectError(TypeCheckerError.MissingReturn, checkSource(allocator, "fn f(x: Bool) -> Int { if (x) { return 1; } }"));
+    // invalid: if-else with one branch missing return
+    try std.testing.expectError(TypeCheckerError.MissingReturn, checkSource(allocator, "fn f(x: Bool) -> Int { if (x) { return 1; } else { var y = 2; } }"));
+}
+
+test "Type Checker - compound assignment semantics" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const allocator = arena.allocator();
+
+    // valid compound assignments
+    _ = try checkSource(allocator, "var x = 1; x += 2;");
+    _ = try checkSource(allocator, "var x = 1; x -= 2;");
+    _ = try checkSource(allocator, "var x = 1; x *= 2;");
+    _ = try checkSource(allocator, "var x = 1; x /= 2;");
+    _ = try checkSource(allocator, "var x = 1.0; x += 2.0;");
+
+    // invalid compound assignments
+    try std.testing.expectError(TypeCheckerError.InvalidOperation, checkSource(allocator, "var x = true; x += false;"));
+    try std.testing.expectError(TypeCheckerError.InvalidOperation, checkSource(allocator, "var x = \"a\"; x += \"b\";"));
+    try std.testing.expectError(TypeCheckerError.InvalidOperation, checkSource(allocator, "var x = \"a\"; x -= \"b\";"));
+    try std.testing.expectError(TypeCheckerError.InvalidOperation, checkSource(allocator, "var x = \"a\"; x *= \"b\";"));
+    try std.testing.expectError(TypeCheckerError.InvalidOperation, checkSource(allocator, "var x = \"a\"; x /= \"b\";"));
+}
+
+test "Type Checker - exponentiation with **" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const allocator = arena.allocator();
+
+    _ = try checkSource(allocator, "var x = 2 ** 3;");
+    _ = try checkSource(allocator, "var x = 2.5 ** 1.5;");
+    try std.testing.expectError(TypeCheckerError.InvalidOperation, checkSource(allocator, "var x = \"a\" ** \"b\";"));
+}
+
 test "Type Checker - checks struct construction and member access" {
     var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
     defer arena.deinit();
@@ -94,4 +183,18 @@ test "Type Checker - checks struct construction and member access" {
     defer result.registry.deinit();
 
     try std.testing.expectEqual(@intFromEnum(PrimitiveType.Int), try result.env.lookup("px"));
+}
+
+test "Type Checker - use declaration validation" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const allocator = arena.allocator();
+
+    // valid use declaration
+    _ = try checkSource(allocator, "use foo from \"mymodule\";");
+
+    // invalid: empty module path - but parser requires STRING token so len > 0 is guaranteed
+    // invalid: empty import name - parser requires IDENTIFIER so len > 0 is guaranteed
+    // Both cases are handled by the parser, so the type checker check is a safety net.
+    // For now we just verify valid cases compile.
 }
