@@ -56,6 +56,20 @@ test "Type Checker - rejects mismatched variable declaration" {
     try std.testing.expectError(TypeCheckerError.TypeMismatch, checkSource(allocator, "var x: String = 1;"));
 }
 
+test "Type Checker - rejects duplicate variable definition" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const allocator = arena.allocator();
+
+    // should reject duplicate variable definition in the same scope
+    try std.testing.expectError(TypeCheckerError.DuplicateSymbol, checkSource(allocator, "var x: Int = 1; var x: String = \"test\";"));
+    // should allow duplicate variable definition in different scopes
+    var result = try checkSource(allocator, "var test: Int = 1; { var test: String = \"test\"; }");
+    defer result.env.deinit();
+    defer result.registry.deinit();
+    try std.testing.expectEqual(@as(usize, 1), result.env.symbols.count());
+}
+
 test "Type Checker - checks function declaration and return type" {
     var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
     defer arena.deinit();

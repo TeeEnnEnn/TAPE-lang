@@ -156,11 +156,11 @@ pub const TypeChecker = struct {
                         return TypeCheckerError.TypeMismatch;
                     }
                 }
-                if (self.environment.lookup(decl.name.lexeme)) |_| {
-                    return .{};
-                } else |_| {
-                    try self.environment.define(decl.name.lexeme, target_type);
+                if (self.environment.contains(decl.name.lexeme)) {
+                    return TypeCheckerError.DuplicateSymbol;
                 }
+                try self.environment.define(decl.name.lexeme, target_type);
+
                 return .{};
             },
             .fn_decl => |decl| {
@@ -795,7 +795,7 @@ pub const TypeChecker = struct {
                     const expr_type = try self.check_expression(v);
                     try inner_types.append(self.allocator, expr_type);
                 }
-                const tuple_type = try self.registry.add_tuple_type(inner_types.items);
+                const tuple_type = try self.registry.add_tuple_type(try inner_types.toOwnedSlice(self.allocator));
                 expr.resolved_type = tuple_type;
                 return tuple_type;
             },

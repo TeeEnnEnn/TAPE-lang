@@ -11,6 +11,7 @@ pub const Environment = struct {
     symbols: std.StringHashMap(TypeId),
     parent: ?*Environment,
 
+    /// Initializes a new environment with the given allocator and parent environment.
     pub fn init(allocator: std.mem.Allocator, parent: ?*Environment) Environment {
         return .{
             .parent = parent,
@@ -19,6 +20,7 @@ pub const Environment = struct {
         };
     }
 
+    /// Deinitializes the environment and frees its resources.
     pub fn deinit(self: *Environment) void {
         self.symbols.deinit();
     }
@@ -31,6 +33,8 @@ pub const Environment = struct {
         try self.symbols.put(name, id);
     }
 
+    /// Looks up a symbol in the current scope and its parent scopes.
+    /// Returns the symbol's type ID if found, or an error if not found.
     pub fn lookup(self: *Environment, name: []const u8) EnvironmentError!TypeId {
         var curr: ?*Environment = self;
         while (curr) |env| {
@@ -40,5 +44,11 @@ pub const Environment = struct {
             curr = env.parent;
         }
         return EnvironmentError.UndefinedSymbol;
+    }
+
+    /// Returns true if the symbol is defined in the current scope.
+    /// Does not check parent scopes.
+    pub fn contains(self: *Environment, name: []const u8) bool {
+        return self.symbols.contains(name);
     }
 };

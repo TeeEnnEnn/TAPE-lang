@@ -1169,14 +1169,14 @@ pub const Parser = struct {
             const pat_node = try self.allocator.create(AST.ASTNode);
             pat_node.* = .{ .default_pat = pat };
             const case = try self.allocator.create(MatchCase);
-            case.* = .{ .pattern = pat_node, .stmts = stmt };
+            case.* = .{ .pattern = pat_node, .stmt = stmt };
             return case;
         }
         const expr = try self.parse_expression();
         try self.consume(.EQUAL_ARROW);
         const stmt = try self.parse_statement();
         const case = try self.allocator.create(MatchCase);
-        case.* = .{ .pattern = expr, .stmts = stmt };
+        case.* = .{ .pattern = expr, .stmt = stmt };
         return case;
     }
 
