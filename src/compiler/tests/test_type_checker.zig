@@ -15,7 +15,7 @@ fn checkSource(allocator: std.mem.Allocator, source: []const u8) !struct { regis
     var env = Environment.init(allocator, null);
     var registry = try TypeRegistry.init(allocator);
     var checker = TypeChecker.init(allocator, &registry, &env);
-    try checker.check(program);
+    _ = try checker.check(program);
 
     return .{ .registry = registry, .env = env };
 }
@@ -197,4 +197,84 @@ test "Type Checker - use declaration validation" {
     // invalid: empty import name - parser requires IDENTIFIER so len > 0 is guaranteed
     // Both cases are handled by the parser, so the type checker check is a safety net.
     // For now we just verify valid cases compile.
+}
+
+test "Type Checker - break and continue context" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const allocator = arena.allocator();
+
+    // valid: break inside while loop
+    _ = try checkSource(allocator, "while (true) { break; }");
+    // valid: continue inside for loop
+    _ = try checkSource(allocator, "var i = 0; while (i < 10) { i += 1; continue; }");
+    // valid: break inside nested loops
+    _ = try checkSource(allocator, "while (true) { while (true) { break; } break; }");
+
+    // invalid: break outside loop
+    try std.testing.expectError(TypeCheckerError.BreakOutsideLoop, checkSource(allocator, "break;"));
+    // invalid: continue outside loop
+    try std.testing.expectError(TypeCheckerError.ContinueOutsideLoop, checkSource(allocator, "continue;"));
+}
+
+test "Type Checker - panic as return" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const allocator = arena.allocator();
+
+    // valid: panic in place of return
+    _ = try checkSource(allocator, "fn f() -> Int { panic \"error\"; }");
+    // valid: if-else with panic in one branch and return in the other
+    _ = try checkSource(allocator, "fn f(x: Bool) -> Int { if (x) { return 1; } else { panic \"no\"; } }");
+    // valid: match with panic cases
+    _ = try checkSource(allocator, "enum Color { Red, Green } fn f(c: Color) -> Int { match (c) { Color::Red => { panic \"bad\"; }, Color::Green => { panic \"bad\"; }, }; }");
+}
+
+test "Type Checker - if-else return completeness" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const allocator = arena.allocator();
+
+    // valid: if-else both return
+    _ = try checkSource(allocator, "fn f(x: Bool) -> Int { if (x) { return 1; } else { return 2; } }");
+    // valid: if-else both panic
+    _ = try checkSource(allocator, "fn f(x: Bool) -> Int { if (x) { panic \"a\"; } else { panic \"b\"; } }");
+    // valid: nested if-else all return
+    _ = try checkSource(allocator, "fn f(x: Bool, y: Bool) -> Int { if (x) { if (y) { return 1; } else { return 2; } } else { return 3; } }");
+
+    // invalid: if without else on non-Nil return
+    try std.testing.expectError(TypeCheckerError.MissingReturn, checkSource(allocator, "fn f(x: Bool) -> Int { if (x) { return 1; } }"));
+    // invalid: if-else with one branch missing return
+    try std.testing.expectError(TypeCheckerError.MissingReturn, checkSource(allocator, "fn f(x: Bool) -> Int { if (x) { return 1; } else { var y = 2; } }"));
+    // invalid: nested if without else
+    try std.testing.expectError(TypeCheckerError.MissingReturn, checkSource(allocator, "fn f(x: Bool, z: Bool) -> Int { if (x) { if (z) { return 1; } } else { return 2; } }"));
+}
+
+test "Type Checker - match return completeness" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const allocator = arena.allocator();
+
+    // valid: exhaustive match on enum with all returning
+    _ = try checkSource(allocator, "enum Color { Red, Green, Blue } fn f(c: Color) -> Int { match (c) { Color::Red => { return 1; }, Color::Green => { return 2; }, Color::Blue => { return 3; }, }; }");
+    // valid: match with one case panicking
+    _ = try checkSource(allocator, "enum Color { Red, Green } fn f(c: Color) -> Int { match (c) { Color::Red => { return 1; }, Color::Green => { panic \"no\"; }, }; }");
+    // valid: non-enum match (no exhaustiveness check needed)
+    _ = try checkSource(allocator, "fn f(x: Int) -> Int { match (x) { 1 => { return 10; }, 2 => { return 20; }, }; return 0; }");
+
+    // invalid: match case uses give not return — function missing return
+    try std.testing.expectError(TypeCheckerError.MissingReturn, checkSource(allocator, "enum Color { Red, Green } fn f(c: Color) -> Int { match (c) { Color::Red => { give 1; }, Color::Green => { give 2; }, }; }"));
+}
+
+test "Type Checker - block termination" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const allocator = arena.allocator();
+
+    // valid: block with final return
+    _ = try checkSource(allocator, "fn f() -> Int { { return 1; } }");
+    // valid: block inside if-else returning
+    _ = try checkSource(allocator, "fn f(x: Bool) -> Int { if (x) { { return 1; } } else { { return 2; } } }");
+    // valid: nested blocks
+    _ = try checkSource(allocator, "fn f() -> Int { { { return 1; } } }");
 }

@@ -64,7 +64,7 @@ pub const Parser = struct {
     fn parse_assignment(self: *Parser) ParserError!*AST.ASTNode {
         const left = try self.parse_range();
 
-        if (self.check(.EQUAL) or self.check(.PLUS_EQUAL) or self.check(.MINUS_EQUAL) or self.check(.STAR_EQUAL) or self.check(.SLASH_EQUAL)) {
+        if (self.check(.EQUAL) or self.check(.PLUS_EQUAL) or self.check(.MINUS_EQUAL) or self.check(.STAR_EQUAL) or self.check(.SLASH_EQUAL) or self.check(.PERCENT_EQUAL)) {
             const operator = self.current;
             try self.advance();
 
@@ -476,6 +476,22 @@ pub const Parser = struct {
                 literal.* = .{ .value = try std.fmt.parseFloat(f64, token.lexeme) };
                 const node = try self.allocator.create(AST.ASTNode);
                 node.* = .{ .float_lit = literal };
+                return node;
+            },
+            TokenType.BINARY_INT => {
+                try self.advance();
+                const literal = try self.allocator.create(AST.IntLit);
+                literal.* = .{ .value = try std.fmt.parseInt(i64, token.lexeme[2..], 2) };
+                const node = try self.allocator.create(AST.ASTNode);
+                node.* = .{ .int_lit = literal };
+                return node;
+            },
+            TokenType.HEX_INT => {
+                try self.advance();
+                const literal = try self.allocator.create(AST.IntLit);
+                literal.* = .{ .value = try std.fmt.parseInt(i64, token.lexeme[2..], 16) };
+                const node = try self.allocator.create(AST.ASTNode);
+                node.* = .{ .int_lit = literal };
                 return node;
             },
             TokenType.TRUE => {
@@ -1145,6 +1161,17 @@ pub const Parser = struct {
     }
 
     fn parse_match_case(self: *Parser) ParserError!*MatchCase {
+        if (try self.match(.DEFAULT)) {
+            try self.consume(.EQUAL_ARROW);
+            const stmt = try self.parse_statement();
+            const pat = try self.allocator.create(AST.DefaultPat);
+            pat.* = .{};
+            const pat_node = try self.allocator.create(AST.ASTNode);
+            pat_node.* = .{ .default_pat = pat };
+            const case = try self.allocator.create(MatchCase);
+            case.* = .{ .pattern = pat_node, .stmts = stmt };
+            return case;
+        }
         const expr = try self.parse_expression();
         try self.consume(.EQUAL_ARROW);
         const stmt = try self.parse_statement();

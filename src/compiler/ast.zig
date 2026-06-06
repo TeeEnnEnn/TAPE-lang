@@ -91,6 +91,8 @@ pub const ASTNode = union(enum) {
     bool_lit: *BoolLit,
     nil_lit: *NilLit,
 
+    default_pat: *DefaultPat,
+
     // TypeNodes
     nil_type: *NilType,
     int_type: *IntType,
@@ -290,7 +292,7 @@ pub const ContinueStmt = struct {};
 /// While statement node.
 ///
 /// ```
-/// while ('expr') 'stmts'
+/// while ('expr') 'body'
 /// ```
 pub const WhileStmt = struct {
     condition: *ASTNode,
@@ -526,7 +528,7 @@ pub const MatchExpr = struct {
 /// ```
 pub const MatchCase = struct {
     pattern: *ASTNode,
-    stmts: *ASTNode,
+    stmt: *ASTNode,
     resolved_type: TypeId = 0,
 };
 
@@ -658,3 +660,7 @@ pub const UnionType = struct {
 pub const ShapeType = struct {
     fields: []*TypedNamedField,
 };
+
+// match patterns
+
+pub const DefaultPat = struct {};

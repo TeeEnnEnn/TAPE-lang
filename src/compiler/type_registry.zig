@@ -13,6 +13,7 @@ pub const StructField = struct {
     type: TypeId,
     is_static: bool,
     is_pub: bool,
+    has_default: bool,
 };
 
 pub const StructMethod = struct {

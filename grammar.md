@@ -18,7 +18,11 @@ co_decl         ::= 'co' IDENTIFIER '(' parameters? ')' ('->' '(' type_expr ',' 
 
 type_decl       ::= 'type' IDENTIFIER '=' type_expr ';'
 
-struct_decl     ::= 'struct' IDENTIFIER '{' struct_fields? fn_decl? co_decl? '}'
+struct_decl     ::= 'struct' IDENTIFIER '{' struct_members? '}'
+struct_members  ::= struct_member (',' struct_member)* ','?
+struct_member   ::= modifier* IDENTIFIER ':' type_expr ('=' expression)?   /* field with optional default */
+                  | modifier* fn_decl                                      /* method */
+                  | modifier* co_decl                                      /* coroutine method */
 
 enum_decl       ::= 'enum' IDENTIFIER '{' enum_variants? '}'
 
@@ -27,9 +31,15 @@ error_decl      ::= 'error' IDENTIFIER '{' enum_variants? '}'
 /* --- Types --- */
 type_expr       ::= IDENTIFIER ('[' type_expr (',' type_expr)* ']')?  /* Generics e.g. Array[Int] */
                   | type_expr '|' type_expr                           /* Unions e.g. Float | Nil */
+                  | 'Nil' | 'Bool' | 'Int' | 'Float' | 'String'
+                  | 'Never'
+                  | 'Array' '[' type_expr ']'
+                  | 'Table' '[' type_expr ',' type_expr ']'
+                  | 'Range' '[' type_expr ',' type_expr (',' INT)? ']'
                   | 'shape' '{' struct_fields? '}'
                   | '(' type_expr_list? ')'                           /* Tuple Type */
                   | 'fn' '(' type_expr_list? ')' ('->' type_expr)?    /* Function Type */
+                  | 'co' '(' type_expr_list? ')' '->' 'co' '[' type_expr ',' type_expr ']' /* Coroutine Type */
 
 type_expr_list  ::= type_expr (',' type_expr)* ','?
 
@@ -60,7 +70,7 @@ block           ::= '{' declaration* '}'
 expression      ::= assignment
 
 assignment      ::= range (assign_op assignment)?
-assign_op       ::= '=' | '+=' | '-=' | '*=' | '/=' | '++'
+assign_op       ::= '=' | '+=' | '-=' | '*=' | '/=' | '%='
 
 range           ::= logic_or ('..' logic_or)?
 
@@ -75,7 +85,7 @@ bit_shift       ::= term (('<<' | '>>') term)*
 term            ::= factor (('-' | '+') factor)*
 factor          ::= unary (('/' | '*' | '%' | '**') unary)*
 
-unary           ::= ('not' | '-' | '~' | 'resume') unary
+unary           ::= ('not' | '-' | '~' | 'resume' | 'try') unary
                   | cast
 
 cast            ::= postfix ('as' type_expr)*
@@ -85,7 +95,6 @@ postfix         ::= primary (
                     | '[' expression ']'            /* Index */
                     | '.' IDENTIFIER                /* Instance member access */
                     | '::' IDENTIFIER               /* Static member access */
-                    | '?'                           /* Error unwrap operator */
                   )*
 
 primary         ::= IDENTIFIER
@@ -112,6 +121,7 @@ struct_init     ::= IDENTIFIER '=' expression
 
 match_arms      ::= match_arm*
 match_arm       ::= expression_or_type '=>' statement
+                  | 'default' '=>' statement
 expression_or_type ::= expression | type_expr
 
 import_item     ::= IDENTIFIER ('as' IDENTIFIER)?

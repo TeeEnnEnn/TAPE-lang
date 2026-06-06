@@ -26,8 +26,6 @@ pub const TokenType = enum {
     MINUS,
     /// '+'
     PLUS,
-    /// '?'
-    QUESTION_MARK,
     /// ';'
     SEMICOLON,
     /// '/'
@@ -183,8 +181,6 @@ pub const TokenType = enum {
     ARRAY_TYPE,
     /// 'Table'
     TABLE_TYPE,
-    /// 'Error'
-    ERROR_TYPE,
     /// 'Range'
     RANGE_TYPE,
     /// 'Never'
@@ -312,7 +308,6 @@ pub const Scanner = struct {
                 'o' => self.check_keyword(2, "ol", .BOOL_TYPE),
                 else => .IDENTIFIER,
             } else .IDENTIFIER,
-            'E' => self.check_keyword(1, "rror", .ERROR_TYPE),
             'F' => self.check_keyword(1, "loat", .FLOAT_TYPE),
             'I' => self.check_keyword(1, "nt", .INT_TYPE),
             'N' => if (len > 1) switch (source[1]) {
@@ -394,7 +389,7 @@ pub const Scanner = struct {
             't' => if (len > 1) switch (source[1]) {
                 'r' => if (len > 2) switch (source[2]) {
                     'u' => self.check_keyword(3, "e", .TRUE),
-                    'y' => self.check_keyword(3, "e", .TRY),
+                    'y' => self.check_keyword(3, "", .TRY),
                     else => .IDENTIFIER,
                 } else .IDENTIFIER,
                 'y' => self.check_keyword(2, "pe", .TYPE),
@@ -496,7 +491,6 @@ pub const Scanner = struct {
             else
                 self.make_token(if (self.match('=')) .GREATER_EQUAL else .GREATER),
             '"', '\'' => |q| self.string(q),
-            '?' => self.make_token(.QUESTION_MARK),
             '&' => self.make_token(.AMPERSAND),
             '|' => self.make_token(.PIPE),
             '^' => self.make_token(.CARET),

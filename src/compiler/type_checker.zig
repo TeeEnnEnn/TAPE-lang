@@ -41,11 +41,12 @@ pub const TypeCheckerError = error{
 } || EnvironmentError || TypeRegistryError || std.mem.Allocator.Error;
 
 pub const StatementTermination = struct {
-    return_: bool,
-    break_: bool,
-    continue_: bool,
-    yield_: bool,
-    give_: bool,
+    return_: bool = false,
+    panics: bool = false,
+    break_: bool = false,
+    continue_: bool = false,
+    yield_: bool = false,
+    give_: bool = false,
 };
 
 pub const TypeChecker = struct {
@@ -57,12 +58,9 @@ pub const TypeChecker = struct {
     expected_give_type: ?AST.TypeId = null,
     expected_yield_type: ?AST.TypeId = null,
 
-    termination: StatementTermination = .{ .return_ = false, .break_ = false, .continue_ = false, .yield_ = false, .give_ = false },
-
     in_loop: bool = false,
     in_coroutine: bool = false,
     in_function: bool = false,
-    in_match: bool = false,
 
     pub fn init(allocator: std.mem.Allocator, registry: *TypeRegistry.TypeRegistry, global_environment: *Environment) TypeChecker {
         return .{ .allocator = allocator, .registry = registry, .environment = global_environment };
@@ -103,7 +101,7 @@ pub const TypeChecker = struct {
 
                 for (decl.fields) |field| {
                     const field_type = try self.registry.resolve(field.type_annotation);
-                    try field_types.append(self.allocator, .{ .name = field.name.lexeme, .type = field_type, .is_static = field.is_static, .is_pub = field.is_pub });
+                    try field_types.append(self.allocator, .{ .name = field.name.lexeme, .type = field_type, .is_static = field.is_static, .is_pub = field.is_pub, .has_default = field.has_default });
                 }
                 for (decl.methods) |method| {
                     const method_type = try self.check_declaration_type(method.method);
@@ -138,11 +136,15 @@ pub const TypeChecker = struct {
         }
     }
 
-    pub fn check(self: *TypeChecker, node: *AST.ASTNode) TypeCheckerError!void {
+    pub fn check(self: *TypeChecker, node: *AST.ASTNode) TypeCheckerError!StatementTermination {
         switch (node.*) {
             .program => |program| {
                 try self.hoist(node);
-                for (program.declarations) |decl| try self.check(decl);
+                var last: StatementTermination = .{};
+                for (program.declarations) |decl| {
+                    last = try self.check(decl);
+                }
+                return last;
             },
             .var_decl => |decl| {
                 const expr_type = try self.check_expression(decl.initializer);
@@ -155,10 +157,11 @@ pub const TypeChecker = struct {
                     }
                 }
                 if (self.environment.lookup(decl.name.lexeme)) |_| {
-                    return;
+                    return .{};
                 } else |_| {
                     try self.environment.define(decl.name.lexeme, target_type);
                 }
+                return .{};
             },
             .fn_decl => |decl| {
                 const fn_id = self.environment.lookup(decl.name.lexeme) catch {
@@ -185,30 +188,30 @@ pub const TypeChecker = struct {
                     try self.environment.define(param.name.lexeme, param_id);
                 }
 
-                const prev_termination = self.termination;
-                self.termination = .{ .return_ = false, .break_ = false, .continue_ = false, .yield_ = false, .give_ = false };
-                defer self.termination = prev_termination;
-
                 const prev_in_func = self.in_function;
                 self.in_function = true;
                 defer self.in_function = prev_in_func;
-                try self.check(decl.body);
+                const body_term = try self.check(decl.body);
 
                 const needs_return = type_info.function.ret != @intFromEnum(PrimitiveType.Nil) and type_info.function.ret != @intFromEnum(PrimitiveType.Never);
 
-                if (needs_return and !self.termination.return_) {
+                if (needs_return and !body_term.return_ and !body_term.panics) {
                     return TypeCheckerError.MissingReturn;
                 }
+                return .{};
             },
-            .type_decl => {}, // handled at hoist phase
+            .type_decl => { // handled at hoist phase
+                return .{};
+            },
 
             .struct_decl => |decl| {
                 for (decl.fields) |field| {
-                    try self.check(field.type_annotation);
+                    _ = try self.check(field.type_annotation);
                 }
                 for (decl.methods) |method| {
-                    try self.check(method.method);
+                    _ = try self.check(method.method);
                 }
+                return .{};
             },
             .co_decl => |decl| {
                 const fn_id = self.environment.lookup(decl.name.lexeme) catch {
@@ -240,15 +243,25 @@ pub const TypeChecker = struct {
                     try self.environment.define(param.name.lexeme, param_id);
                 }
 
-                try self.check(decl.body);
+                const body_term = try self.check(decl.body);
+                const needs_return = type_info.coroutine.ret != @intFromEnum(PrimitiveType.Nil) and type_info.coroutine.ret != @intFromEnum(PrimitiveType.Never);
+                if (needs_return and !body_term.return_ and !body_term.panics) {
+                    return TypeCheckerError.MissingReturn;
+                }
+                return .{};
             },
-            .enum_decl => {}, // fully handled in the hoist phase
-            .error_decl => {}, // fully handled in the hoist phase
+            .enum_decl => { // fully handled in the hoist phase
+                return .{};
+            },
+            .error_decl => { // fully handled in the hoist phase
+                return .{};
+            },
             .use_decl => |decl| {
                 if (decl.module.lexeme.len == 0) return TypeCheckerError.InvalidOperation;
                 for (decl.items) |item| {
                     if (item.name.lexeme.len == 0) return TypeCheckerError.InvalidOperation;
                 }
+                return .{};
             },
             .block_stmt => |stmt| {
                 var local_env = Environment.init(self.allocator, self.environment);
@@ -257,9 +270,11 @@ pub const TypeChecker = struct {
                 const prev_env = self.environment;
                 self.environment = &local_env;
                 defer self.environment = prev_env;
+                var last: StatementTermination = .{};
                 for (stmt.stmts) |child| {
-                    try self.check(child);
+                    last = try self.check(child);
                 }
+                return last;
             },
             .return_stmt => |stmt| {
                 var provided_type = @intFromEnum(PrimitiveType.Nil);
@@ -274,6 +289,7 @@ pub const TypeChecker = struct {
                 } else {
                     return TypeCheckerError.InvalidOperation; // Return outside of function
                 }
+                return .{ .return_ = true };
             },
             .yield_stmt => |stmt| {
                 var provided_type = @intFromEnum(PrimitiveType.Nil);
@@ -288,6 +304,7 @@ pub const TypeChecker = struct {
                 } else {
                     return TypeCheckerError.InvalidOperation; // Yield outside of coroutine
                 }
+                return .{ .yield_ = true };
             },
             .give_stmt => |stmt| {
                 const provided_type = try self.check_expression(stmt.expr);
@@ -300,15 +317,18 @@ pub const TypeChecker = struct {
                     // first give in a match — set the expected type
                     self.expected_give_type = provided_type;
                 }
+                return .{ .give_ = true };
             },
             .while_stmt => |stmt| {
                 const condition_type = try self.check_expression(stmt.condition);
                 if (condition_type != @intFromEnum(PrimitiveType.Bool)) {
                     return TypeCheckerError.TypeMismatch;
                 }
+                const prev_loop = self.in_loop;
                 self.in_loop = true;
-                try self.check(stmt.body);
-                self.in_loop = false;
+                _ = try self.check(stmt.body);
+                self.in_loop = prev_loop;
+                return .{};
             },
             .for_stmt => |stmt| {
                 var local_env = Environment.init(self.allocator, self.environment);
@@ -319,33 +339,51 @@ pub const TypeChecker = struct {
                 defer self.environment = prev_env;
 
                 try self.environment.define(stmt.iterator_name.lexeme, @intFromEnum(PrimitiveType.Int));
+                const prev_loop = self.in_loop;
                 self.in_loop = true;
-                try self.check(stmt.body);
-                self.in_loop = false;
+                _ = try self.check(stmt.body);
+                self.in_loop = prev_loop;
+                return .{};
             },
             .if_stmt => |stmt| {
                 const condition_type = try self.check_expression(stmt.condition);
                 if (condition_type != @intFromEnum(PrimitiveType.Bool)) {
                     return TypeCheckerError.NonBooleanCondition;
                 }
-                try self.check(stmt.then_branch);
+                const then_term = try self.check(stmt.then_branch);
                 if (stmt.else_branch) |else_branch| {
-                    try self.check(else_branch);
+                    const else_term = try self.check(else_branch);
+                    return .{
+                        .return_ = then_term.return_ and else_term.return_,
+                        .panics = then_term.panics and else_term.panics,
+                        .break_ = then_term.break_ and else_term.break_,
+                        .continue_ = then_term.continue_ and else_term.continue_,
+                        .yield_ = then_term.yield_ and else_term.yield_,
+                        .give_ = then_term.give_ and else_term.give_,
+                    };
                 }
+                return .{};
             },
             .break_stmt => {
                 if (!self.in_loop) return TypeCheckerError.BreakOutsideLoop;
+                return .{ .break_ = true };
             },
             .continue_stmt => {
                 if (!self.in_loop) return TypeCheckerError.ContinueOutsideLoop;
+                return .{ .continue_ = true };
             },
             .expr_stmt => |stmt| {
-                _ = try self.check_expression(stmt.expr); // any expression type is allowed - so we can ignore the result
+                var term: StatementTermination = .{};
+                _ = try self.checkExpressionTerm(stmt.expr, &term);
+                return term;
             },
             .panic_stmt => |stmt| {
                 _ = try self.check_expression(stmt.expr); // any expression type is allowed - so we can ignore the result
+                return .{ .panics = true, .return_ = true };
             },
-            else => {},
+            else => {
+                return .{};
+            },
         }
     }
 
@@ -381,6 +419,10 @@ pub const TypeChecker = struct {
     }
 
     fn check_expression(self: *TypeChecker, node: *AST.ASTNode) TypeCheckerError!AST.TypeId {
+        return self.checkExpressionTerm(node, null);
+    }
+
+    fn checkExpressionTerm(self: *TypeChecker, node: *AST.ASTNode, out_term: ?*StatementTermination) TypeCheckerError!AST.TypeId {
         return switch (node.*) {
             .assign_expr => |expr| {
                 const right_type = try self.check_expression(expr.right);
@@ -819,7 +861,12 @@ pub const TypeChecker = struct {
                     provided_count += 1;
                 }
 
-                if (provided_count != shape_fields.len) return TypeCheckerError.InvalidArgumentCount;
+                // Count fields that have no default — those are required
+                var required_count: usize = 0;
+                for (shape_fields) |sf| {
+                    if (!sf.has_default) required_count += 1;
+                }
+                if (provided_count < required_count or provided_count > shape_fields.len) return TypeCheckerError.InvalidArgumentCount;
 
                 expr.resolved_type = struct_typeid;
                 return struct_typeid;
@@ -830,14 +877,22 @@ pub const TypeChecker = struct {
                 defer self.expected_give_type = prev_give;
                 const expr_typeid = try self.check_expression(expr.expr);
                 try self.check_match_exhaustiveness(expr_typeid, expr);
+                var all_return = expr.cases.len > 0;
                 for (expr.cases) |case| {
-                    // check if the case and the expression are compatible
-                    const case_typeid = try self.check_expression(case.pattern);
-                    if (!try self.is_compatible(expr_typeid, case_typeid)) {
-                        return TypeCheckerError.TypeMismatch;
+                    // default pattern is catch-all - skip type compatibility
+                    if (case.pattern.* != .default_pat) {
+                        const case_typeid = try self.check_expression(case.pattern);
+                        if (!try self.is_compatible(expr_typeid, case_typeid)) {
+                            return TypeCheckerError.TypeMismatch;
+                        }
                     }
-                    try self.check(case.stmts); // check the body of the case
-                    // we are interested in the give type
+                    const case_term = try self.check(case.stmt); // check the body of the case
+                    if (!case_term.return_ and !case_term.panics) {
+                        all_return = false;
+                    }
+                }
+                if (out_term) |t| {
+                    t.* = if (all_return) .{ .return_ = true, .panics = false, .break_ = false, .continue_ = false, .yield_ = false, .give_ = false } else .{};
                 }
                 if (self.expected_give_type) |typeid| {
                     expr.resolved_type = typeid;
@@ -868,7 +923,7 @@ pub const TypeChecker = struct {
                 self.expected_return_type = ret_typeid;
                 defer self.expected_return_type = prev_ret;
 
-                try self.check(expr.body);
+                _ = try self.check(expr.body);
 
                 expr.resolved_type = function_typeid;
                 return function_typeid;

@@ -28,7 +28,7 @@ fn checkTokens(source: []const u8, expected_types: []const TokenType) !void {
 }
 
 test "Scanner Tokenizes basic program" {
-    const source = "var hello = 'hello world'; var e: Error = Err('This is an error');";
+    const source = "var hello = 'hello world'; var e = 42;";
     var s: Scanner = Scanner.init(source);
     var token_buffer: [1024]Token = undefined;
     const token_count = try s.scan(&token_buffer);
@@ -51,17 +51,17 @@ test "Scanner Keywords" {
 }
 
 test "Scanner Type Keywords" {
-    const source = "Nil Bool Int Float String Array Table Error Range Never";
+    const source = "Nil Bool Int Float String Array Table Range Never";
     const expected = [_]TokenType{
-        .NIL_TYPE, .BOOL_TYPE, .INT_TYPE, .FLOAT_TYPE, .STRING_TYPE, .ARRAY_TYPE, .TABLE_TYPE, .ERROR_TYPE, .RANGE_TYPE, .NEVER_TYPE,
+        .NIL_TYPE, .BOOL_TYPE, .INT_TYPE, .FLOAT_TYPE, .STRING_TYPE, .ARRAY_TYPE, .TABLE_TYPE, .RANGE_TYPE, .NEVER_TYPE,
     };
     try checkTokens(source, &expected);
 }
 
 test "Scanner Operators and Punctuation" {
-    const source = "( ) { } [ ] , . .. - + ; / * ** % : -> != = == => > >= < <= << >> & ^ | ~ += -= *= /= %= ? ::";
+    const source = "( ) { } [ ] , . .. - + ; / * ** % : -> != = == => > >= < <= << >> & ^ | ~ += -= *= /= %= ::";
     const expected = [_]TokenType{
-        .LEFT_PAREN, .RIGHT_PAREN, .LEFT_BRACE, .RIGHT_BRACE, .LEFT_SQUARE, .RIGHT_SQUARE, .COMMA, .DOT, .DOT_DOT, .MINUS, .PLUS, .SEMICOLON, .SLASH, .STAR, .STAR_STAR, .PERCENT, .COLON, .ARROW, .NOT_EQUAL, .EQUAL, .EQUAL_EQUAL, .EQUAL_ARROW, .GREATER, .GREATER_EQUAL, .LESS, .LESS_EQUAL, .LEFT_SHIFT, .RIGHT_SHIFT, .AMPERSAND, .CARET, .PIPE, .TILDE, .PLUS_EQUAL, .MINUS_EQUAL, .STAR_EQUAL, .SLASH_EQUAL, .PERCENT_EQUAL, .QUESTION_MARK, .COLON_COLON,
+        .LEFT_PAREN, .RIGHT_PAREN, .LEFT_BRACE, .RIGHT_BRACE, .LEFT_SQUARE, .RIGHT_SQUARE, .COMMA, .DOT, .DOT_DOT, .MINUS, .PLUS, .SEMICOLON, .SLASH, .STAR, .STAR_STAR, .PERCENT, .COLON, .ARROW, .NOT_EQUAL, .EQUAL, .EQUAL_EQUAL, .EQUAL_ARROW, .GREATER, .GREATER_EQUAL, .LESS, .LESS_EQUAL, .LEFT_SHIFT, .RIGHT_SHIFT, .AMPERSAND, .CARET, .PIPE, .TILDE, .PLUS_EQUAL, .MINUS_EQUAL, .STAR_EQUAL, .SLASH_EQUAL, .PERCENT_EQUAL, .COLON_COLON,
     };
     try checkTokens(source, &expected);
 }
