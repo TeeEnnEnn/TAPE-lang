@@ -1,6 +1,4 @@
 //! By convention, root.zig is the root source file when making a package.
-const std = @import("std");
-const Io = std.Io;
 
 // Compiler
 pub const ast = @import("compiler/ast.zig");
@@ -27,4 +25,5 @@ test {
 
     _ = @import("cli/cli.zig");
     _ = @import("cli/helpers.zig");
+    _ = @import("cli/test_helpers.zig");
 }

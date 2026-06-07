@@ -1,6 +1,12 @@
 const std = @import("std");
 const options = @import("TAPE_lang_build_options");
-const create_tape_project = @import("helpers.zig").create_tape_project;
+const helpers = @import("helpers.zig");
+
+const TapeScanner = @import("../compiler/scanner.zig");
+const TapeParser = @import("../compiler/parser.zig");
+const TapeTypeChecker = @import("../compiler/type_checker.zig");
+const TapeEnvironment = @import("../compiler/environment.zig");
+const TapeTypeRegistry = @import("../compiler/type_registry.zig");
 
 /// Errors that can occur when running TAPE in REPL mode.
 const TapeReplError = error{
@@ -97,6 +103,11 @@ pub fn run_repl(io: std.Io, parsed_args: [][]const u8, allocator: std.mem.Alloca
     try stdout.writeStreamingAll(io, "This is the TAPE REPL. Type 'exit' to quit.");
 }
 
+// TODO: run_flatten
+// The flatten command flattens the pkg directory that might contain nested packages. into a flat directory structure.
+// if conflicting packages are found the flatten command will error and force the user to resolve the conflicts before continuing.
+// execution only works if the pkg directory is flat.
+
 pub fn run_file(io: std.Io, parsed_args: [][]const u8, allocator: std.mem.Allocator) anyerror!void {
     const stdout = std.Io.File.stdout();
     _ = allocator;
@@ -107,12 +118,28 @@ pub fn run_file(io: std.Io, parsed_args: [][]const u8, allocator: std.mem.Alloca
 }
 
 pub fn run_check(io: std.Io, parsed_args: [][]const u8, allocator: std.mem.Allocator) anyerror!void {
-    const stdout = std.Io.File.stdout();
-    _ = allocator;
-    try stdout.writeStreamingAll(io, "Run the parser and type checker.");
-    for (parsed_args) |arg| {
-        try stdout.writeStreamingAll(io, arg);
-    }
+    const file_path = if (parsed_args.len == 0) blk: {
+        break :blk try helpers.get_package_entrypoint(allocator, std.Io.Dir.cwd(), io);
+    } else blk: {
+        const relative_path = parsed_args[0];
+        const current_dir = try helpers.get_current_dir_path(io, allocator);
+        defer allocator.free(current_dir);
+        break :blk try std.fs.path.join(allocator, &.{ current_dir, relative_path });
+    };
+    defer allocator.free(file_path);
+
+    const file_contents = try helpers.read_file(file_path, std.Io.Dir.cwd(), io, allocator);
+    defer allocator.free(file_contents);
+
+    var parser = try TapeParser.Parser.init(allocator, file_contents);
+    const program = try parser.parse();
+
+    var env = TapeEnvironment.Environment.init(allocator, null);
+    defer env.deinit();
+    var registry = try TapeTypeRegistry.TypeRegistry.init(allocator);
+    defer registry.deinit();
+    var checker = TapeTypeChecker.TypeChecker.init(allocator, &registry, &env);
+    _ = try checker.check(program);
 }
 
 pub fn get_version(io: std.Io, parsed_args: [][]const u8, allocator: std.mem.Allocator) anyerror!void {
@@ -129,7 +156,7 @@ pub fn init_project(io: std.Io, parsed_args: [][]const u8, allocator: std.mem.Al
     if (parsed_args.len > 0) {
         new_project_name = parsed_args[0];
     }
-    create_tape_project(io, allocator, new_project_name) catch {
+    helpers.create_tape_project(io, allocator, new_project_name) catch {
         try stdout.writeStreamingAll(io, "Failed to initialize TAPE project.\n");
         return;
     };
