@@ -132,6 +132,8 @@ pub const VarDecl = struct {
     name: Token,
     type_annotation: ?*ASTNode,
     initializer: *ASTNode,
+    line: usize,
+    column: usize,
 };
 
 /// Function declaration node.
@@ -148,6 +150,8 @@ pub const FnDecl = struct {
     params: []*TypedNamedField,
     return_type_annotation: *ASTNode,
     body: *ASTNode,
+    line: usize,
+    column: usize,
 };
 
 /// Function declaration node.
@@ -165,6 +169,8 @@ pub const CoDecl = struct {
     return_type_annotation: *ASTNode,
     yield_type_annotation: *ASTNode,
     body: *ASTNode,
+    line: usize,
+    column: usize,
 };
 
 /// Type declaration node.
@@ -176,6 +182,8 @@ pub const TypeDecl = struct {
     modifier_pub: bool,
     name: Token,
     type_annotation: *ASTNode,
+    line: usize,
+    column: usize,
 };
 
 /// Struct declaration node.
@@ -191,6 +199,8 @@ pub const StructDecl = struct {
     name: Token,
     fields: []*TypedNamedStructField,
     methods: []*StructMethodField,
+    line: usize,
+    column: usize,
 };
 
 /// Enum declaration node.
@@ -204,6 +214,8 @@ pub const EnumDecl = struct {
     modifier_pub: bool,
     name: Token,
     variants: []Token,
+    line: usize,
+    column: usize,
 };
 
 /// Error declaration node.
@@ -217,6 +229,8 @@ pub const ErrorDecl = struct {
     modifier_pub: bool,
     name: Token,
     variants: []Token,
+    line: usize,
+    column: usize,
 };
 
 /// Block statement node.
@@ -226,6 +240,8 @@ pub const ErrorDecl = struct {
 /// ```
 pub const BlockStmt = struct {
     stmts: []*ASTNode,
+    line: usize,
+    column: usize,
 };
 
 /// Return statement node.
@@ -235,6 +251,8 @@ pub const BlockStmt = struct {
 /// ```
 pub const ReturnStmt = struct {
     expr: ?*ASTNode,
+    line: usize,
+    column: usize,
 };
 
 /// Resume Expression node.
@@ -245,6 +263,8 @@ pub const ReturnStmt = struct {
 pub const ResumeExpr = struct {
     expr: *ASTNode,
     resolved_type: TypeId = 0,
+    line: usize,
+    column: usize,
 };
 
 /// Try expression node.
@@ -255,6 +275,8 @@ pub const ResumeExpr = struct {
 pub const TryExpr = struct {
     expr: *ASTNode,
     resolved_type: TypeId = 0,
+    line: usize,
+    column: usize,
 };
 
 /// Yield statement node.
@@ -264,6 +286,8 @@ pub const TryExpr = struct {
 /// ```
 pub const YieldStmt = struct {
     expr: ?*ASTNode,
+    line: usize,
+    column: usize,
 };
 
 /// Give statement node.
@@ -273,6 +297,8 @@ pub const YieldStmt = struct {
 /// ```
 pub const GiveStmt = struct {
     expr: *ASTNode,
+    line: usize,
+    column: usize,
 };
 
 /// Break statement node.
@@ -280,14 +306,20 @@ pub const GiveStmt = struct {
 /// ```
 /// break
 /// ```
-pub const BreakStmt = struct {};
+pub const BreakStmt = struct {
+    line: usize,
+    column: usize,
+};
 
 /// Continue statement node.
 ///
 /// ```
 /// continue
 /// ```
-pub const ContinueStmt = struct {};
+pub const ContinueStmt = struct {
+    line: usize,
+    column: usize,
+};
 
 /// While statement node.
 ///
@@ -297,6 +329,8 @@ pub const ContinueStmt = struct {};
 pub const WhileStmt = struct {
     condition: *ASTNode,
     body: *ASTNode,
+    line: usize,
+    column: usize,
 };
 
 /// For statement node.
@@ -308,6 +342,8 @@ pub const ForStmt = struct {
     iterator_name: Token,
     iterator_expr: *ASTNode,
     body: *ASTNode,
+    line: usize,
+    column: usize,
 };
 
 /// If statement node.
@@ -319,6 +355,8 @@ pub const IfStmt = struct {
     condition: *ASTNode,
     then_branch: *ASTNode,
     else_branch: ?*ASTNode,
+    line: usize,
+    column: usize,
 };
 
 /// Panic statement node.
@@ -328,6 +366,8 @@ pub const IfStmt = struct {
 /// ```
 pub const PanicStmt = struct {
     expr: *ASTNode,
+    line: usize,
+    column: usize,
 };
 
 /// Expression statement node.
@@ -337,6 +377,8 @@ pub const PanicStmt = struct {
 /// ```
 pub const ExprStmt = struct {
     expr: *ASTNode,
+    line: usize,
+    column: usize,
 };
 
 /// Assign expression node.
@@ -349,6 +391,8 @@ pub const AssignExpr = struct {
     operator: Token,
     right: *ASTNode,
     resolved_type: TypeId = 0,
+    line: usize,
+    column: usize,
 };
 
 /// Identifier expression node.
@@ -359,6 +403,8 @@ pub const AssignExpr = struct {
 pub const IdentifierExpr = struct {
     name: Token,
     resolved_type: TypeId = 0,
+    line: usize,
+    column: usize,
 };
 
 /// Cast expression node.
@@ -370,6 +416,8 @@ pub const CastExpr = struct {
     expr: *ASTNode,
     type: *ASTNode,
     resolved_type: TypeId = 0,
+    line: usize,
+    column: usize,
 };
 
 /// Unary expression node.
@@ -381,6 +429,8 @@ pub const UnaryExpr = struct {
     operator: Token,
     expr: *ASTNode,
     resolved_type: TypeId = 0,
+    line: usize,
+    column: usize,
 };
 
 /// Binary expression node.
@@ -393,6 +443,8 @@ pub const BinaryExpr = struct {
     left: *ASTNode,
     right: *ASTNode,
     resolved_type: TypeId = 0,
+    line: usize,
+    column: usize,
 };
 
 /// Shape expression node.
@@ -403,6 +455,8 @@ pub const BinaryExpr = struct {
 pub const ShapeExpr = struct {
     fields: []*TypedNamedField,
     resolved_type: TypeId = 0,
+    line: usize,
+    column: usize,
 };
 
 /// Call expression node.
@@ -414,6 +468,8 @@ pub const CallExpr = struct {
     expr: *ASTNode,
     args: []*ASTNode,
     resolved_type: TypeId = 0,
+    line: usize,
+    column: usize,
 };
 
 /// Index expression node.
@@ -425,6 +481,8 @@ pub const IndexExpr = struct {
     expr: *ASTNode,
     index: *ASTNode,
     resolved_type: TypeId = 0,
+    line: usize,
+    column: usize,
 };
 
 /// Array expression node.
@@ -435,6 +493,8 @@ pub const IndexExpr = struct {
 pub const ArrayExpr = struct {
     elements: []*ASTNode,
     resolved_type: TypeId = 0,
+    line: usize,
+    column: usize,
 };
 
 /// dot expression node.
@@ -446,6 +506,8 @@ pub const DotExpr = struct {
     expr: *ASTNode,
     member: Token,
     resolved_type: TypeId = 0,
+    line: usize,
+    column: usize,
 };
 
 /// Static member expression node.
@@ -457,6 +519,8 @@ pub const StaticMemberExpr = struct {
     expr: *ASTNode,
     member: Token,
     resolved_type: TypeId = 0,
+    line: usize,
+    column: usize,
 };
 
 /// Group expression node.
@@ -467,6 +531,8 @@ pub const StaticMemberExpr = struct {
 pub const GroupExpr = struct {
     expr: *ASTNode,
     resolved_type: TypeId = 0,
+    line: usize,
+    column: usize,
 };
 
 /// Tuple expression node.
@@ -478,6 +544,8 @@ pub const GroupExpr = struct {
 pub const TupleExpr = struct {
     exprs: []*ASTNode,
     resolved_type: TypeId = 0,
+    line: usize,
+    column: usize,
 };
 
 /// Table expression node.
@@ -489,6 +557,8 @@ pub const TableExpr = struct {
     keys: []*ASTNode,
     values: []*ASTNode,
     resolved_type: TypeId = 0,
+    line: usize,
+    column: usize,
 };
 
 pub const StructInitField = struct {
@@ -505,6 +575,8 @@ pub const NewExpr = struct {
     struct_name: Token,
     fields: []StructInitField,
     resolved_type: TypeId = 0,
+    line: usize,
+    column: usize,
 };
 
 /// Match expression node.
@@ -519,6 +591,8 @@ pub const MatchExpr = struct {
     expr: *ASTNode,
     cases: []*MatchCase,
     resolved_type: TypeId = 0,
+    line: usize,
+    column: usize,
 };
 
 /// Match case node.
@@ -530,6 +604,8 @@ pub const MatchCase = struct {
     pattern: *ASTNode,
     stmt: *ASTNode,
     resolved_type: TypeId = 0,
+    line: usize,
+    column: usize,
 };
 
 /// Anonymous function node
@@ -543,6 +619,8 @@ pub const AnonFnExpr = struct {
     return_type_annotation: ?*ASTNode,
     body: *ASTNode,
     resolved_type: TypeId = 0,
+    line: usize,
+    column: usize,
 };
 
 pub const TypedNamedField = struct {
@@ -579,30 +657,42 @@ pub const ImportItem = struct {
 pub const UseDecl = struct {
     items: []ImportItem,
     module: Token,
+    line: usize,
+    column: usize,
 };
 
 pub const IntLit = struct {
     value: i64,
     resolved_type: TypeId = 0,
+    line: usize,
+    column: usize,
 };
 
 pub const FloatLit = struct {
     value: f64,
     resolved_type: TypeId = 0,
+    line: usize,
+    column: usize,
 };
 
 pub const StrLit = struct {
     value: []const u8,
     resolved_type: TypeId = 0,
+    line: usize,
+    column: usize,
 };
 
 pub const BoolLit = struct {
     value: bool,
     resolved_type: TypeId = 0,
+    line: usize,
+    column: usize,
 };
 
 pub const NilLit = struct {
     resolved_type: TypeId = 0,
+    line: usize,
+    column: usize,
 };
 
 pub const NilType = struct {};

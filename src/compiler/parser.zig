@@ -3,6 +3,7 @@ const Scanner = @import("scanner.zig").Scanner;
 const Token = @import("scanner.zig").Token;
 const TokenType = @import("scanner.zig").TokenType;
 const MatchCase = AST.MatchCase;
+const DiagnosticsReporter = @import("../helpers/diagnostics.zig").DiagnosticsReporter;
 
 const std = @import("std");
 
@@ -17,13 +18,17 @@ pub const Parser = struct {
     allocator: std.mem.Allocator,
     current: Token,
     previous: Token,
+    diagnostics: *DiagnosticsReporter,
+    file_path: []const u8,
 
-    pub fn init(allocator: std.mem.Allocator, source: []const u8) !Parser {
+    pub fn init(allocator: std.mem.Allocator, source: []const u8, diagnostics: *DiagnosticsReporter, file_path: []const u8) !Parser {
         var parser = Parser{
             .allocator = allocator,
-            .scanner = Scanner.init(source),
-            .current = Token{ .token_type = .EOF, .lexeme = "", .line = 0 },
-            .previous = Token{ .token_type = .EOF, .lexeme = "", .line = 0 },
+            .scanner = Scanner.init(source, diagnostics, file_path),
+            .current = Token{ .token_type = .EOF, .lexeme = "", .line = 0, .column = 0 },
+            .previous = Token{ .token_type = .EOF, .lexeme = "", .line = 0, .column = 0 },
+            .diagnostics = diagnostics,
+            .file_path = file_path,
         };
         try parser.advance();
         return parser;
@@ -43,6 +48,7 @@ pub const Parser = struct {
             try self.advance();
             return;
         }
+        try self.diagnostics.add_diagnostic(.{ .column = self.scanner.column(), .line = self.scanner.line, .stage = .Parser, .severity = .Error, .message = "Unexpected token", .file_path = self.file_path });
         return ParserError.UnexpectedToken;
     }
 
@@ -75,6 +81,8 @@ pub const Parser = struct {
                 .left = left,
                 .operator = operator,
                 .right = right,
+                .line = operator.line,
+                .column = operator.column,
             };
             const node = try self.allocator.create(AST.ASTNode);
             node.* = .{ .assign_expr = assign };
@@ -92,7 +100,13 @@ pub const Parser = struct {
             const right = try self.parse_logical_or();
 
             const binary = try self.allocator.create(AST.BinaryExpr);
-            binary.* = .{ .operator = operator, .left = left, .right = right };
+            binary.* = .{
+                .operator = operator,
+                .left = left,
+                .right = right,
+                .line = operator.line,
+                .column = operator.column,
+            };
             const node = try self.allocator.create(AST.ASTNode);
             node.* = .{ .binary_expr = binary };
             return node;
@@ -111,6 +125,8 @@ pub const Parser = struct {
                 .operator = operator,
                 .left = left,
                 .right = right,
+                .line = operator.line,
+                .column = operator.column,
             };
             const node = try self.allocator.create(AST.ASTNode);
             node.* = .{
@@ -132,6 +148,8 @@ pub const Parser = struct {
                 .operator = operator,
                 .left = left,
                 .right = right,
+                .line = operator.line,
+                .column = operator.column,
             };
             const node = try self.allocator.create(AST.ASTNode);
             node.* = .{
@@ -153,6 +171,8 @@ pub const Parser = struct {
                 .operator = operator,
                 .left = left,
                 .right = right,
+                .line = operator.line,
+                .column = operator.column,
             };
             const node = try self.allocator.create(AST.ASTNode);
             node.* = .{
@@ -174,6 +194,8 @@ pub const Parser = struct {
                 .operator = operator,
                 .left = left,
                 .right = right,
+                .line = operator.line,
+                .column = operator.column,
             };
             const node = try self.allocator.create(AST.ASTNode);
             node.* = .{
@@ -195,6 +217,8 @@ pub const Parser = struct {
                 .operator = operator,
                 .left = left,
                 .right = right,
+                .line = operator.line,
+                .column = operator.column,
             };
             const node = try self.allocator.create(AST.ASTNode);
             node.* = .{
@@ -216,6 +240,8 @@ pub const Parser = struct {
                 .operator = operator,
                 .left = left,
                 .right = right,
+                .line = operator.line,
+                .column = operator.column,
             };
             const node = try self.allocator.create(AST.ASTNode);
             node.* = .{
@@ -237,6 +263,8 @@ pub const Parser = struct {
                 .operator = operator,
                 .left = left,
                 .right = right,
+                .line = operator.line,
+                .column = operator.column,
             };
             const node = try self.allocator.create(AST.ASTNode);
             node.* = .{
@@ -258,6 +286,8 @@ pub const Parser = struct {
                 .operator = operator,
                 .left = left,
                 .right = right,
+                .line = operator.line,
+                .column = operator.column,
             };
             const node = try self.allocator.create(AST.ASTNode);
             node.* = .{
@@ -280,6 +310,8 @@ pub const Parser = struct {
                 .operator = operator,
                 .left = left,
                 .right = right,
+                .line = operator.line,
+                .column = operator.column,
             };
             const node = try self.allocator.create(AST.ASTNode);
             node.* = .{
@@ -302,6 +334,8 @@ pub const Parser = struct {
                 .operator = operator,
                 .left = left,
                 .right = right,
+                .line = operator.line,
+                .column = operator.column,
             };
             const node = try self.allocator.create(AST.ASTNode);
             node.* = .{
@@ -323,7 +357,7 @@ pub const Parser = struct {
             switch (operator.token_type) {
                 .RESUME => {
                     const resume_node = try self.allocator.create(AST.ResumeExpr);
-                    resume_node.* = .{ .expr = right };
+                    resume_node.* = .{ .expr = right, .line = operator.line, .column = operator.column };
 
                     const node = try self.allocator.create(AST.ASTNode);
                     node.* = .{ .resume_expr = resume_node };
@@ -331,7 +365,7 @@ pub const Parser = struct {
                 },
                 .TRY => {
                     const try_node = try self.allocator.create(AST.TryExpr);
-                    try_node.* = .{ .expr = right };
+                    try_node.* = .{ .expr = right, .line = operator.line, .column = operator.column };
 
                     const node = try self.allocator.create(AST.ASTNode);
                     node.* = .{ .try_expr = try_node };
@@ -340,7 +374,7 @@ pub const Parser = struct {
                 else => {
                     // standard mathematical/logical unaries (~, -, not)
                     const unary = try self.allocator.create(AST.UnaryExpr);
-                    unary.* = .{ .operator = operator, .expr = right };
+                    unary.* = .{ .operator = operator, .expr = right, .line = operator.line, .column = operator.column };
 
                     const node = try self.allocator.create(AST.ASTNode);
                     node.* = .{ .unary_expr = unary };
@@ -360,7 +394,7 @@ pub const Parser = struct {
             const type_node = try self.parse_type_expression();
 
             const cast = try self.allocator.create(AST.CastExpr);
-            cast.* = .{ .expr = expr, .type = type_node };
+            cast.* = .{ .expr = expr, .type = type_node, .line = self.previous.line, .column = self.previous.column };
 
             const node = try self.allocator.create(AST.ASTNode);
             node.* = .{ .cast_expr = cast };
@@ -385,7 +419,7 @@ pub const Parser = struct {
                 try self.consume(.RIGHT_PAREN);
 
                 const call = try self.allocator.create(AST.CallExpr);
-                call.* = .{ .expr = expr, .args = try args.toOwnedSlice(self.allocator) };
+                call.* = .{ .expr = expr, .args = try args.toOwnedSlice(self.allocator), .line = self.previous.line, .column = self.previous.column };
                 const node = try self.allocator.create(AST.ASTNode);
                 node.* = .{ .call_expr = call };
                 expr = node;
@@ -395,7 +429,7 @@ pub const Parser = struct {
                 try self.consume(.RIGHT_SQUARE);
 
                 const index_expr = try self.allocator.create(AST.IndexExpr);
-                index_expr.* = .{ .expr = expr, .index = index };
+                index_expr.* = .{ .expr = expr, .index = index, .line = self.previous.line, .column = self.previous.column };
                 const node = try self.allocator.create(AST.ASTNode);
                 node.* = .{ .index_expr = index_expr };
                 expr = node;
@@ -405,7 +439,7 @@ pub const Parser = struct {
                 const member = self.previous;
 
                 const inst_expr = try self.allocator.create(AST.DotExpr);
-                inst_expr.* = .{ .expr = expr, .member = member };
+                inst_expr.* = .{ .expr = expr, .member = member, .line = member.line, .column = member.column };
                 const node = try self.allocator.create(AST.ASTNode);
                 node.* = .{ .dot_expr = inst_expr };
                 expr = node;
@@ -415,7 +449,7 @@ pub const Parser = struct {
                 const member = self.previous;
 
                 const static_expr = try self.allocator.create(AST.StaticMemberExpr);
-                static_expr.* = .{ .expr = expr, .member = member };
+                static_expr.* = .{ .expr = expr, .member = member, .line = member.line, .column = member.column };
                 const node = try self.allocator.create(AST.ASTNode);
                 node.* = .{ .static_member_expr = static_expr };
                 expr = node;
@@ -447,6 +481,7 @@ pub const Parser = struct {
         } else if (try self.match(.MATCH)) {
             return try self.parse_match_expression();
         } else {
+            try self.diagnostics.add_diagnostic(.{ .column = self.scanner.column(), .line = self.scanner.line, .stage = .Parser, .severity = .Error, .message = "Unexpected token", .file_path = self.file_path });
             return ParserError.UnexpectedToken;
         }
     }
@@ -457,7 +492,7 @@ pub const Parser = struct {
             TokenType.STRING => {
                 try self.advance();
                 const literal = try self.allocator.create(AST.StrLit);
-                literal.* = .{ .value = token.lexeme[1 .. token.lexeme.len - 1] };
+                literal.* = .{ .value = token.lexeme[1 .. token.lexeme.len - 1], .line = token.line, .column = token.column };
                 const node = try self.allocator.create(AST.ASTNode);
                 node.* = .{ .str_lit = literal };
                 return node;
@@ -465,7 +500,7 @@ pub const Parser = struct {
             TokenType.INT => {
                 try self.advance();
                 const literal = try self.allocator.create(AST.IntLit);
-                literal.* = .{ .value = try std.fmt.parseInt(i64, token.lexeme, 10) };
+                literal.* = .{ .value = try std.fmt.parseInt(i64, token.lexeme, 10), .line = token.line, .column = token.column };
                 const node = try self.allocator.create(AST.ASTNode);
                 node.* = .{ .int_lit = literal };
                 return node;
@@ -473,7 +508,7 @@ pub const Parser = struct {
             TokenType.FLOAT => {
                 try self.advance();
                 const literal = try self.allocator.create(AST.FloatLit);
-                literal.* = .{ .value = try std.fmt.parseFloat(f64, token.lexeme) };
+                literal.* = .{ .value = try std.fmt.parseFloat(f64, token.lexeme), .line = token.line, .column = token.column };
                 const node = try self.allocator.create(AST.ASTNode);
                 node.* = .{ .float_lit = literal };
                 return node;
@@ -481,7 +516,7 @@ pub const Parser = struct {
             TokenType.BINARY_INT => {
                 try self.advance();
                 const literal = try self.allocator.create(AST.IntLit);
-                literal.* = .{ .value = try std.fmt.parseInt(i64, token.lexeme[2..], 2) };
+                literal.* = .{ .value = try std.fmt.parseInt(i64, token.lexeme[2..], 2), .line = token.line, .column = token.column };
                 const node = try self.allocator.create(AST.ASTNode);
                 node.* = .{ .int_lit = literal };
                 return node;
@@ -489,7 +524,7 @@ pub const Parser = struct {
             TokenType.HEX_INT => {
                 try self.advance();
                 const literal = try self.allocator.create(AST.IntLit);
-                literal.* = .{ .value = try std.fmt.parseInt(i64, token.lexeme[2..], 16) };
+                literal.* = .{ .value = try std.fmt.parseInt(i64, token.lexeme[2..], 16), .line = token.line, .column = token.column };
                 const node = try self.allocator.create(AST.ASTNode);
                 node.* = .{ .int_lit = literal };
                 return node;
@@ -497,7 +532,7 @@ pub const Parser = struct {
             TokenType.TRUE => {
                 try self.advance();
                 const literal = try self.allocator.create(AST.BoolLit);
-                literal.* = .{ .value = true };
+                literal.* = .{ .value = true, .line = token.line, .column = token.column };
                 const node = try self.allocator.create(AST.ASTNode);
                 node.* = .{ .bool_lit = literal };
                 return node;
@@ -505,7 +540,7 @@ pub const Parser = struct {
             TokenType.FALSE => {
                 try self.advance();
                 const literal = try self.allocator.create(AST.BoolLit);
-                literal.* = .{ .value = false };
+                literal.* = .{ .value = false, .line = token.line, .column = token.column };
                 const node = try self.allocator.create(AST.ASTNode);
                 node.* = .{ .bool_lit = literal };
                 return node;
@@ -513,11 +548,13 @@ pub const Parser = struct {
             TokenType.NIL => {
                 try self.advance();
                 const literal = try self.allocator.create(AST.NilLit);
+                literal.* = .{ .line = token.line, .column = token.column };
                 const node = try self.allocator.create(AST.ASTNode);
                 node.* = .{ .nil_lit = literal };
                 return node;
             },
             else => {
+                try self.diagnostics.add_diagnostic(.{ .column = self.scanner.column(), .line = self.scanner.line, .stage = .Parser, .severity = .Error, .message = "Unexpected token", .file_path = self.file_path });
                 return ParserError.UnexpectedToken;
             },
         }
@@ -529,7 +566,7 @@ pub const Parser = struct {
         // Empty tuple: ()
         if (try self.match(.RIGHT_PAREN)) {
             const empty_tuple = try self.allocator.create(AST.TupleExpr);
-            empty_tuple.* = .{ .exprs = &[_]*AST.ASTNode{} };
+            empty_tuple.* = .{ .exprs = &[_]*AST.ASTNode{}, .line = self.previous.line, .column = self.previous.column };
             const node = try self.allocator.create(AST.ASTNode);
             node.* = .{ .tuple_expr = empty_tuple };
             return node;
@@ -551,7 +588,7 @@ pub const Parser = struct {
             try self.consume(.RIGHT_PAREN);
 
             const tuple_expr = try self.allocator.create(AST.TupleExpr);
-            tuple_expr.* = .{ .exprs = try elements.toOwnedSlice(self.allocator), .resolved_type = 0 };
+            tuple_expr.* = .{ .exprs = try elements.toOwnedSlice(self.allocator), .resolved_type = 0, .line = self.previous.line, .column = self.previous.column };
             const node = try self.allocator.create(AST.ASTNode);
             node.* = .{ .tuple_expr = tuple_expr };
             return node;
@@ -559,7 +596,7 @@ pub const Parser = struct {
             // It's a group: (expr)
             try self.consume(.RIGHT_PAREN);
             const group = try self.allocator.create(AST.GroupExpr);
-            group.* = .{ .expr = first_expr, .resolved_type = 0 };
+            group.* = .{ .expr = first_expr, .resolved_type = 0, .line = self.previous.line, .column = self.previous.column };
             const node = try self.allocator.create(AST.ASTNode);
             node.* = .{ .group_expr = group };
             return node;
@@ -588,7 +625,7 @@ pub const Parser = struct {
         try self.consume(.RIGHT_BRACE);
 
         const new_expr = try self.allocator.create(AST.NewExpr);
-        new_expr.* = .{ .struct_name = struct_name, .fields = try fields.toOwnedSlice(self.allocator), .resolved_type = 0 };
+        new_expr.* = .{ .struct_name = struct_name, .fields = try fields.toOwnedSlice(self.allocator), .resolved_type = 0, .line = struct_name.line, .column = struct_name.column };
         const node = try self.allocator.create(AST.ASTNode);
         node.* = .{ .new_expr = new_expr };
         return node;
@@ -598,7 +635,7 @@ pub const Parser = struct {
         try self.consume(.IDENTIFIER);
         const token = self.previous;
         const identifier = try self.allocator.create(AST.IdentifierExpr);
-        identifier.* = .{ .name = token };
+        identifier.* = .{ .name = token, .line = token.line, .column = token.column };
         const node = try self.allocator.create(AST.ASTNode);
         node.* = .{ .identifier_expr = identifier };
         return node;
@@ -630,6 +667,8 @@ pub const Parser = struct {
             .params = try params.toOwnedSlice(self.allocator),
             .return_type_annotation = return_type,
             .body = body,
+            .line = self.previous.line,
+            .column = self.previous.column,
         };
 
         const node = try self.allocator.create(AST.ASTNode);
@@ -858,6 +897,8 @@ pub const Parser = struct {
         table_literal.* = .{
             .keys = try key_types.toOwnedSlice(self.allocator),
             .values = try value_types.toOwnedSlice(self.allocator),
+            .line = self.previous.line,
+            .column = self.previous.column,
         };
 
         const node = try self.allocator.create(AST.ASTNode);
@@ -881,6 +922,8 @@ pub const Parser = struct {
         const array_literal = try self.allocator.create(AST.ArrayExpr);
         array_literal.* = .{
             .elements = try elements.toOwnedSlice(self.allocator),
+            .line = self.previous.line,
+            .column = self.previous.column,
         };
 
         const node = try self.allocator.create(AST.ASTNode);
@@ -908,6 +951,8 @@ pub const Parser = struct {
             .name = name,
             .type_annotation = type_annotation,
             .initializer = initializer,
+            .line = name.line,
+            .column = name.column,
         };
 
         const node = try self.allocator.create(AST.ASTNode);
@@ -945,6 +990,8 @@ pub const Parser = struct {
             .params = try params.toOwnedSlice(self.allocator),
             .return_type_annotation = return_type,
             .body = body,
+            .line = name.line,
+            .column = name.column,
         };
 
         const node = try self.allocator.create(AST.ASTNode);
@@ -987,6 +1034,8 @@ pub const Parser = struct {
             .yield_type_annotation = yield_type,
             .return_type_annotation = return_type,
             .body = body,
+            .line = name.line,
+            .column = name.column,
         };
         const node = try self.allocator.create(AST.ASTNode);
         node.* = .{ .co_decl = co_decl };
@@ -1008,7 +1057,7 @@ pub const Parser = struct {
         }
         try self.consume(.RIGHT_BRACE);
         const shape_expr = try self.allocator.create(AST.ShapeExpr);
-        shape_expr.* = .{ .fields = try fields.toOwnedSlice(self.allocator) };
+        shape_expr.* = .{ .fields = try fields.toOwnedSlice(self.allocator), .line = self.previous.line, .column = self.previous.column };
         const node = try self.allocator.create(AST.ASTNode);
         node.* = .{ .shape_expr = shape_expr };
         return node;
@@ -1021,18 +1070,19 @@ pub const Parser = struct {
         if (self.check(.LEFT_BRACE)) {
             const shape_expr = try self.parse_shape_expression();
             const type_decl = try self.allocator.create(AST.TypeDecl);
-            type_decl.* = .{ .modifier_pub = is_pub, .name = name, .type_annotation = shape_expr };
+            type_decl.* = .{ .modifier_pub = is_pub, .name = name, .type_annotation = shape_expr, .line = name.line, .column = name.column };
             const node = try self.allocator.create(AST.ASTNode);
             node.* = .{ .type_decl = type_decl };
             return node;
         } else {
             const type_expr = try self.parse_type_expression();
             const type_decl = try self.allocator.create(AST.TypeDecl);
-            type_decl.* = .{ .modifier_pub = is_pub, .name = name, .type_annotation = type_expr };
+            type_decl.* = .{ .modifier_pub = is_pub, .name = name, .type_annotation = type_expr, .line = name.line, .column = name.column };
             const node = try self.allocator.create(AST.ASTNode);
             node.* = .{ .type_decl = type_decl };
             return node;
         }
+        try self.diagnostics.add_diagnostic(.{ .column = self.scanner.column(), .line = self.scanner.line, .stage = .Parser, .severity = .Error, .message = "Unexpected token", .file_path = self.file_path });
         return ParserError.UnexpectedToken;
     }
 
@@ -1047,7 +1097,7 @@ pub const Parser = struct {
         try self.consume(.RIGHT_PAREN);
         const body = try self.parse_statement();
         const for_stmt = try self.allocator.create(AST.ForStmt);
-        for_stmt.* = .{ .iterator_name = iterator_name, .iterator_expr = range_expr, .body = body };
+        for_stmt.* = .{ .iterator_name = iterator_name, .iterator_expr = range_expr, .body = body, .line = iterator_name.line, .column = iterator_name.column };
         const node = try self.allocator.create(AST.ASTNode);
         node.* = .{ .for_stmt = for_stmt };
         return node;
@@ -1059,7 +1109,7 @@ pub const Parser = struct {
         try self.consume(.RIGHT_PAREN);
         const body = try self.parse_statement();
         const while_stmt = try self.allocator.create(AST.WhileStmt);
-        while_stmt.* = .{ .condition = condition, .body = body };
+        while_stmt.* = .{ .condition = condition, .body = body, .line = self.previous.line, .column = self.previous.column };
         const node = try self.allocator.create(AST.ASTNode);
         node.* = .{ .while_stmt = while_stmt };
         return node;
@@ -1078,7 +1128,7 @@ pub const Parser = struct {
         }
 
         const if_stmt = try self.allocator.create(AST.IfStmt);
-        if_stmt.* = .{ .condition = condition, .then_branch = then_branch, .else_branch = else_branch };
+        if_stmt.* = .{ .condition = condition, .then_branch = then_branch, .else_branch = else_branch, .line = self.previous.line, .column = self.previous.column };
         const node = try self.allocator.create(AST.ASTNode);
         node.* = .{ .if_stmt = if_stmt };
         return node;
@@ -1088,7 +1138,7 @@ pub const Parser = struct {
         const expr = try self.parse_expression();
         try self.consume(.SEMICOLON);
         const expr_stmt = try self.allocator.create(AST.ExprStmt);
-        expr_stmt.* = .{ .expr = expr };
+        expr_stmt.* = .{ .expr = expr, .line = self.previous.line, .column = self.previous.column };
         const node = try self.allocator.create(AST.ASTNode);
         node.* = .{ .expr_stmt = expr_stmt };
         return node;
@@ -1098,7 +1148,7 @@ pub const Parser = struct {
         if (self.check(.SEMICOLON)) {
             try self.consume(.SEMICOLON);
             const return_stmt = try self.allocator.create(AST.ReturnStmt);
-            return_stmt.* = .{ .expr = null };
+            return_stmt.* = .{ .expr = null, .line = self.previous.line, .column = self.previous.column };
             const node = try self.allocator.create(AST.ASTNode);
             node.* = .{ .return_stmt = return_stmt };
             return node;
@@ -1107,7 +1157,7 @@ pub const Parser = struct {
         const expr = try self.parse_expression();
         try self.consume(.SEMICOLON);
         const return_stmt = try self.allocator.create(AST.ReturnStmt);
-        return_stmt.* = .{ .expr = expr };
+        return_stmt.* = .{ .expr = expr, .line = self.previous.line, .column = self.previous.column };
         const node = try self.allocator.create(AST.ASTNode);
         node.* = .{ .return_stmt = return_stmt };
         return node;
@@ -1116,7 +1166,7 @@ pub const Parser = struct {
     fn parse_break_statement(self: *Parser) ParserError!*AST.ASTNode {
         try self.consume(.SEMICOLON);
         const break_stmt = try self.allocator.create(AST.BreakStmt);
-        break_stmt.* = .{};
+        break_stmt.* = .{ .line = self.previous.line, .column = self.previous.column };
         const node = try self.allocator.create(AST.ASTNode);
         node.* = .{ .break_stmt = break_stmt };
         return node;
@@ -1125,7 +1175,7 @@ pub const Parser = struct {
     fn parse_continue_statement(self: *Parser) ParserError!*AST.ASTNode {
         try self.consume(.SEMICOLON);
         const continue_stmt = try self.allocator.create(AST.ContinueStmt);
-        continue_stmt.* = .{};
+        continue_stmt.* = .{ .line = self.previous.line, .column = self.previous.column };
         const node = try self.allocator.create(AST.ASTNode);
         node.* = .{ .continue_stmt = continue_stmt };
         return node;
@@ -1135,7 +1185,7 @@ pub const Parser = struct {
         const expr = try self.parse_expression();
         try self.consume(.SEMICOLON);
         const panic_stmt = try self.allocator.create(AST.PanicStmt);
-        panic_stmt.* = .{ .expr = expr };
+        panic_stmt.* = .{ .expr = expr, .line = self.previous.line, .column = self.previous.column };
         const node = try self.allocator.create(AST.ASTNode);
         node.* = .{ .panic_stmt = panic_stmt };
         return node;
@@ -1152,7 +1202,7 @@ pub const Parser = struct {
         try self.consume(.RIGHT_BRACE);
 
         const block = try self.allocator.create(AST.BlockStmt);
-        block.* = .{ .stmts = try statements.toOwnedSlice(self.allocator) };
+        block.* = .{ .stmts = try statements.toOwnedSlice(self.allocator), .line = self.previous.line, .column = self.previous.column };
 
         const node = try self.allocator.create(AST.ASTNode);
         node.* = .{ .block_stmt = block };
@@ -1169,14 +1219,14 @@ pub const Parser = struct {
             const pat_node = try self.allocator.create(AST.ASTNode);
             pat_node.* = .{ .default_pat = pat };
             const case = try self.allocator.create(MatchCase);
-            case.* = .{ .pattern = pat_node, .stmt = stmt };
+            case.* = .{ .pattern = pat_node, .stmt = stmt, .line = self.previous.line, .column = self.previous.column };
             return case;
         }
         const expr = try self.parse_expression();
         try self.consume(.EQUAL_ARROW);
         const stmt = try self.parse_statement();
         const case = try self.allocator.create(MatchCase);
-        case.* = .{ .pattern = expr, .stmt = stmt };
+        case.* = .{ .pattern = expr, .stmt = stmt, .line = self.previous.line, .column = self.previous.column };
         return case;
     }
 
@@ -1194,7 +1244,7 @@ pub const Parser = struct {
         try self.consume(.RIGHT_BRACE);
 
         const match_expr = try self.allocator.create(AST.MatchExpr);
-        match_expr.* = .{ .expr = expr, .cases = try cases.toOwnedSlice(self.allocator) };
+        match_expr.* = .{ .expr = expr, .cases = try cases.toOwnedSlice(self.allocator), .line = self.previous.line, .column = self.previous.column };
 
         const node = try self.allocator.create(AST.ASTNode);
         node.* = .{ .match_expr = match_expr };
@@ -1206,7 +1256,7 @@ pub const Parser = struct {
         try self.consume(.SEMICOLON);
 
         const give_stmt = try self.allocator.create(AST.GiveStmt);
-        give_stmt.* = .{ .expr = expr };
+        give_stmt.* = .{ .expr = expr, .line = self.previous.line, .column = self.previous.column };
 
         const node = try self.allocator.create(AST.ASTNode);
         node.* = .{ .give_stmt = give_stmt };
@@ -1218,7 +1268,7 @@ pub const Parser = struct {
         try self.consume(.SEMICOLON);
 
         const yield_stmt = try self.allocator.create(AST.YieldStmt);
-        yield_stmt.* = .{ .expr = expr };
+        yield_stmt.* = .{ .expr = expr, .line = self.previous.line, .column = self.previous.column };
 
         const node = try self.allocator.create(AST.ASTNode);
         node.* = .{ .yield_stmt = yield_stmt };
@@ -1230,7 +1280,7 @@ pub const Parser = struct {
         try self.consume(.SEMICOLON);
 
         const resume_expr = try self.allocator.create(AST.ResumeExpr);
-        resume_expr.* = .{ .expr = expr };
+        resume_expr.* = .{ .expr = expr, .line = self.previous.line, .column = self.previous.column };
 
         const node = try self.allocator.create(AST.ASTNode);
         node.* = .{ .resume_expr = resume_expr };
@@ -1255,7 +1305,7 @@ pub const Parser = struct {
         try self.consume(.RIGHT_BRACE);
 
         const error_decl = try self.allocator.create(AST.ErrorDecl);
-        error_decl.* = .{ .name = token, .variants = try variants.toOwnedSlice(self.allocator), .modifier_pub = is_pub };
+        error_decl.* = .{ .name = token, .variants = try variants.toOwnedSlice(self.allocator), .modifier_pub = is_pub, .line = token.line, .column = token.column };
         const node = try self.allocator.create(AST.ASTNode);
         node.* = .{ .error_decl = error_decl };
         return node;
@@ -1279,7 +1329,7 @@ pub const Parser = struct {
         try self.consume(.RIGHT_BRACE);
 
         const enum_decl = try self.allocator.create(AST.EnumDecl);
-        enum_decl.* = .{ .name = token, .variants = try variants.toOwnedSlice(self.allocator), .modifier_pub = is_pub };
+        enum_decl.* = .{ .name = token, .variants = try variants.toOwnedSlice(self.allocator), .modifier_pub = is_pub, .line = token.line, .column = token.column };
         const node = try self.allocator.create(AST.ASTNode);
         node.* = .{ .enum_decl = enum_decl };
         return node;
@@ -1305,6 +1355,7 @@ pub const Parser = struct {
             }
 
             if (is_public and is_static) {
+                try self.diagnostics.add_diagnostic(.{ .column = self.scanner.column(), .line = self.scanner.line, .stage = .Parser, .severity = .Error, .message = "'pub static' / 'static pub' is not allowed. Use 'static' or 'pub' alone instead.", .file_path = self.file_path });
                 return ParserError.UnexpectedToken; // 'pub static' / 'static pub' is not allowed
             }
 
@@ -1339,6 +1390,8 @@ pub const Parser = struct {
             .name = name,
             .fields = try fields.toOwnedSlice(self.allocator),
             .methods = try methods.toOwnedSlice(self.allocator),
+            .line = name.line,
+            .column = name.column,
         };
         const node = try self.allocator.create(AST.ASTNode);
         node.* = .{
@@ -1371,7 +1424,7 @@ pub const Parser = struct {
         try self.consume(.SEMICOLON);
 
         const use_decl = try self.allocator.create(AST.UseDecl);
-        use_decl.* = .{ .items = try items.toOwnedSlice(self.allocator), .module = module };
+        use_decl.* = .{ .items = try items.toOwnedSlice(self.allocator), .module = module, .line = module.line, .column = module.column };
 
         const node = try self.allocator.create(AST.ASTNode);
         node.* = .{ .use_decl = use_decl };
@@ -1494,7 +1547,10 @@ pub const Parser = struct {
         } else if (try self.match(.ERROR)) {
             return try self.parse_error_declaration(is_pub);
         } else {
-            if (is_pub) return ParserError.UnexpectedToken;
+            if (is_pub) {
+                try self.diagnostics.add_diagnostic(.{ .column = self.scanner.column(), .file_path = self.file_path, .line = self.scanner.line, .stage = .Parser, .severity = .Error, .message = "Unexpected token", .hint = "'pub' is only allowed inside struct and for top level declarations." });
+                return ParserError.UnexpectedToken;
+            }
             return try self.parse_statement();
         }
     }

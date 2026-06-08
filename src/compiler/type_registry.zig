@@ -1,5 +1,6 @@
 const std = @import("std");
 const ast = @import("ast.zig");
+const DiagnosticReporter = @import("../helpers/diagnostics.zig").DiagnosticsReporter;
 
 pub const TypeId = ast.TypeId;
 
@@ -57,11 +58,15 @@ pub const TypeInfo = union(enum) {
 pub const TypeRegistry = struct {
     types: std.ArrayList(TypeInfo),
     allocator: std.mem.Allocator,
+    diagnostics: *DiagnosticReporter,
+    file_path: []const u8,
 
-    pub fn init(allocator: std.mem.Allocator) !TypeRegistry {
+    pub fn init(allocator: std.mem.Allocator, diagnostics: *DiagnosticReporter, file_path: []const u8) !TypeRegistry {
         var registry = TypeRegistry{
             .types = .empty,
             .allocator = allocator,
+            .diagnostics = diagnostics,
+            .file_path = file_path,
         };
 
         try registry.types.append(allocator, .{ .primitive = .Nil });
@@ -166,7 +171,10 @@ pub const TypeRegistry = struct {
                 }
                 return try self.add_shape_type(try field_types.toOwnedSlice(self.allocator));
             },
-            else => return TypeRegistryError.UnknownType,
+            else => {
+                try self.diagnostics.add_diagnostic(.{ .column = 0, .line = 0, .file_path = self.file_path, .stage = .TypeChecker, .severity = .Error, .message = "Unknown type" });
+                return TypeRegistryError.UnknownType;
+            },
         };
     }
 
@@ -352,6 +360,7 @@ pub const TypeRegistry = struct {
                 ._type => |existing_type| {
                     if (!std.mem.eql(u8, existing_type.name, name)) continue;
                     if (existing_type.resolved_type != resolved_type) {
+                        try self.diagnostics.add_diagnostic(.{ .column = 0, .line = 0, .file_path = self.file_path, .stage = .TypeChecker, .severity = .Error, .message = "Type resolution conflict", .hint = "Type is defined with different resolved types." });
                         return TypeRegistryError.TypeResolutionConflict; // names are the same but the resolved types differ
                     }
                     return @as(TypeId, @intCast(index));
@@ -372,6 +381,7 @@ pub const TypeRegistry = struct {
                 ._struct => |existing_struct| {
                     if (!std.mem.eql(u8, existing_struct.name, name)) continue;
                     if (existing_struct.fields.len != fields.len or existing_struct.methods.len != methods.len) {
+                        try self.diagnostics.add_diagnostic(.{ .file_path = self.file_path, .column = 0, .line = 0, .stage = .TypeChecker, .severity = .Error, .message = "Type resolution conflict", .hint = "Type is defined with different number of fields or methods." });
                         return TypeRegistryError.TypeResolutionConflict; // names are the same but the number of fields or methods differ
                     }
 
@@ -406,6 +416,7 @@ pub const TypeRegistry = struct {
                 ._error => |existing_error| {
                     if (!std.mem.eql(u8, existing_error.name, name)) continue;
                     if (existing_error.variants.len != variants.len) {
+                        try self.diagnostics.add_diagnostic(.{ .file_path = self.file_path, .column = 0, .line = 0, .stage = .TypeChecker, .severity = .Error, .message = "Type resolution conflict", .hint = "Type is defined with different number of variants." });
                         return TypeRegistryError.TypeResolutionConflict; // names are the same but the number of variants differ
                     }
 
@@ -434,6 +445,7 @@ pub const TypeRegistry = struct {
                 ._enum => |existing_enum| {
                     if (!std.mem.eql(u8, existing_enum.name, name)) continue;
                     if (existing_enum.variants.len != variants.len) {
+                        try self.diagnostics.add_diagnostic(.{ .file_path = self.file_path, .column = 0, .line = 0, .stage = .TypeChecker, .severity = .Error, .message = "Type resolution conflict", .hint = "Type is defined with different number of variants." });
                         return TypeRegistryError.TypeResolutionConflict; // names are the same but the number of variants differ
                     }
 

@@ -2,9 +2,12 @@ const std = @import("std");
 const scanner = @import("../scanner.zig");
 const Parser = @import("../parser.zig").Parser;
 const AST = @import("../ast.zig");
+const DiagnosticsReporter = @import("../../helpers/diagnostics.zig").DiagnosticsReporter;
 
 fn parseFirstDecl(allocator: std.mem.Allocator, source: []const u8) !*AST.ASTNode {
-    var p = try Parser.init(allocator, source);
+    var diagnostics = DiagnosticsReporter.init(allocator);
+    defer diagnostics.deinit();
+    var p = try Parser.init(allocator, source, &diagnostics, "test");
     const node = try p.parse();
     try std.testing.expect(node.* == .program);
     try std.testing.expect(node.program.declarations.len > 0);

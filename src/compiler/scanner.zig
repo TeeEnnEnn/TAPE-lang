@@ -1,6 +1,7 @@
 const std = @import("std");
 const ascii = std.ascii;
 const mem = std.mem;
+const DiagnosticsReporter = @import("../helpers/diagnostics.zig").DiagnosticsReporter;
 
 /// Types of tokens that can be parsed by the scanner.
 pub const TokenType = enum {
@@ -193,6 +194,7 @@ pub const Token = struct {
     token_type: TokenType,
     lexeme: []const u8,
     line: usize,
+    column: usize,
 };
 
 pub const ScannerError = error{
@@ -200,20 +202,26 @@ pub const ScannerError = error{
     UnexpectedCharacter,
     UnexpectedToken,
     BufferTooSmall, // only for scan()
-};
+} || std.mem.Allocator.Error;
 
 pub const Scanner = struct {
     source: []const u8,
     line: usize,
     start: usize,
     current: usize,
+    diagnostics: *DiagnosticsReporter,
+    last_newline_pos: usize,
+    file_path: []const u8,
 
-    pub fn init(source: []const u8) Scanner {
+    pub fn init(source: []const u8, diagnostics: *DiagnosticsReporter, file_path: []const u8) Scanner {
         return Scanner{
             .source = source,
             .line = 1,
             .start = 0,
             .current = 0,
+            .diagnostics = diagnostics,
+            .last_newline_pos = 0,
+            .file_path = file_path,
         };
     }
 
@@ -234,7 +242,13 @@ pub const Scanner = struct {
 
     inline fn advance(self: *Scanner) u8 {
         self.current += 1;
-        return self.source[self.current - 1];
+        const c = self.source[self.current - 1];
+        if (c == '\n') self.last_newline_pos = self.current;
+        return c;
+    }
+
+    pub inline fn column(self: *Scanner) usize {
+        return self.start - self.last_newline_pos + 1;
     }
 
     inline fn match(self: *Scanner, expected: u8) bool {
@@ -249,6 +263,7 @@ pub const Scanner = struct {
             .token_type = token_type,
             .lexeme = self.source[self.start..self.current],
             .line = self.line,
+            .column = self.column(),
         };
     }
 
@@ -412,7 +427,10 @@ pub const Scanner = struct {
             if (c == '\n') self.line += 1;
             _ = self.advance();
         }
-        if (self.is_at_end()) return ScannerError.UnterminatedString;
+        if (self.is_at_end()) {
+            try self.diagnostics.add_diagnostic(.{ .column = self.column(), .line = self.line, .severity = .Error, .message = "Unterminated string", .file_path = self.file_path, .stage = .Scanner });
+            return ScannerError.UnterminatedString;
+        }
         _ = self.advance(); // closing quote
         return self.make_token(.STRING);
     }
@@ -495,14 +513,20 @@ pub const Scanner = struct {
             '|' => self.make_token(.PIPE),
             '^' => self.make_token(.CARET),
             '~' => self.make_token(.TILDE),
-            else => error.UnexpectedCharacter,
+            else => {
+                try self.diagnostics.add_diagnostic(.{ .column = self.column(), .line = self.line, .severity = .Error, .message = "Unexpected character", .stage = .Scanner, .file_path = self.file_path });
+                return ScannerError.UnexpectedCharacter;
+            },
         };
     }
 
     pub fn scan(self: *Scanner, token_buf: []Token) ScannerError!usize {
         var buf_pos: usize = 0;
         while (true) {
-            if (buf_pos == token_buf.len) return ScannerError.BufferTooSmall;
+            if (buf_pos == token_buf.len) {
+                try self.diagnostics.add_diagnostic(.{ .column = self.column(), .line = self.line, .severity = .Fatal, .message = "Buffer too small", .stage = .Scanner, .file_path = self.file_path });
+                return ScannerError.BufferTooSmall;
+            }
             const token = try self.scan_token();
             token_buf[buf_pos] = token;
             buf_pos += 1;

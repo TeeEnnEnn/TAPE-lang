@@ -8,6 +8,9 @@ pub const type_registry = @import("compiler/type_registry.zig");
 pub const environment = @import("compiler/environment.zig");
 pub const type_checker = @import("compiler/type_checker.zig");
 
+// Helpers
+pub const diagnostics = @import("helpers/diagnostics.zig");
+
 // CLI
 pub const cli = @import("cli/cli.zig");
 pub const cli_helpers = @import("cli/helpers.zig");
@@ -17,11 +20,15 @@ test {
     _ = @import("compiler/parser.zig");
     _ = @import("compiler/type_registry.zig");
     _ = @import("compiler/environment.zig");
+    _ = @import("compiler/type_checker.zig");
+
     _ = @import("compiler/tests/test_scanner.zig");
     _ = @import("compiler/tests/test_parser.zig");
     _ = @import("compiler/tests/test_type_registry.zig");
     _ = @import("compiler/tests/test_environement.zig");
     _ = @import("compiler/tests/test_type_checker.zig");
+
+    _ = @import("helpers/diagnostics.zig");
 
     _ = @import("cli/cli.zig");
     _ = @import("cli/helpers.zig");

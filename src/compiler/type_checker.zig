@@ -4,6 +4,7 @@ const TypeRegistry = @import("type_registry.zig");
 const PrimitiveType = TypeRegistry.PrimitiveType;
 const Environment = @import("environment.zig").Environment;
 const EnvironmentError = @import("environment.zig").EnvironmentError;
+const DiagnosticReporter = @import("../helpers/diagnostics.zig").DiagnosticsReporter;
 const TypeRegistryError = TypeRegistry.TypeRegistryError;
 const ShapeField = TypeRegistry.ShapeField;
 const StructMethod = TypeRegistry.StructMethod;
@@ -53,6 +54,8 @@ pub const TypeChecker = struct {
     allocator: std.mem.Allocator,
     registry: *TypeRegistry.TypeRegistry,
     environment: *Environment,
+    diagnostics: *DiagnosticReporter,
+    file_path: []const u8,
 
     expected_return_type: ?AST.TypeId = null,
     expected_give_type: ?AST.TypeId = null,
@@ -62,8 +65,8 @@ pub const TypeChecker = struct {
     in_coroutine: bool = false,
     in_function: bool = false,
 
-    pub fn init(allocator: std.mem.Allocator, registry: *TypeRegistry.TypeRegistry, global_environment: *Environment) TypeChecker {
-        return .{ .allocator = allocator, .registry = registry, .environment = global_environment };
+    pub fn init(allocator: std.mem.Allocator, registry: *TypeRegistry.TypeRegistry, global_environment: *Environment, diagnostics: *DiagnosticReporter, file_path: []const u8) TypeChecker {
+        return .{ .allocator = allocator, .registry = registry, .environment = global_environment, .diagnostics = diagnostics, .file_path = file_path };
     }
 
     pub fn hoist(self: *TypeChecker, node: *AST.ASTNode) TypeCheckerError!void {
@@ -153,10 +156,12 @@ pub const TypeChecker = struct {
                 if (decl.type_annotation) |annotated| {
                     target_type = try self.registry.resolve(annotated);
                     if (!try self.is_compatible(target_type, expr_type)) {
+                        try self.diagnostics.add_diagnostic(.{ .file_path = self.file_path, .column = decl.column, .line = decl.line, .stage = .TypeChecker, .severity = .Error, .message = "Type mismatch" });
                         return TypeCheckerError.TypeMismatch;
                     }
                 }
                 if (self.environment.contains(decl.name.lexeme)) {
+                    try self.diagnostics.add_diagnostic(.{ .file_path = self.file_path, .column = decl.name.column, .line = decl.name.line, .stage = .TypeChecker, .severity = .Error, .message = "Duplicate symbol", .hint = "Symbol is already defined." });
                     return TypeCheckerError.DuplicateSymbol;
                 }
                 try self.environment.define(decl.name.lexeme, target_type);
@@ -165,11 +170,15 @@ pub const TypeChecker = struct {
             },
             .fn_decl => |decl| {
                 const fn_id = self.environment.lookup(decl.name.lexeme) catch {
+                    try self.diagnostics.add_diagnostic(.{ .file_path = self.file_path, .column = decl.name.column, .line = decl.name.line, .stage = .TypeChecker, .severity = .Error, .message = "Undefined symbol", .hint = "Symbol is not defined." });
                     return TypeCheckerError.UndefinedSymbol;
                 };
 
                 const type_info = self.registry.get_type_info(fn_id);
-                if (type_info != .function) return TypeCheckerError.NotCallable;
+                if (type_info != .function) {
+                    try self.diagnostics.add_diagnostic(.{ .file_path = self.file_path, .column = decl.name.column, .line = decl.name.line, .stage = .TypeChecker, .severity = .Error, .message = "Not callable", .hint = "Symbol is not a function." });
+                    return TypeCheckerError.NotCallable;
+                }
 
                 // Track expected return type
                 const prev_return = self.expected_return_type;
@@ -177,7 +186,7 @@ pub const TypeChecker = struct {
                 defer self.expected_return_type = prev_return;
 
                 // Push function scope
-                var local_env = Environment.init(self.allocator, self.environment);
+                var local_env = Environment.init(self.allocator, self.environment, self.diagnostics, self.file_path);
                 defer local_env.deinit();
                 const prev_env = self.environment;
                 self.environment = &local_env;
@@ -196,6 +205,7 @@ pub const TypeChecker = struct {
                 const needs_return = type_info.function.ret != @intFromEnum(PrimitiveType.Nil) and type_info.function.ret != @intFromEnum(PrimitiveType.Never);
 
                 if (needs_return and !body_term.return_ and !body_term.panics) {
+                    try self.diagnostics.add_diagnostic(.{ .file_path = self.file_path, .column = decl.name.column, .line = decl.name.line, .stage = .TypeChecker, .severity = .Error, .message = "Missing return", .hint = "Function is missing a return statement." });
                     return TypeCheckerError.MissingReturn;
                 }
                 return .{};
@@ -215,11 +225,15 @@ pub const TypeChecker = struct {
             },
             .co_decl => |decl| {
                 const fn_id = self.environment.lookup(decl.name.lexeme) catch {
+                    try self.diagnostics.add_diagnostic(.{ .file_path = self.file_path, .column = decl.name.column, .line = decl.name.line, .stage = .TypeChecker, .severity = .Error, .message = "Undefined symbol", .hint = "Symbol is not defined." });
                     return TypeCheckerError.UndefinedSymbol;
                 };
 
                 const type_info = self.registry.get_type_info(fn_id);
-                if (type_info != .coroutine) return TypeCheckerError.NotCallable;
+                if (type_info != .coroutine) {
+                    try self.diagnostics.add_diagnostic(.{ .file_path = self.file_path, .column = decl.name.column, .line = decl.name.line, .stage = .TypeChecker, .severity = .Error, .message = "Not callable", .hint = "Symbol is not a coroutine." });
+                    return TypeCheckerError.NotCallable;
+                }
 
                 // Track expected return type
                 const prev_return = self.expected_return_type;
@@ -232,7 +246,7 @@ pub const TypeChecker = struct {
                 defer self.expected_yield_type = prev_yield;
 
                 // Push function scope
-                var local_env = Environment.init(self.allocator, self.environment);
+                var local_env = Environment.init(self.allocator, self.environment, self.diagnostics, self.file_path);
                 defer local_env.deinit();
                 const prev_env = self.environment;
                 self.environment = &local_env;
@@ -246,6 +260,7 @@ pub const TypeChecker = struct {
                 const body_term = try self.check(decl.body);
                 const needs_return = type_info.coroutine.ret != @intFromEnum(PrimitiveType.Nil) and type_info.coroutine.ret != @intFromEnum(PrimitiveType.Never);
                 if (needs_return and !body_term.return_ and !body_term.panics) {
+                    try self.diagnostics.add_diagnostic(.{ .file_path = self.file_path, .column = decl.name.column, .line = decl.name.line, .stage = .TypeChecker, .severity = .Error, .message = "Missing return", .hint = "Coroutine is missing a return statement." });
                     return TypeCheckerError.MissingReturn;
                 }
                 return .{};
@@ -257,14 +272,20 @@ pub const TypeChecker = struct {
                 return .{};
             },
             .use_decl => |decl| {
-                if (decl.module.lexeme.len == 0) return TypeCheckerError.InvalidOperation;
+                if (decl.module.lexeme.len == 0) {
+                    try self.diagnostics.add_diagnostic(.{ .file_path = self.file_path, .column = decl.module.column, .line = decl.module.line, .stage = .TypeChecker, .severity = .Error, .message = "Invalid operation", .hint = "Module name cannot be empty." });
+                    return TypeCheckerError.InvalidOperation;
+                }
                 for (decl.items) |item| {
-                    if (item.name.lexeme.len == 0) return TypeCheckerError.InvalidOperation;
+                    if (item.name.lexeme.len == 0) {
+                        try self.diagnostics.add_diagnostic(.{ .file_path = self.file_path, .column = item.name.column, .line = item.name.line, .stage = .TypeChecker, .severity = .Error, .message = "Invalid operation", .hint = "Import item name cannot be empty." });
+                        return TypeCheckerError.InvalidOperation;
+                    }
                 }
                 return .{};
             },
             .block_stmt => |stmt| {
-                var local_env = Environment.init(self.allocator, self.environment);
+                var local_env = Environment.init(self.allocator, self.environment, self.diagnostics, self.file_path);
                 defer local_env.deinit();
 
                 const prev_env = self.environment;
@@ -331,7 +352,7 @@ pub const TypeChecker = struct {
                 return .{};
             },
             .for_stmt => |stmt| {
-                var local_env = Environment.init(self.allocator, self.environment);
+                var local_env = Environment.init(self.allocator, self.environment, self.diagnostics, self.file_path);
                 defer local_env.deinit();
 
                 const prev_env = self.environment;

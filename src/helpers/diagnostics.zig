@@ -2,13 +2,20 @@
 
 const std = @import("std");
 
-const Severity = enum {
+const reset = "\x1b[0m";
+const bold_red = "\x1b[1;31m";
+const red = "\x1b[31m";
+const yellow = "\x1b[33m";
+const gray = "\x1b[37m";
+
+pub const Severity = enum {
+    Fatal,
     Error,
     Warning,
     Info,
 };
 
-const Stage = enum {
+pub const Stage = enum {
     Scanner,
     Parser,
     TypeChecker,
@@ -16,23 +23,37 @@ const Stage = enum {
     Execution,
 };
 
-const Diagnostic = struct {
-    message: []const u8,
-    line: u32,
-    column: u32,
-    file: []const u8,
-    severity: Severity,
+pub const Diagnostic = struct {
+    /// The stage at which the diagnostic was generated.
     stage: Stage,
+    /// The severity of the diagnostic.
+    severity: Severity,
+    /// The diagnostic message.
+    message: []const u8,
+    /// The path to the file where the diagnostic was generated.
+    file_path: []const u8,
+    /// The line number where the diagnostic was generated.
+    line: usize,
+    /// The column number where the diagnostic was generated.
+    column: usize,
+    /// The hint to the user to fix the diagnostic.
+    hint: ?[]const u8 = null,
 };
 
-const DiagnosticsReporter = struct {
+pub const DiagnosticsReporter = struct {
     allocator: std.mem.Allocator,
     diagnostics: std.ArrayList(Diagnostic),
+    has_errors: bool,
+    has_warnings: bool,
+    has_infos: bool,
 
     pub fn init(allocator: std.mem.Allocator) DiagnosticsReporter {
         return .{
             .allocator = allocator,
             .diagnostics = .empty,
+            .has_errors = false,
+            .has_warnings = false,
+            .has_infos = false,
         };
     }
 
@@ -40,23 +61,55 @@ const DiagnosticsReporter = struct {
         self.diagnostics.deinit(self.allocator);
     }
 
-    pub fn add_diagnostic(self: *DiagnosticsReporter, diagnostic: Diagnostic) void {
-        self.diagnostics.append(diagnostic) catch {};
+    pub fn add_diagnostic(self: *DiagnosticsReporter, diagnostic: Diagnostic) !void {
+        if (diagnostic.severity == .Error or diagnostic.severity == .Fatal) {
+            self.has_errors = true;
+        } else if (diagnostic.severity == .Warning) {
+            self.has_warnings = true;
+        } else if (diagnostic.severity == .Info) {
+            self.has_infos = true;
+        }
+
+        self.diagnostics.append(self.allocator, diagnostic) catch {
+            // we failed to allocate memory for a diagnostic.
+            if (self.diagnostics.items.len > 0) {
+                _ = self.diagnostics.orderedRemove(0);
+                try self.diagnostics.append(self.allocator, diagnostic);
+            }
+        };
     }
 
-    pub fn report(self: *DiagnosticsReporter) void {
+    pub fn report_all(self: *DiagnosticsReporter, io: std.Io) !void {
+        const stderr = std.Io.File.stderr();
+        var buf: [32]u8 = undefined;
         for (self.diagnostics.items) |diagnostic| {
-            switch (diagnostic.severity) {
-                .Error => |severity| {
-                    _ = severity;
-                },
-                .Warning => |severity| {
-                    _ = severity;
-                },
-                .Info => |severity| {
-                    _ = severity;
-                },
+            const color = switch (diagnostic.severity) {
+                .Fatal => bold_red,
+                .Error => red,
+                .Warning => yellow,
+                .Info => gray,
+            };
+            try stderr.writeStreamingAll(io, color);
+            try stderr.writeStreamingAll(io, @tagName(diagnostic.severity));
+            try stderr.writeStreamingAll(io, reset);
+            try stderr.writeStreamingAll(io, " during ");
+            try stderr.writeStreamingAll(io, @tagName(diagnostic.stage));
+            try stderr.writeStreamingAll(io, "\nAt ");
+            try stderr.writeStreamingAll(io, diagnostic.file_path);
+            try stderr.writeStreamingAll(io, " (line ");
+            try stderr.writeStreamingAll(io, std.fmt.bufPrint(&buf, "{}", .{diagnostic.line}) catch unreachable);
+            try stderr.writeStreamingAll(io, ", column ");
+            try stderr.writeStreamingAll(io, std.fmt.bufPrint(&buf, "{}", .{diagnostic.column}) catch unreachable);
+            try stderr.writeStreamingAll(io, ")\n");
+            try stderr.writeStreamingAll(io, diagnostic.message);
+            try stderr.writeStreamingAll(io, "\n");
+            if (diagnostic.hint) |hint| {
+                try stderr.writeStreamingAll(io, "Hint: ");
+                try stderr.writeStreamingAll(io, hint);
+                try stderr.writeStreamingAll(io, "\n");
             }
         }
+        self.diagnostics.clearAndFree(self.allocator);
+        try stderr.writeStreamingAll(io, reset);
     }
 };

@@ -7,14 +7,18 @@ const TypeRegistry = @import("../type_registry.zig").TypeRegistry;
 const TypeId = @import("../ast.zig").TypeId;
 const Parser = @import("../parser.zig").Parser;
 const PrimitiveType = @import("../type_registry.zig").PrimitiveType;
+const DiagnosticsReporter = @import("../../helpers/diagnostics.zig").DiagnosticsReporter;
 
 fn checkSource(allocator: std.mem.Allocator, source: []const u8) !struct { registry: TypeRegistry, env: Environment } {
-    var parser = try Parser.init(allocator, source);
+    var diagnostics = DiagnosticsReporter.init(allocator);
+    defer diagnostics.deinit();
+
+    var parser = try Parser.init(allocator, source, &diagnostics, "test");
     const program = try parser.parse();
 
-    var env = Environment.init(allocator, null);
-    var registry = try TypeRegistry.init(allocator);
-    var checker = TypeChecker.init(allocator, &registry, &env);
+    var env = Environment.init(allocator, null, &diagnostics, "test");
+    var registry = try TypeRegistry.init(allocator, &diagnostics, "test");
+    var checker = TypeChecker.init(allocator, &registry, &env, &diagnostics, "test");
     _ = try checker.check(program);
 
     return .{ .registry = registry, .env = env };
@@ -26,13 +30,16 @@ test "Type Checker - Init works" {
     defer arena.deinit();
     const arena_allocator = arena.allocator();
 
-    var env = Environment.init(allocator, null);
+    var diagnostics = DiagnosticsReporter.init(allocator);
+    defer diagnostics.deinit();
+
+    var env = Environment.init(allocator, null, &diagnostics, "test");
     defer env.deinit();
 
-    var registry = try TypeRegistry.init(arena_allocator);
+    var registry = try TypeRegistry.init(arena_allocator, &diagnostics, "test");
     defer registry.deinit();
 
-    const type_checker = TypeChecker.init(allocator, &registry, &env);
+    const type_checker = TypeChecker.init(allocator, &registry, &env, &diagnostics, "test");
     _ = type_checker;
 }
 

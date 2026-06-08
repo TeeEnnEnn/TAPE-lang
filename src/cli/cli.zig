@@ -7,6 +7,7 @@ const TapeParser = @import("../compiler/parser.zig");
 const TapeTypeChecker = @import("../compiler/type_checker.zig");
 const TapeEnvironment = @import("../compiler/environment.zig");
 const TapeTypeRegistry = @import("../compiler/type_registry.zig");
+const TapeDiagnostics = @import("../helpers/diagnostics.zig");
 
 /// Errors that can occur when running TAPE in REPL mode.
 const TapeReplError = error{
@@ -131,15 +132,28 @@ pub fn run_check(io: std.Io, parsed_args: [][]const u8, allocator: std.mem.Alloc
     const file_contents = try helpers.read_file(file_path, std.Io.Dir.cwd(), io, allocator);
     defer allocator.free(file_contents);
 
-    var parser = try TapeParser.Parser.init(allocator, file_contents);
-    const program = try parser.parse();
+    var diagnostics = TapeDiagnostics.DiagnosticsReporter.init(allocator);
+    defer diagnostics.deinit();
 
-    var env = TapeEnvironment.Environment.init(allocator, null);
+    var parser = try TapeParser.Parser.init(allocator, file_contents, &diagnostics, file_path);
+    const program = parser.parse() catch {
+        if (diagnostics.has_errors) {
+            try diagnostics.report_all(io);
+        }
+        return error.CompilationError;
+    };
+
+    var env = TapeEnvironment.Environment.init(allocator, null, &diagnostics, file_path);
     defer env.deinit();
-    var registry = try TapeTypeRegistry.TypeRegistry.init(allocator);
+    var registry = try TapeTypeRegistry.TypeRegistry.init(allocator, &diagnostics, file_path);
     defer registry.deinit();
-    var checker = TapeTypeChecker.TypeChecker.init(allocator, &registry, &env);
-    _ = try checker.check(program);
+    var checker = TapeTypeChecker.TypeChecker.init(allocator, &registry, &env, &diagnostics, file_path);
+    _ = checker.check(program) catch {
+        if (diagnostics.has_errors) {
+            try diagnostics.report_all(io);
+        }
+        return error.CompilationError;
+    };
 }
 
 pub fn get_version(io: std.Io, parsed_args: [][]const u8, allocator: std.mem.Allocator) anyerror!void {

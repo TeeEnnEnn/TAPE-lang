@@ -1,5 +1,6 @@
 const std = @import("std");
 const TypeId = @import("ast.zig").TypeId;
+const DiagnosticReporter = @import("../helpers/diagnostics.zig").DiagnosticsReporter;
 
 pub const EnvironmentError = error{
     DuplicateDefinition,
@@ -10,13 +11,17 @@ pub const Environment = struct {
     allocator: std.mem.Allocator,
     symbols: std.StringHashMap(TypeId),
     parent: ?*Environment,
+    diagnostics: *DiagnosticReporter,
+    file_path: []const u8,
 
     /// Initializes a new environment with the given allocator and parent environment.
-    pub fn init(allocator: std.mem.Allocator, parent: ?*Environment) Environment {
+    pub fn init(allocator: std.mem.Allocator, parent: ?*Environment, diagnostics: *DiagnosticReporter, file_path: []const u8) Environment {
         return .{
             .parent = parent,
             .allocator = allocator,
             .symbols = std.StringHashMap(TypeId).init(allocator),
+            .diagnostics = diagnostics,
+            .file_path = file_path,
         };
     }
 
@@ -28,6 +33,7 @@ pub const Environment = struct {
     /// Defines a symbol in the current scope. Returns error if already defined in *this* scope.
     pub fn define(self: *Environment, name: []const u8, id: TypeId) EnvironmentError!void {
         if (self.symbols.contains(name)) {
+            try self.diagnostics.add_diagnostic(.{ .file_path = self.file_path, .column = 0, .line = 0, .stage = .TypeChecker, .severity = .Error, .message = "Duplicate definition", .hint = "Symbol is already defined." });
             return EnvironmentError.DuplicateDefinition;
         }
         try self.symbols.put(name, id);
@@ -43,6 +49,7 @@ pub const Environment = struct {
             }
             curr = env.parent;
         }
+        try self.diagnostics.add_diagnostic(.{ .file_path = self.file_path, .column = 0, .line = 0, .stage = .TypeChecker, .severity = .Error, .message = "Undefined symbol", .hint = "Symbol is not defined." });
         return EnvironmentError.UndefinedSymbol;
     }
 
