@@ -1,12 +1,11 @@
 //! Diagnostics utilities for the TAPE compiler.
-
 const std = @import("std");
-
-const reset = "\x1b[0m";
-const bold_red = "\x1b[1;31m";
-const red = "\x1b[31m";
-const yellow = "\x1b[33m";
-const gray = "\x1b[37m";
+const cli_helpers = @import("../cli/helpers.zig");
+const BOLD_RED = cli_helpers.BOLD_RED;
+const RED = cli_helpers.RED;
+const YELLOW = cli_helpers.YELLOW;
+const GRAY = cli_helpers.GRAY;
+const RESET = cli_helpers.RESET;
 
 pub const Severity = enum {
     Fatal,
@@ -84,14 +83,14 @@ pub const DiagnosticsReporter = struct {
         var buf: [32]u8 = undefined;
         for (self.diagnostics.items) |diagnostic| {
             const color = switch (diagnostic.severity) {
-                .Fatal => bold_red,
-                .Error => red,
-                .Warning => yellow,
-                .Info => gray,
+                .Fatal => BOLD_RED,
+                .Error => RED,
+                .Warning => YELLOW,
+                .Info => GRAY,
             };
             try stderr.writeStreamingAll(io, color);
             try stderr.writeStreamingAll(io, @tagName(diagnostic.severity));
-            try stderr.writeStreamingAll(io, reset);
+            try stderr.writeStreamingAll(io, RESET);
             try stderr.writeStreamingAll(io, " during ");
             try stderr.writeStreamingAll(io, @tagName(diagnostic.stage));
             try stderr.writeStreamingAll(io, "\nAt ");
@@ -110,6 +109,9 @@ pub const DiagnosticsReporter = struct {
             }
         }
         self.diagnostics.clearAndFree(self.allocator);
-        try stderr.writeStreamingAll(io, reset);
+        self.has_errors = false;
+        self.has_warnings = false;
+        self.has_infos = false;
+        try stderr.writeStreamingAll(io, RESET);
     }
 };

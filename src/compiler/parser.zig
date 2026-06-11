@@ -24,7 +24,7 @@ pub const Parser = struct {
     pub fn init(allocator: std.mem.Allocator, source: []const u8, diagnostics: *DiagnosticsReporter, file_path: []const u8) !Parser {
         var parser = Parser{
             .allocator = allocator,
-            .scanner = Scanner.init(source, diagnostics, file_path),
+            .scanner = Scanner.init(source),
             .current = Token{ .token_type = .EOF, .lexeme = "", .line = 0, .column = 0 },
             .previous = Token{ .token_type = .EOF, .lexeme = "", .line = 0, .column = 0 },
             .diagnostics = diagnostics,

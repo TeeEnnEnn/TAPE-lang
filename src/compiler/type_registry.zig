@@ -1,6 +1,5 @@
 const std = @import("std");
 const ast = @import("ast.zig");
-const DiagnosticReporter = @import("../helpers/diagnostics.zig").DiagnosticsReporter;
 
 pub const TypeId = ast.TypeId;
 
@@ -58,15 +57,11 @@ pub const TypeInfo = union(enum) {
 pub const TypeRegistry = struct {
     types: std.ArrayList(TypeInfo),
     allocator: std.mem.Allocator,
-    diagnostics: *DiagnosticReporter,
-    file_path: []const u8,
 
-    pub fn init(allocator: std.mem.Allocator, diagnostics: *DiagnosticReporter, file_path: []const u8) !TypeRegistry {
+    pub fn init(allocator: std.mem.Allocator) !TypeRegistry {
         var registry = TypeRegistry{
             .types = .empty,
             .allocator = allocator,
-            .diagnostics = diagnostics,
-            .file_path = file_path,
         };
 
         try registry.types.append(allocator, .{ .primitive = .Nil });
@@ -83,6 +78,14 @@ pub const TypeRegistry = struct {
         self.types.deinit(self.allocator);
     }
 
+    /// Resolves a type node to a type ID.
+    ///
+    /// Returns the type ID of the resolved type, or an error if the type could not be resolved.
+    ///
+    /// # Errors
+    /// - `UnknownType`: The type could not be resolved.
+    /// - `TypeResolutionConflict`: The type could not be resolved due to a type resolution conflict.
+    /// - `Allocator.Error`: The type could not be resolved due to an allocator error.
     pub fn resolve(self: *TypeRegistry, type_node: *ast.ASTNode) TypeRegistryError!TypeId {
         return switch (type_node.*) {
             .nil_type => @intFromEnum(PrimitiveType.Nil),
@@ -172,7 +175,6 @@ pub const TypeRegistry = struct {
                 return try self.add_shape_type(try field_types.toOwnedSlice(self.allocator));
             },
             else => {
-                try self.diagnostics.add_diagnostic(.{ .column = 0, .line = 0, .file_path = self.file_path, .stage = .TypeChecker, .severity = .Error, .message = "Unknown type" });
                 return TypeRegistryError.UnknownType;
             },
         };
@@ -233,7 +235,11 @@ pub const TypeRegistry = struct {
         return id;
     }
 
-    pub fn add_function_type(self: *TypeRegistry, args: []TypeId, ret: TypeId) !TypeId {
+    /// Adds a function type to the registry.
+    ///
+    /// # Errors
+    /// `std.mem.Allocator.Error` if the function type could not be added.
+    pub fn add_function_type(self: *TypeRegistry, args: []TypeId, ret: TypeId) std.mem.Allocator.Error!TypeId {
         for (self.types.items, 0..) |info, index| {
             switch (info) {
                 .function => |f| {
@@ -251,7 +257,7 @@ pub const TypeRegistry = struct {
         return id;
     }
 
-    pub fn add_coroutine_type(self: *TypeRegistry, args: []TypeId, ret: TypeId, yield: TypeId) !TypeId {
+    pub fn add_coroutine_type(self: *TypeRegistry, args: []TypeId, ret: TypeId, yield: TypeId) std.mem.Allocator.Error!TypeId {
         for (self.types.items, 0..) |info, index| {
             switch (info) {
                 .coroutine => |c| {
@@ -360,7 +366,6 @@ pub const TypeRegistry = struct {
                 ._type => |existing_type| {
                     if (!std.mem.eql(u8, existing_type.name, name)) continue;
                     if (existing_type.resolved_type != resolved_type) {
-                        try self.diagnostics.add_diagnostic(.{ .column = 0, .line = 0, .file_path = self.file_path, .stage = .TypeChecker, .severity = .Error, .message = "Type resolution conflict", .hint = "Type is defined with different resolved types." });
                         return TypeRegistryError.TypeResolutionConflict; // names are the same but the resolved types differ
                     }
                     return @as(TypeId, @intCast(index));
@@ -381,7 +386,6 @@ pub const TypeRegistry = struct {
                 ._struct => |existing_struct| {
                     if (!std.mem.eql(u8, existing_struct.name, name)) continue;
                     if (existing_struct.fields.len != fields.len or existing_struct.methods.len != methods.len) {
-                        try self.diagnostics.add_diagnostic(.{ .file_path = self.file_path, .column = 0, .line = 0, .stage = .TypeChecker, .severity = .Error, .message = "Type resolution conflict", .hint = "Type is defined with different number of fields or methods." });
                         return TypeRegistryError.TypeResolutionConflict; // names are the same but the number of fields or methods differ
                     }
 
@@ -416,7 +420,6 @@ pub const TypeRegistry = struct {
                 ._error => |existing_error| {
                     if (!std.mem.eql(u8, existing_error.name, name)) continue;
                     if (existing_error.variants.len != variants.len) {
-                        try self.diagnostics.add_diagnostic(.{ .file_path = self.file_path, .column = 0, .line = 0, .stage = .TypeChecker, .severity = .Error, .message = "Type resolution conflict", .hint = "Type is defined with different number of variants." });
                         return TypeRegistryError.TypeResolutionConflict; // names are the same but the number of variants differ
                     }
 
@@ -445,7 +448,6 @@ pub const TypeRegistry = struct {
                 ._enum => |existing_enum| {
                     if (!std.mem.eql(u8, existing_enum.name, name)) continue;
                     if (existing_enum.variants.len != variants.len) {
-                        try self.diagnostics.add_diagnostic(.{ .file_path = self.file_path, .column = 0, .line = 0, .stage = .TypeChecker, .severity = .Error, .message = "Type resolution conflict", .hint = "Type is defined with different number of variants." });
                         return TypeRegistryError.TypeResolutionConflict; // names are the same but the number of variants differ
                     }
 

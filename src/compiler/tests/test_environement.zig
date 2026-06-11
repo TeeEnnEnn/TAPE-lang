@@ -2,13 +2,10 @@ const std = @import("std");
 const Environment = @import("../environment.zig").Environment;
 const EnvironmentError = @import("../environment.zig").EnvironmentError;
 const TypeId = @import("../ast.zig").TypeId;
-const DiagnosticsReporter = @import("../../helpers/diagnostics.zig").DiagnosticsReporter;
 
 test "Environment - define works" {
     const allocator = std.testing.allocator;
-    var diagnostics = DiagnosticsReporter.init(allocator);
-    defer diagnostics.deinit();
-    var env = Environment.init(allocator, null, &diagnostics, "test");
+    var env = Environment.init(allocator, null);
     defer env.deinit();
 
     try env.define("x", 42);
@@ -16,9 +13,7 @@ test "Environment - define works" {
 
 test "Environment - lookup works" {
     const allocator = std.testing.allocator;
-    var diagnostics = DiagnosticsReporter.init(allocator);
-    defer diagnostics.deinit();
-    var env = Environment.init(allocator, null, &diagnostics, "test");
+    var env = Environment.init(allocator, null);
     defer env.deinit();
 
     try env.define("x", 42);
@@ -28,9 +23,7 @@ test "Environment - lookup works" {
 
 test "Environment - fails for redefinition" {
     const allocator = std.testing.allocator;
-    var diagnostics = DiagnosticsReporter.init(allocator);
-    defer diagnostics.deinit();
-    var env = Environment.init(allocator, null, &diagnostics, "test");
+    var env = Environment.init(allocator, null);
     defer env.deinit();
 
     try env.define("x", 42);
@@ -40,9 +33,7 @@ test "Environment - fails for redefinition" {
 
 test "Environment - fails for non existent name" {
     const allocator = std.testing.allocator;
-    var diagnostics = DiagnosticsReporter.init(allocator);
-    defer diagnostics.deinit();
-    var env = Environment.init(allocator, null, &diagnostics, "test");
+    var env = Environment.init(allocator, null);
     defer env.deinit();
 
     const result = env.lookup("y");
@@ -51,14 +42,12 @@ test "Environment - fails for non existent name" {
 
 test "Environment - correctly gets name from parent environment" {
     const allocator = std.testing.allocator;
-    var diagnostics = DiagnosticsReporter.init(allocator);
-    defer diagnostics.deinit();
-    var parent = Environment.init(allocator, null, &diagnostics, "test");
+    var parent = Environment.init(allocator, null);
     defer parent.deinit();
 
     try parent.define("x", 10);
 
-    var child = Environment.init(allocator, &parent, &diagnostics, "test");
+    var child = Environment.init(allocator, &parent);
     defer child.deinit();
 
     const result = try child.lookup("x");

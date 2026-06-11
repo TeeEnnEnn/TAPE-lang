@@ -16,8 +16,8 @@ fn checkSource(allocator: std.mem.Allocator, source: []const u8) !struct { regis
     var parser = try Parser.init(allocator, source, &diagnostics, "test");
     const program = try parser.parse();
 
-    var env = Environment.init(allocator, null, &diagnostics, "test");
-    var registry = try TypeRegistry.init(allocator, &diagnostics, "test");
+    var env = Environment.init(allocator, null);
+    var registry = try TypeRegistry.init(allocator);
     var checker = TypeChecker.init(allocator, &registry, &env, &diagnostics, "test");
     _ = try checker.check(program);
 
@@ -33,10 +33,10 @@ test "Type Checker - Init works" {
     var diagnostics = DiagnosticsReporter.init(allocator);
     defer diagnostics.deinit();
 
-    var env = Environment.init(allocator, null, &diagnostics, "test");
+    var env = Environment.init(allocator, null);
     defer env.deinit();
 
-    var registry = try TypeRegistry.init(arena_allocator, &diagnostics, "test");
+    var registry = try TypeRegistry.init(arena_allocator);
     defer registry.deinit();
 
     const type_checker = TypeChecker.init(allocator, &registry, &env, &diagnostics, "test");

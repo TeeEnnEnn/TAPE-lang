@@ -74,6 +74,7 @@ pub const TypeChecker = struct {
             .program => |program| for (program.declarations) |decl| try self.hoist(decl),
             .fn_decl => |decl| {
                 var param_types: std.ArrayList(AST.TypeId) = .empty;
+                defer param_types.deinit(self.allocator);
 
                 for (decl.params) |param| {
                     const param_id = try self.registry.resolve(param.type_annotation);
@@ -81,12 +82,12 @@ pub const TypeChecker = struct {
                 }
 
                 const return_id = try self.registry.resolve(decl.return_type_annotation);
-
                 const fn_id = try self.registry.add_function_type(try param_types.toOwnedSlice(self.allocator), return_id);
                 try self.environment.define(decl.name.lexeme, fn_id);
             },
             .co_decl => |decl| {
                 var param_types: std.ArrayList(AST.TypeId) = .empty;
+                defer param_types.deinit(self.allocator);
 
                 for (decl.params) |param| {
                     const param_id = try self.registry.resolve(param.type_annotation);
@@ -100,7 +101,9 @@ pub const TypeChecker = struct {
             },
             .struct_decl => |decl| {
                 var field_types: std.ArrayList(StructField) = .empty;
+                defer field_types.deinit(self.allocator);
                 var method_types: std.ArrayList(StructMethod) = .empty;
+                defer method_types.deinit(self.allocator);
 
                 for (decl.fields) |field| {
                     const field_type = try self.registry.resolve(field.type_annotation);
@@ -111,7 +114,6 @@ pub const TypeChecker = struct {
                     try method_types.append(self.allocator, .{ .name = method.name.lexeme, .type = method_type, .is_static = method.is_static, .is_pub = method.is_pub });
                 }
 
-                // Register shape type under the struct name
                 const struct_id = try self.registry.add_struct_type(decl.name.lexeme, try field_types.toOwnedSlice(self.allocator), try method_types.toOwnedSlice(self.allocator));
                 try self.environment.define(decl.name.lexeme, struct_id);
             },
@@ -121,6 +123,7 @@ pub const TypeChecker = struct {
             },
             .enum_decl => |decl| {
                 var variants: std.ArrayList([]const u8) = .empty;
+                defer variants.deinit(self.allocator);
                 for (decl.variants) |variant| {
                     try variants.append(self.allocator, variant.lexeme);
                 }
@@ -129,6 +132,7 @@ pub const TypeChecker = struct {
             },
             .error_decl => |decl| {
                 var variants: std.ArrayList([]const u8) = .empty;
+                defer variants.deinit(self.allocator);
                 for (decl.variants) |variant| {
                     try variants.append(self.allocator, variant.lexeme);
                 }
@@ -186,7 +190,7 @@ pub const TypeChecker = struct {
                 defer self.expected_return_type = prev_return;
 
                 // Push function scope
-                var local_env = Environment.init(self.allocator, self.environment, self.diagnostics, self.file_path);
+                var local_env = Environment.init(self.allocator, self.environment);
                 defer local_env.deinit();
                 const prev_env = self.environment;
                 self.environment = &local_env;
@@ -246,7 +250,7 @@ pub const TypeChecker = struct {
                 defer self.expected_yield_type = prev_yield;
 
                 // Push function scope
-                var local_env = Environment.init(self.allocator, self.environment, self.diagnostics, self.file_path);
+                var local_env = Environment.init(self.allocator, self.environment);
                 defer local_env.deinit();
                 const prev_env = self.environment;
                 self.environment = &local_env;
@@ -285,7 +289,7 @@ pub const TypeChecker = struct {
                 return .{};
             },
             .block_stmt => |stmt| {
-                var local_env = Environment.init(self.allocator, self.environment, self.diagnostics, self.file_path);
+                var local_env = Environment.init(self.allocator, self.environment);
                 defer local_env.deinit();
 
                 const prev_env = self.environment;
@@ -352,7 +356,7 @@ pub const TypeChecker = struct {
                 return .{};
             },
             .for_stmt => |stmt| {
-                var local_env = Environment.init(self.allocator, self.environment, self.diagnostics, self.file_path);
+                var local_env = Environment.init(self.allocator, self.environment);
                 defer local_env.deinit();
 
                 const prev_env = self.environment;
@@ -452,6 +456,7 @@ pub const TypeChecker = struct {
                 if (expr.left.* == .identifier_expr or expr.left.* == .dot_expr) {
                     const left_type = try self.check_expression(expr.left);
                     if (!try self.is_compatible(left_type, right_type)) {
+                        try self.diagnostics.add_diagnostic(.{ .column = expr.column, .line = expr.line, .file_path = self.file_path, .message = "Type Mismatch", .severity = .Error, .stage = .TypeChecker });
                         return TypeCheckerError.TypeMismatch;
                     }
 
@@ -476,6 +481,7 @@ pub const TypeChecker = struct {
             },
             .identifier_expr => |expr| {
                 const expr_type = self.environment.lookup(expr.name.lexeme) catch {
+                    try self.diagnostics.add_diagnostic(.{ .file_path = self.file_path, .column = expr.column, .line = expr.line, .stage = .TypeChecker, .severity = .Error, .message = "Undefined symbol", .hint = "Symbol is not defined." });
                     return TypeCheckerError.UndefinedSymbol;
                 };
                 expr.resolved_type = expr_type;

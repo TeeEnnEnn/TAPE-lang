@@ -9,6 +9,12 @@ const TapeEnvironment = @import("../compiler/environment.zig");
 const TapeTypeRegistry = @import("../compiler/type_registry.zig");
 const TapeDiagnostics = @import("../helpers/diagnostics.zig");
 
+const RESET = helpers.RESET;
+const BOLD_RED = helpers.BOLD_RED;
+const RED = helpers.RED;
+const YELLOW = helpers.YELLOW;
+const GRAY = helpers.GRAY;
+
 /// Errors that can occur when running TAPE in REPL mode.
 const TapeReplError = error{
     /// The user has exited the REPL.
@@ -53,7 +59,7 @@ const Command = struct {
     /// The description of the command.
     description: []const u8,
     /// The handler function for the command.
-    handler: *const fn (io: std.Io, [][]const u8, allocator: std.mem.Allocator) anyerror!void,
+    handler: *const fn (io: std.Io, [][]const u8, allocator: std.mem.Allocator) u8,
     /// The options of the command. The arguments needed to execute the command.
     options: []const CommandOption,
 };
@@ -97,11 +103,14 @@ const commands: []const Command = &[_]Command{
     },
 };
 
-pub fn run_repl(io: std.Io, parsed_args: [][]const u8, allocator: std.mem.Allocator) anyerror!void {
+pub fn run_repl(io: std.Io, parsed_args: [][]const u8, allocator: std.mem.Allocator) u8 {
     _ = parsed_args;
     const stdout = std.Io.File.stdout();
     _ = allocator;
-    try stdout.writeStreamingAll(io, "This is the TAPE REPL. Type 'exit' to quit.");
+    stdout.writeStreamingAll(io, "This is the TAPE REPL. Type 'exit' to quit.") catch {
+        return 1;
+    };
+    return 0;
 }
 
 // TODO: run_flatten
@@ -109,85 +118,117 @@ pub fn run_repl(io: std.Io, parsed_args: [][]const u8, allocator: std.mem.Alloca
 // if conflicting packages are found the flatten command will error and force the user to resolve the conflicts before continuing.
 // execution only works if the pkg directory is flat.
 
-pub fn run_file(io: std.Io, parsed_args: [][]const u8, allocator: std.mem.Allocator) anyerror!void {
+pub fn run_file(io: std.Io, parsed_args: [][]const u8, allocator: std.mem.Allocator) u8 {
     const stdout = std.Io.File.stdout();
     _ = allocator;
-    try stdout.writeStreamingAll(io, "Run a file");
+    stdout.writeStreamingAll(io, "Run a file") catch {
+        return 1;
+    };
     for (parsed_args) |arg| {
-        try stdout.writeStreamingAll(io, arg);
+        stdout.writeStreamingAll(io, arg) catch {
+            return 1;
+        };
     }
+    return 0;
 }
 
-pub fn run_check(io: std.Io, parsed_args: [][]const u8, allocator: std.mem.Allocator) anyerror!void {
+pub fn run_check(io: std.Io, parsed_args: [][]const u8, allocator: std.mem.Allocator) u8 {
     const file_path = if (parsed_args.len == 0) blk: {
-        break :blk try helpers.get_package_entrypoint(allocator, std.Io.Dir.cwd(), io);
+        break :blk helpers.get_package_entrypoint(allocator, std.Io.Dir.cwd(), io) catch {
+            return 1;
+        };
     } else blk: {
-        const relative_path = parsed_args[0];
-        const current_dir = try helpers.get_current_dir_path(io, allocator);
+        const current_dir = helpers.get_current_dir_path(io, allocator) catch {
+            return 1;
+        };
         defer allocator.free(current_dir);
-        break :blk try std.fs.path.join(allocator, &.{ current_dir, relative_path });
+        break :blk std.fs.path.join(allocator, &.{ current_dir, parsed_args[0] }) catch {
+            return 1;
+        };
     };
     defer allocator.free(file_path);
 
-    const file_contents = try helpers.read_file(file_path, std.Io.Dir.cwd(), io, allocator);
+    const file_contents = helpers.read_file(file_path, std.Io.Dir.cwd(), io, allocator) catch {
+        return 1;
+    };
     defer allocator.free(file_contents);
 
     var diagnostics = TapeDiagnostics.DiagnosticsReporter.init(allocator);
     defer diagnostics.deinit();
 
-    var parser = try TapeParser.Parser.init(allocator, file_contents, &diagnostics, file_path);
+    var parser = TapeParser.Parser.init(allocator, file_contents, &diagnostics, file_path) catch {
+        if (diagnostics.has_errors) {
+            diagnostics.report_all(io) catch {};
+        }
+        return 1;
+    };
     const program = parser.parse() catch {
         if (diagnostics.has_errors) {
-            try diagnostics.report_all(io);
+            diagnostics.report_all(io) catch {};
         }
-        return error.CompilationError;
+        return 1;
     };
 
-    var env = TapeEnvironment.Environment.init(allocator, null, &diagnostics, file_path);
+    var env = TapeEnvironment.Environment.init(allocator, null);
     defer env.deinit();
-    var registry = try TapeTypeRegistry.TypeRegistry.init(allocator, &diagnostics, file_path);
+    var registry = TapeTypeRegistry.TypeRegistry.init(allocator) catch {
+        return 1;
+    };
     defer registry.deinit();
     var checker = TapeTypeChecker.TypeChecker.init(allocator, &registry, &env, &diagnostics, file_path);
-    _ = checker.check(program) catch {
-        if (diagnostics.has_errors) {
-            try diagnostics.report_all(io);
+    _ = checker.check(program) catch |err| {
+        if (!diagnostics.has_errors) {
+            diagnostics.add_diagnostic(.{
+                .stage = .TypeChecker,
+                .severity = .Error,
+                .message = @errorName(err),
+                .file_path = file_path,
+                .line = 0,
+                .column = 0,
+            }) catch {};
         }
-        return error.CompilationError;
+        diagnostics.report_all(io) catch {};
+        return 1;
     };
+    return 0;
 }
 
-pub fn get_version(io: std.Io, parsed_args: [][]const u8, allocator: std.mem.Allocator) anyerror!void {
+pub fn get_version(io: std.Io, parsed_args: [][]const u8, allocator: std.mem.Allocator) u8 {
     _ = parsed_args;
     _ = allocator;
     const stdout = std.Io.File.stdout();
     const version = options.version;
-    try stdout.writeStreamingAll(io, version);
+    stdout.writeStreamingAll(io, version) catch {
+        return 1;
+    };
+    return 0;
 }
 
-pub fn init_project(io: std.Io, parsed_args: [][]const u8, allocator: std.mem.Allocator) anyerror!void {
+pub fn init_project(io: std.Io, parsed_args: [][]const u8, allocator: std.mem.Allocator) u8 {
     const stdout = std.Io.File.stdout();
     var new_project_name: []const u8 = "tape_project";
     if (parsed_args.len > 0) {
         new_project_name = parsed_args[0];
     }
     helpers.create_tape_project(io, allocator, new_project_name) catch {
-        try stdout.writeStreamingAll(io, "Failed to initialize TAPE project.\n");
-        return;
+        stdout.writeStreamingAll(io, "Failed to initialize TAPE project.\n") catch {};
+        return 1;
     };
-    try stdout.writeStreamingAll(io, "Initialized a new TAPE project.");
+    stdout.writeStreamingAll(io, "Initialized a new TAPE project.\n") catch {
+        return 1;
+    };
+    return 0;
 }
 
-pub fn get_help(io: std.Io, parsed_args: [][]const u8, allocator: std.mem.Allocator) anyerror!void {
+pub fn get_help(io: std.Io, parsed_args: [][]const u8, allocator: std.mem.Allocator) u8 {
     _ = parsed_args;
     _ = allocator;
     const stdout = std.Io.File.stdout();
 
-    try stdout.writeStreamingAll(io, "Usage: TAPE <command> [args]\n\n");
-    try stdout.writeStreamingAll(io, "Available commands:\n");
-
-    try stdout.writeStreamingAll(io, "\n");
-
-    try stdout.writeStreamingAll(io, "Command\t\tArgs\n\n");
+    stdout.writeStreamingAll(io, "Usage: TAPE <command> [args]\n\n") catch {};
+    stdout.writeStreamingAll(io, "Available commands:\n") catch {};
+    stdout.writeStreamingAll(io, "\n") catch {};
+    stdout.writeStreamingAll(io, "Command\t\tArgs\n\n") catch {};
 
     var longest_command_args: usize = 0;
 
@@ -197,53 +238,56 @@ pub fn get_help(io: std.Io, parsed_args: [][]const u8, allocator: std.mem.Alloca
 
     for (commands) |command| {
         var args_printed: usize = 0;
-        // Print arguments
         for (command.options) |option| {
             switch (option) {
                 .optional_keyword => |keyword| {
-                    try stdout.writeStreamingAll(io, "?");
-                    try stdout.writeStreamingAll(io, keyword);
-                    try stdout.writeStreamingAll(io, "\t\t");
+                    stdout.writeStreamingAll(io, "?") catch {};
+                    stdout.writeStreamingAll(io, keyword) catch {};
+                    stdout.writeStreamingAll(io, "\t\t") catch {};
                 },
                 .required_keyword => |keyword| {
-                    try stdout.writeStreamingAll(io, keyword);
-                    try stdout.writeStreamingAll(io, "\t\t");
+                    stdout.writeStreamingAll(io, keyword) catch {};
+                    stdout.writeStreamingAll(io, "\t\t") catch {};
                 },
                 .optional_value => |value| {
-                    try stdout.writeStreamingAll(io, "?");
-                    try stdout.writeStreamingAll(io, value);
-                    try stdout.writeStreamingAll(io, "\t\t");
+                    stdout.writeStreamingAll(io, "?") catch {};
+                    stdout.writeStreamingAll(io, value) catch {};
+                    stdout.writeStreamingAll(io, "\t\t") catch {};
                 },
                 .required_value => |value| {
-                    try stdout.writeStreamingAll(io, value);
-                    try stdout.writeStreamingAll(io, "\t\t");
+                    stdout.writeStreamingAll(io, value) catch {};
+                    stdout.writeStreamingAll(io, "\t\t") catch {};
                 },
             }
             args_printed += 1;
         }
         if (args_printed == 0) {
-            try stdout.writeStreamingAll(io, "<none>");
+            stdout.writeStreamingAll(io, "<none>") catch {};
         }
         if (args_printed < longest_command_args) {
             for (0..(longest_command_args - args_printed)) |_| {
-                try stdout.writeStreamingAll(io, "\t\t");
+                stdout.writeStreamingAll(io, "\t\t") catch {};
             }
         }
 
-        try stdout.writeStreamingAll(io, command.description);
-        try stdout.writeStreamingAll(io, "\n");
+        stdout.writeStreamingAll(io, command.description) catch {};
+        stdout.writeStreamingAll(io, "\n") catch {};
     }
+    return 0;
 }
 
 /// Runs the TAPE CLI with the given arguments.
-pub fn cli_main(args: []const []const u8, allocator: std.mem.Allocator, io: std.Io) anyerror!void {
+pub fn cli_main(args: []const []const u8, allocator: std.mem.Allocator, io: std.Io) u8 {
+    const stdout = std.Io.File.stdout();
     var possible_commands: std.ArrayList(Command) = .empty;
     defer possible_commands.deinit(allocator);
     for (commands) |command| {
         if (std.mem.eql(u8, command.name, "repl")) {
             continue; // skip the repl command
         }
-        try possible_commands.append(allocator, command);
+        possible_commands.append(allocator, command) catch {
+            return 1;
+        };
     }
 
     // check all of the possible commands against the args.
@@ -257,7 +301,7 @@ pub fn cli_main(args: []const []const u8, allocator: std.mem.Allocator, io: std.
     var parsed_args: std.ArrayList([]const u8) = .empty;
     defer parsed_args.deinit(allocator);
     if (args.len == 1) {
-        return try run_repl(io, parsed_args.items, allocator);
+        return run_repl(io, parsed_args.items, allocator);
     }
 
     var selected_command: ?Command = null;
@@ -301,7 +345,9 @@ pub fn cli_main(args: []const []const u8, allocator: std.mem.Allocator, io: std.
         }
 
         if (arg_is_value) {
-            try parsed_args.append(allocator, arg);
+            parsed_args.append(allocator, arg) catch {
+                return 1;
+            };
         }
 
         possible_commands.shrinkAndFree(allocator, write_index);
@@ -309,12 +355,15 @@ pub fn cli_main(args: []const []const u8, allocator: std.mem.Allocator, io: std.
     if (possible_commands.items.len == 1) {
         selected_command = possible_commands.items[0];
     } else if (possible_commands.items.len > 1) { // Can't tell what the user wants to do
-        return CliError.AmbiguousCommand;
+        stdout.writeStreamingAll(io, RED ++ "Error: " ++ RESET ++ "Ambiguous command. -h for help.\n") catch {};
+        return 1;
     }
 
     if (selected_command) |cmd| {
-        try cmd.handler(io, parsed_args.items, allocator);
+        return cmd.handler(io, parsed_args.items, allocator);
     } else {
-        return CliError.InvalidCommand;
+        stdout.writeStreamingAll(io, RED ++ "Error: " ++ RESET ++ "Invalid command. -h for help.\n") catch {};
+        return 1;
     }
+    return 0;
 }

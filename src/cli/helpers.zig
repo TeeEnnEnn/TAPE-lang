@@ -141,3 +141,9 @@ pub fn create_tape_project(io: std.Io, allocator: std.mem.Allocator, name: []con
     _ = try std.Io.Dir.createFile(cwd, io, script_path, .{});
     try std.Io.Dir.writeFile(cwd, io, .{ .data = script_content, .sub_path = script_path, .flags = .{} });
 }
+
+pub const RESET = "\x1b[0m";
+pub const BOLD_RED = "\x1b[1;31m";
+pub const RED = "\x1b[31m";
+pub const YELLOW = "\x1b[33m";
+pub const GRAY = "\x1b[37m";

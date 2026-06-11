@@ -20,10 +20,7 @@ test "TypeRegistry - Primitive Types" {
     defer arena.deinit();
     const allocator = arena.allocator();
 
-    var diagnostics = DiagnosticsReporter.init(std.testing.allocator);
-    defer diagnostics.deinit();
-
-    var registry = try TypeRegistry.init(allocator, &diagnostics, "test");
+    var registry = try TypeRegistry.init(allocator);
     defer registry.deinit();
 
     const int_id = try resolveType(allocator, &registry, "Int");
@@ -41,10 +38,7 @@ test "TypeRegistry - Array Types" {
     defer arena.deinit();
     const allocator = arena.allocator();
 
-    var diagnostics = DiagnosticsReporter.init(std.testing.allocator);
-    defer diagnostics.deinit();
-
-    var registry = try TypeRegistry.init(allocator, &diagnostics, "test");
+    var registry = try TypeRegistry.init(allocator);
     defer registry.deinit();
 
     const array_int_id = try resolveType(allocator, &registry, "Array[Int]");
@@ -62,10 +56,7 @@ test "TypeRegistry - Table Types" {
     defer arena.deinit();
     const allocator = arena.allocator();
 
-    var diagnostics = DiagnosticsReporter.init(std.testing.allocator);
-    defer diagnostics.deinit();
-
-    var registry = try TypeRegistry.init(allocator, &diagnostics, "test");
+    var registry = try TypeRegistry.init(allocator);
     defer registry.deinit();
 
     const table_id = try resolveType(allocator, &registry, "Table[String, Int]");
@@ -78,10 +69,7 @@ test "TypeRegistry - Union Types" {
     defer arena.deinit();
     const allocator = arena.allocator();
 
-    var diagnostics = DiagnosticsReporter.init(std.testing.allocator);
-    defer diagnostics.deinit();
-
-    var registry = try TypeRegistry.init(allocator, &diagnostics, "test");
+    var registry = try TypeRegistry.init(allocator);
     defer registry.deinit();
 
     const union_id = try resolveType(allocator, &registry, "Int | Nil");
@@ -94,10 +82,7 @@ test "TypeRegistry - Function Types" {
     defer arena.deinit();
     const allocator = arena.allocator();
 
-    var diagnostics = DiagnosticsReporter.init(std.testing.allocator);
-    defer diagnostics.deinit();
-
-    var registry = try TypeRegistry.init(allocator, &diagnostics, "test");
+    var registry = try TypeRegistry.init(allocator);
     defer registry.deinit();
 
     const fn_id = try resolveType(allocator, &registry, "fn (Int, Float) -> String");
@@ -110,10 +95,7 @@ test "TypeRegistry - Shape Types" {
     defer arena.deinit();
     const allocator = arena.allocator();
 
-    var diagnostics = DiagnosticsReporter.init(std.testing.allocator);
-    defer diagnostics.deinit();
-
-    var registry = try TypeRegistry.init(allocator, &diagnostics, "test");
+    var registry = try TypeRegistry.init(allocator);
     defer registry.deinit();
 
     const shape_id = try resolveType(allocator, &registry, "shape { x: Int, y: Float }");
