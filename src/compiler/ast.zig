@@ -84,6 +84,7 @@ pub const ASTNode = union(enum) {
     new_expr: *NewExpr, // new
     match_expr: *MatchExpr, // match
     anon_fn_expr: *AnonFnExpr, // fn () -> {}
+    anon_co_expr: *AnonCoExpr, // co () -> {}
     // Literals
     int_lit: *IntLit,
     float_lit: *FloatLit,
@@ -614,9 +615,23 @@ pub const MatchCase = struct {
 /// fn () -> 'type_annotation' 'body'
 /// ```
 pub const AnonFnExpr = struct {
-    modifier_co: bool,
     params: []*TypedNamedField,
-    return_type_annotation: ?*ASTNode,
+    return_type_annotation: *ASTNode,
+    body: *ASTNode,
+    resolved_type: TypeId = 0,
+    line: usize,
+    column: usize,
+};
+
+/// Anonymous coroutine node
+///
+/// ```
+/// co () -> 'type_annotation' 'body'
+/// ```
+pub const AnonCoExpr = struct {
+    params: []*TypedNamedField,
+    return_type_annotation: *ASTNode,
+    yield_type_annotation: *ASTNode,
     body: *ASTNode,
     resolved_type: TypeId = 0,
     line: usize,
@@ -640,8 +655,8 @@ pub const TypedNamedStructField = struct {
 pub const StructMethodField = struct {
     name: Token,
     method: *ASTNode,
-    is_static: bool,
-    is_pub: bool,
+    is_static: bool, // is accessible from the struct itself
+    is_pub: bool, // is accessible from outside the struct
 };
 
 pub const ImportItem = struct {
@@ -655,6 +670,7 @@ pub const ImportItem = struct {
 /// use 'name' as 'alias' from 'module'
 /// ```
 pub const UseDecl = struct {
+    modifier_pub: bool,
     items: []ImportItem,
     module: Token,
     line: usize,

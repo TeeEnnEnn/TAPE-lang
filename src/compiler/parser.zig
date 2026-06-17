@@ -4,31 +4,36 @@ const Token = @import("scanner.zig").Token;
 const TokenType = @import("scanner.zig").TokenType;
 const MatchCase = AST.MatchCase;
 const DiagnosticsReporter = @import("../helpers/diagnostics.zig").DiagnosticsReporter;
+const Workspace = @import("workspace.zig").Workspace;
+const Module = @import("workspace.zig").Module;
+const WorkspaceError = @import("workspace.zig").WorkspaceError;
 
 const std = @import("std");
 
 const ScannerError = @import("scanner.zig").ScannerError;
 
-pub const ParserError = ScannerError || std.mem.Allocator.Error || std.fmt.ParseIntError || std.fmt.ParseFloatError || error{
+pub const ParserError = ScannerError || std.mem.Allocator.Error || std.fmt.ParseIntError || std.fmt.ParseFloatError || std.Io.RandomSecureError || WorkspaceError || error{
     UnexpectedToken,
 };
 
 pub const Parser = struct {
+    workspace: *Workspace,
     scanner: Scanner,
     allocator: std.mem.Allocator,
     current: Token,
     previous: Token,
-    diagnostics: *DiagnosticsReporter,
-    file_path: []const u8,
+    io: std.Io,
+    module: *Module,
 
-    pub fn init(allocator: std.mem.Allocator, source: []const u8, diagnostics: *DiagnosticsReporter, file_path: []const u8) !Parser {
+    pub fn init(allocator: std.mem.Allocator, workspace: *Workspace, module: *Module, io: std.Io) !Parser {
         var parser = Parser{
             .allocator = allocator,
-            .scanner = Scanner.init(source),
+            .workspace = workspace,
+            .module = module,
+            .scanner = Scanner.init(module.file_contents),
             .current = Token{ .token_type = .EOF, .lexeme = "", .line = 0, .column = 0 },
             .previous = Token{ .token_type = .EOF, .lexeme = "", .line = 0, .column = 0 },
-            .diagnostics = diagnostics,
-            .file_path = file_path,
+            .io = io,
         };
         try parser.advance();
         return parser;
@@ -48,7 +53,9 @@ pub const Parser = struct {
             try self.advance();
             return;
         }
-        try self.diagnostics.add_diagnostic(.{ .column = self.scanner.column(), .line = self.scanner.line, .stage = .Parser, .severity = .Error, .message = "Unexpected token", .file_path = self.file_path });
+        try self.workspace.diagnostics_mutex.lock(self.io);
+        try self.workspace.diagnostics.add_diagnostic(.{ .column = self.scanner.column(), .line = self.scanner.line, .stage = .Parser, .severity = .Error, .message = "Unexpected token", .file_path = self.module.filepath });
+        self.workspace.diagnostics_mutex.unlock(self.io);
         return ParserError.UnexpectedToken;
     }
 
@@ -462,10 +469,9 @@ pub const Parser = struct {
 
     fn parse_primary(self: *Parser) ParserError!*AST.ASTNode {
         if (try self.match(.CO)) {
-            try self.consume(.FN);
-            return try self.parse_anonymous_function(true);
+            return try self.parse_anonymous_coroutine();
         } else if (try self.match(.FN)) {
-            return try self.parse_anonymous_function(false);
+            return try self.parse_anonymous_function();
         } else if (self.check(.TRUE) or self.check(.FALSE) or self.check(.STRING) or self.check(.INT) or self.check(.FLOAT) or self.check(.NIL)) {
             return try self.parse_literal();
         } else if (self.check(.IDENTIFIER)) {
@@ -481,7 +487,9 @@ pub const Parser = struct {
         } else if (try self.match(.MATCH)) {
             return try self.parse_match_expression();
         } else {
-            try self.diagnostics.add_diagnostic(.{ .column = self.scanner.column(), .line = self.scanner.line, .stage = .Parser, .severity = .Error, .message = "Unexpected token", .file_path = self.file_path });
+            try self.workspace.diagnostics_mutex.lock(self.io);
+            try self.workspace.diagnostics.add_diagnostic(.{ .column = self.scanner.column(), .line = self.scanner.line, .stage = .Parser, .severity = .Error, .message = "Unexpected token", .file_path = self.module.filepath });
+            self.workspace.diagnostics_mutex.unlock(self.io);
             return ParserError.UnexpectedToken;
         }
     }
@@ -554,7 +562,9 @@ pub const Parser = struct {
                 return node;
             },
             else => {
-                try self.diagnostics.add_diagnostic(.{ .column = self.scanner.column(), .line = self.scanner.line, .stage = .Parser, .severity = .Error, .message = "Unexpected token", .file_path = self.file_path });
+                try self.workspace.diagnostics_mutex.lock(self.io);
+                try self.workspace.diagnostics.add_diagnostic(.{ .column = self.scanner.column(), .line = self.scanner.line, .stage = .Parser, .severity = .Error, .message = "Unexpected token", .file_path = self.module.filepath });
+                self.workspace.diagnostics_mutex.unlock(self.io);
                 return ParserError.UnexpectedToken;
             },
         }
@@ -641,7 +651,44 @@ pub const Parser = struct {
         return node;
     }
 
-    fn parse_anonymous_function(self: *Parser, is_coroutine: bool) ParserError!*AST.ASTNode {
+    fn parse_anonymous_coroutine(self: *Parser) ParserError!*AST.ASTNode {
+        try self.consume(.LEFT_PAREN);
+        var params: std.ArrayList(*AST.TypedNamedField) = .empty;
+
+        if (!self.check(.RIGHT_PAREN)) {
+            while (true) {
+                const param_node = try self.parse_typed_named_field();
+                try params.append(self.allocator, param_node);
+                if (!try self.match(.COMMA)) break;
+            }
+        }
+        try self.consume(.RIGHT_PAREN);
+
+        try self.consume(.ARROW);
+        try self.consume(.LEFT_PAREN);
+        const yield_type = try self.parse_type_expression();
+        try self.consume(.COMMA);
+        const return_type = try self.parse_type_expression();
+        try self.consume(.RIGHT_PAREN);
+
+        const body = try self.parse_statement();
+
+        const anon = try self.allocator.create(AST.AnonCoExpr);
+        anon.* = .{
+            .params = try params.toOwnedSlice(self.allocator),
+            .return_type_annotation = return_type,
+            .yield_type_annotation = yield_type,
+            .body = body,
+            .line = self.previous.line,
+            .column = self.previous.column,
+        };
+
+        const node = try self.allocator.create(AST.ASTNode);
+        node.* = .{ .anon_co_expr = anon };
+        return node;
+    }
+
+    fn parse_anonymous_function(self: *Parser) ParserError!*AST.ASTNode {
         try self.consume(.LEFT_PAREN);
         var params: std.ArrayList(*AST.TypedNamedField) = .empty;
 
@@ -654,16 +701,13 @@ pub const Parser = struct {
         }
         try self.consume(.RIGHT_PAREN);
 
-        var return_type: ?*AST.ASTNode = null;
-        if (try self.match(.ARROW)) {
-            return_type = try self.parse_type_expression();
-        }
+        try self.consume(.ARROW);
+        const return_type = try self.parse_type_expression();
 
         const body = try self.parse_statement();
 
         const anon = try self.allocator.create(AST.AnonFnExpr);
         anon.* = .{
-            .modifier_co = is_coroutine,
             .params = try params.toOwnedSlice(self.allocator),
             .return_type_annotation = return_type,
             .body = body,
@@ -1082,7 +1126,9 @@ pub const Parser = struct {
             node.* = .{ .type_decl = type_decl };
             return node;
         }
-        try self.diagnostics.add_diagnostic(.{ .column = self.scanner.column(), .line = self.scanner.line, .stage = .Parser, .severity = .Error, .message = "Unexpected token", .file_path = self.file_path });
+        try self.workspace.diagnostics_mutex.lock(self.io);
+        try self.workspace.diagnostics.add_diagnostic(.{ .column = self.scanner.column(), .line = self.scanner.line, .stage = .Parser, .severity = .Error, .message = "Unexpected token", .file_path = self.module.filepath });
+        self.workspace.diagnostics_mutex.unlock(self.io);
         return ParserError.UnexpectedToken;
     }
 
@@ -1355,7 +1401,9 @@ pub const Parser = struct {
             }
 
             if (is_public and is_static) {
-                try self.diagnostics.add_diagnostic(.{ .column = self.scanner.column(), .line = self.scanner.line, .stage = .Parser, .severity = .Error, .message = "'pub static' / 'static pub' is not allowed. Use 'static' or 'pub' alone instead.", .file_path = self.file_path });
+                try self.workspace.diagnostics_mutex.lock(self.io);
+                try self.workspace.diagnostics.add_diagnostic(.{ .column = self.scanner.column(), .line = self.scanner.line, .stage = .Parser, .severity = .Error, .message = "'pub static' / 'static pub' is not allowed. Use 'static' or 'pub' alone instead.", .file_path = self.module.filepath });
+                self.workspace.diagnostics_mutex.unlock(self.io);
                 return ParserError.UnexpectedToken; // 'pub static' / 'static pub' is not allowed
             }
 
@@ -1385,6 +1433,9 @@ pub const Parser = struct {
         }
         try self.consume(.RIGHT_BRACE);
         const struct_decl = try self.allocator.create(AST.StructDecl);
+
+        if (is_pub) {}
+
         struct_decl.* = .{
             .modifier_pub = is_pub,
             .name = name,
@@ -1400,7 +1451,7 @@ pub const Parser = struct {
         return node;
     }
 
-    fn parse_use_statement(self: *Parser) ParserError!*AST.ASTNode {
+    fn parse_use_declaration(self: *Parser, is_pub: bool) ParserError!*AST.ASTNode {
         var items: std.ArrayList(AST.ImportItem) = .empty;
 
         while (true) {
@@ -1424,7 +1475,22 @@ pub const Parser = struct {
         try self.consume(.SEMICOLON);
 
         const use_decl = try self.allocator.create(AST.UseDecl);
-        use_decl.* = .{ .items = try items.toOwnedSlice(self.allocator), .module = module, .line = module.line, .column = module.column };
+        use_decl.* = .{ .items = try items.toOwnedSlice(self.allocator), .module = module, .line = module.line, .column = module.column, .modifier_pub = is_pub };
+
+        // add the module to the workspace
+        self.workspace.add_module(module.lexeme[1 .. module.lexeme.len - 1]) catch |err| {
+            try self.workspace.diagnostics_mutex.lock(self.io);
+            try self.workspace.diagnostics.add_diagnostic(.{
+                .file_path = self.module.filepath,
+                .column = module.column,
+                .line = module.line,
+                .stage = .Parser,
+                .severity = .Error,
+                .message = "Could not load module",
+                .hint = @errorName(err),
+            });
+            self.workspace.diagnostics_mutex.unlock(self.io);
+        };
 
         const node = try self.allocator.create(AST.ASTNode);
         node.* = .{ .use_decl = use_decl };
@@ -1511,8 +1577,6 @@ pub const Parser = struct {
             return try self.parse_return_statement();
         } else if (try self.match(.YIELD)) {
             return try self.parse_yield_statement();
-        } else if (try self.match(.USE)) {
-            return try self.parse_use_statement();
         } else if (try self.match(.GIVE)) {
             return try self.parse_give_statement();
         } else if (try self.match(.BREAK)) {
@@ -1546,9 +1610,13 @@ pub const Parser = struct {
             return try self.parse_enum_declaration(is_pub);
         } else if (try self.match(.ERROR)) {
             return try self.parse_error_declaration(is_pub);
+        } else if (try self.match(.USE)) {
+            return try self.parse_use_declaration(is_pub);
         } else {
             if (is_pub) {
-                try self.diagnostics.add_diagnostic(.{ .column = self.scanner.column(), .file_path = self.file_path, .line = self.scanner.line, .stage = .Parser, .severity = .Error, .message = "Unexpected token", .hint = "'pub' is only allowed inside struct and for top level declarations." });
+                try self.workspace.diagnostics_mutex.lock(self.io);
+                try self.workspace.diagnostics.add_diagnostic(.{ .column = self.scanner.column(), .file_path = self.module.filepath, .line = self.scanner.line, .stage = .Parser, .severity = .Error, .message = "Unexpected token", .hint = "'pub' is only allowed inside struct and for top level declarations." });
+                self.workspace.diagnostics_mutex.unlock(self.io);
                 return ParserError.UnexpectedToken;
             }
             return try self.parse_statement();

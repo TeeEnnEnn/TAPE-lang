@@ -27,6 +27,8 @@ pub const TypeCheckerError = error{
     InvalidMemberAccess,
     /// A return statement is missing in a function or coroutine.
     MissingReturn,
+    /// A yield statement is missing in a coroutine.
+    MissingYield,
     /// The match expression is not exhaustive.
     NonExhaustiveMatch,
     /// The break statement is outside of a loop.
@@ -102,19 +104,27 @@ pub const TypeChecker = struct {
             .struct_decl => |decl| {
                 var field_types: std.ArrayList(StructField) = .empty;
                 defer field_types.deinit(self.allocator);
-                var method_types: std.ArrayList(StructMethod) = .empty;
-                defer method_types.deinit(self.allocator);
 
                 for (decl.fields) |field| {
                     const field_type = try self.registry.resolve(field.type_annotation);
                     try field_types.append(self.allocator, .{ .name = field.name.lexeme, .type = field_type, .is_static = field.is_static, .is_pub = field.is_pub, .has_default = field.has_default });
                 }
+
+                // Create struct with empty methods first to get its type ID for self
+                const struct_id = try self.registry.add_struct_type(decl.name.lexeme, try field_types.toOwnedSlice(self.allocator), &.{});
+
+                var method_types: std.ArrayList(StructMethod) = .empty;
+                defer method_types.deinit(self.allocator);
+
                 for (decl.methods) |method| {
-                    const method_type = try self.check_declaration_type(method.method);
+                    const self_type: ?AST.TypeId = if (method.is_static) null else struct_id;
+                    const method_type = try self.check_declaration_type(method.method, self_type);
                     try method_types.append(self.allocator, .{ .name = method.name.lexeme, .type = method_type, .is_static = method.is_static, .is_pub = method.is_pub });
                 }
 
-                const struct_id = try self.registry.add_struct_type(decl.name.lexeme, try field_types.toOwnedSlice(self.allocator), try method_types.toOwnedSlice(self.allocator));
+                // Update the struct with actual methods
+                self.registry.types.items[struct_id]._struct.methods = try method_types.toOwnedSlice(self.allocator);
+
                 try self.environment.define(decl.name.lexeme, struct_id);
             },
             .type_decl => |decl| {
@@ -196,8 +206,14 @@ pub const TypeChecker = struct {
                 self.environment = &local_env;
                 defer self.environment = prev_env;
 
+                // Define self if this is a method
+                const has_self = type_info.function.args.len == decl.params.len + 1;
+                if (has_self) {
+                    try self.environment.define("self", type_info.function.args[0]);
+                }
+
                 // Define params locally
-                for (decl.params, type_info.function.args) |param, param_id| {
+                for (decl.params, type_info.function.args[if (has_self) 1 else 0..]) |param, param_id| {
                     try self.environment.define(param.name.lexeme, param_id);
                 }
 
@@ -219,9 +235,28 @@ pub const TypeChecker = struct {
             },
 
             .struct_decl => |decl| {
+                const struct_typeid = self.environment.lookup(decl.name.lexeme) catch {
+                    try self.diagnostics.add_diagnostic(.{ .file_path = self.file_path, .column = decl.name.column, .line = decl.name.line, .stage = .TypeChecker, .severity = .Error, .message = "Undefined symbol", .hint = "Symbol is not defined." });
+                    return TypeCheckerError.UndefinedSymbol;
+                };
+
                 for (decl.fields) |field| {
                     _ = try self.check(field.type_annotation);
                 }
+
+                // Push scope for method bodies
+                var local_env = Environment.init(self.allocator, self.environment);
+                defer local_env.deinit();
+                const prev_env = self.environment;
+                self.environment = &local_env;
+                defer self.environment = prev_env;
+
+                const type_info = self.registry.get_type_info(struct_typeid);
+                try self.environment.define("Self", struct_typeid);
+                for (type_info._struct.methods) |sm| {
+                    try self.environment.define(sm.name, sm.type);
+                }
+
                 for (decl.methods) |method| {
                     _ = try self.check(method.method);
                 }
@@ -256,8 +291,14 @@ pub const TypeChecker = struct {
                 self.environment = &local_env;
                 defer self.environment = prev_env;
 
+                // Define self if this is a method
+                const has_self = type_info.coroutine.args.len == decl.params.len + 1;
+                if (has_self) {
+                    try self.environment.define("self", type_info.coroutine.args[0]);
+                }
+
                 // Define params locally
-                for (decl.params, type_info.coroutine.args) |param, param_id| {
+                for (decl.params, type_info.coroutine.args[if (has_self) 1 else 0..]) |param, param_id| {
                     try self.environment.define(param.name.lexeme, param_id);
                 }
 
@@ -412,11 +453,14 @@ pub const TypeChecker = struct {
         }
     }
 
-    fn check_declaration_type(self: *TypeChecker, node: *AST.ASTNode) TypeCheckerError!AST.TypeId {
+    fn check_declaration_type(self: *TypeChecker, node: *AST.ASTNode, self_type: ?AST.TypeId) TypeCheckerError!AST.TypeId {
         switch (node.*) {
             .fn_decl => |decl| {
                 var param_types: std.ArrayList(AST.TypeId) = .empty;
                 defer param_types.deinit(self.allocator);
+
+                if (self_type) |st| try param_types.append(self.allocator, st);
+
                 for (decl.params) |param| {
                     const param_type = try self.registry.resolve(param.type_annotation);
                     try param_types.append(self.allocator, param_type);
@@ -428,6 +472,9 @@ pub const TypeChecker = struct {
             .co_decl => |decl| {
                 var param_types: std.ArrayList(AST.TypeId) = .empty;
                 defer param_types.deinit(self.allocator);
+
+                if (self_type) |st| try param_types.append(self.allocator, st);
+
                 for (decl.params) |param| {
                     const param_type = try self.registry.resolve(param.type_annotation);
                     try param_types.append(self.allocator, param_type);
@@ -938,22 +985,82 @@ pub const TypeChecker = struct {
                     const param_typeid = try self.registry.resolve(param.type_annotation);
                     try arg_types.append(self.allocator, param_typeid);
                 }
-                var ret_typeid = @intFromEnum(PrimitiveType.Nil);
-                if (expr.return_type_annotation) |ret_annot| {
-                    ret_typeid = try self.registry.resolve(ret_annot);
-                }
+
+                const ret_typeid = try self.registry.resolve(expr.return_type_annotation);
 
                 const function_typeid = try self.registry.add_function_type(try arg_types.toOwnedSlice(self.allocator), ret_typeid);
+
+                // Push function scope
+                var local_env = Environment.init(self.allocator, self.environment);
+                defer local_env.deinit();
+                const prev_env = self.environment;
+                self.environment = &local_env;
+                defer self.environment = prev_env;
+
+                // Define params locally
+                for (expr.params, arg_types.items) |param, param_id| {
+                    try self.environment.define(param.name.lexeme, param_id);
+                }
 
                 // Typecheck inner body
                 const prev_ret = self.expected_return_type;
                 self.expected_return_type = ret_typeid;
                 defer self.expected_return_type = prev_ret;
 
-                _ = try self.check(expr.body);
-
+                const body_term = try self.check(expr.body);
+                const needs_return = ret_typeid != @intFromEnum(PrimitiveType.Nil) and ret_typeid != @intFromEnum(PrimitiveType.Never);
+                if (needs_return and !body_term.return_ and !body_term.panics) {
+                    try self.diagnostics.add_diagnostic(.{ .file_path = self.file_path, .column = expr.column, .line = expr.line, .stage = .TypeChecker, .severity = .Error, .message = "Missing return", .hint = "Anonymous function is missing a return statement." });
+                    return TypeCheckerError.MissingReturn;
+                }
                 expr.resolved_type = function_typeid;
                 return function_typeid;
+            },
+            .anon_co_expr => |expr| {
+                var arg_types: std.ArrayList(u32) = .empty;
+                defer arg_types.deinit(self.allocator);
+
+                for (expr.params) |param| {
+                    const param_typeid = try self.registry.resolve(param.type_annotation);
+                    try arg_types.append(self.allocator, param_typeid);
+                }
+
+                const ret_typeid = try self.registry.resolve(expr.return_type_annotation);
+                const yield_typeid = try self.registry.resolve(expr.yield_type_annotation);
+
+                const prev_ret = self.expected_return_type;
+                self.expected_return_type = ret_typeid;
+                defer self.expected_return_type = prev_ret;
+
+                const prev_yield = self.expected_yield_type;
+                self.expected_yield_type = yield_typeid;
+                defer self.expected_yield_type = prev_yield;
+
+                const coroutine_typeid = try self.registry.add_coroutine_type(try arg_types.toOwnedSlice(self.allocator), ret_typeid, yield_typeid);
+
+                var local_env = Environment.init(self.allocator, self.environment);
+                defer local_env.deinit();
+                const prev_env = self.environment;
+                self.environment = &local_env;
+                defer self.environment = prev_env;
+
+                for (expr.params, arg_types.items) |param, param_id| {
+                    try self.environment.define(param.name.lexeme, param_id);
+                }
+
+                const body_term = try self.check(expr.body);
+                const needs_return = ret_typeid != @intFromEnum(PrimitiveType.Nil) and ret_typeid != @intFromEnum(PrimitiveType.Never);
+                const needs_yield = yield_typeid != @intFromEnum(PrimitiveType.Nil);
+                if (needs_return and !body_term.return_ and !body_term.panics) {
+                    try self.diagnostics.add_diagnostic(.{ .file_path = self.file_path, .column = expr.column, .line = expr.line, .stage = .TypeChecker, .severity = .Error, .message = "Missing return", .hint = "Coroutine is missing a return statement." });
+                    return TypeCheckerError.MissingReturn;
+                }
+                if (needs_yield and !body_term.yield_) {
+                    try self.diagnostics.add_diagnostic(.{ .file_path = self.file_path, .column = expr.column, .line = expr.line, .stage = .TypeChecker, .severity = .Error, .message = "Missing yield", .hint = "Coroutine is missing a yield statement." });
+                    return TypeCheckerError.MissingYield;
+                }
+                expr.resolved_type = coroutine_typeid;
+                return coroutine_typeid;
             },
             .int_lit => |lit| {
                 lit.resolved_type = @intFromEnum(PrimitiveType.Int);

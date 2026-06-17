@@ -1,8 +1,7 @@
 program         ::= declaration* EOF
 
 /* --- Declarations --- */
-declaration     ::= modifier* ( var_decl | fn_decl | type_decl | struct_decl | enum_decl | co_decl )
-                  | use_decl
+declaration     ::= modifier* ( var_decl | fn_decl | type_decl | struct_decl | enum_decl | co_decl | error_decl  | use_decl)
                   | statement
 
 modifier        ::= 'pub' | 'static'

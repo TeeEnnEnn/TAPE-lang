@@ -4,12 +4,16 @@ const TypeRegistry = @import("../type_registry.zig").TypeRegistry;
 const TypeId = @import("../type_registry.zig").TypeId;
 const PrimitiveType = @import("../type_registry.zig").PrimitiveType;
 const DiagnosticsReporter = @import("../../helpers/diagnostics.zig").DiagnosticsReporter;
+const Workspace = @import("../workspace.zig").Workspace;
+const Module = @import("../workspace.zig").Module;
 
 fn resolveType(allocator: std.mem.Allocator, registry: *TypeRegistry, type_str: []const u8) !TypeId {
     const source = try std.fmt.allocPrint(allocator, "var x: {s} = 0;", .{type_str});
-    var diagnostics = DiagnosticsReporter.init(allocator);
-    defer diagnostics.deinit();
-    var p = try Parser.init(allocator, source, &diagnostics, "test");
+    const io = std.testing.io;
+    var workspace = Workspace.init(allocator, io);
+    defer workspace.deinit();
+    const mod = try Module.init("test", source, allocator);
+    var p = try Parser.init(allocator, &workspace, mod, io);
     const node = try p.parse();
     const var_decl = node.program.declarations[0].var_decl;
     return try registry.resolve(var_decl.type_annotation.?);

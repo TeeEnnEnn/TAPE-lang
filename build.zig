@@ -22,9 +22,11 @@ pub fn build(b: *std.Build) void {
     // in this directory.
 
     const version_option: []const u8 = b.option([]const u8, "version", "TAPE version string.") orelse "dev";
+    const compiler_thread_count_option: u32 = b.option(u32, "compiler_thread_count", "Number of compiler threads to use.") orelse 4;
 
     const options = b.addOptions();
     options.addOption([]const u8, "version", version_option);
+    options.addOption(u32, "compiler_thread_count", compiler_thread_count_option);
 
     const options_module = options.createModule();
 

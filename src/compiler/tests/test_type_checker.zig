@@ -8,17 +8,21 @@ const TypeId = @import("../ast.zig").TypeId;
 const Parser = @import("../parser.zig").Parser;
 const PrimitiveType = @import("../type_registry.zig").PrimitiveType;
 const DiagnosticsReporter = @import("../../helpers/diagnostics.zig").DiagnosticsReporter;
+const Workspace = @import("../workspace.zig").Workspace;
+const Module = @import("../workspace.zig").Module;
 
 fn checkSource(allocator: std.mem.Allocator, source: []const u8) !struct { registry: TypeRegistry, env: Environment } {
-    var diagnostics = DiagnosticsReporter.init(allocator);
-    defer diagnostics.deinit();
+    const io = std.testing.io;
+    var workspace = Workspace.init(allocator, io);
+    defer workspace.deinit();
+    const mod = try Module.init("test", source, allocator);
 
-    var parser = try Parser.init(allocator, source, &diagnostics, "test");
+    var parser = try Parser.init(allocator, &workspace, mod, io);
     const program = try parser.parse();
 
     var env = Environment.init(allocator, null);
     var registry = try TypeRegistry.init(allocator);
-    var checker = TypeChecker.init(allocator, &registry, &env, &diagnostics, "test");
+    var checker = TypeChecker.init(allocator, &registry, &env, &workspace.diagnostics, "test");
     _ = try checker.check(program);
 
     return .{ .registry = registry, .env = env };

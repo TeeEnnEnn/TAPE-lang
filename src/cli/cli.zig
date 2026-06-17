@@ -8,6 +8,7 @@ const TapeTypeChecker = @import("../compiler/type_checker.zig");
 const TapeEnvironment = @import("../compiler/environment.zig");
 const TapeTypeRegistry = @import("../compiler/type_registry.zig");
 const TapeDiagnostics = @import("../helpers/diagnostics.zig");
+const TapeWorkspace = @import("../compiler/workspace.zig");
 
 const RESET = helpers.RESET;
 const BOLD_RED = helpers.BOLD_RED;
@@ -133,6 +134,8 @@ pub fn run_file(io: std.Io, parsed_args: [][]const u8, allocator: std.mem.Alloca
 }
 
 pub fn run_check(io: std.Io, parsed_args: [][]const u8, allocator: std.mem.Allocator) u8 {
+    var workspace = TapeWorkspace.Workspace.init(allocator, io);
+
     const file_path = if (parsed_args.len == 0) blk: {
         break :blk helpers.get_package_entrypoint(allocator, std.Io.Dir.cwd(), io) catch {
             return 1;
@@ -148,48 +151,52 @@ pub fn run_check(io: std.Io, parsed_args: [][]const u8, allocator: std.mem.Alloc
     };
     defer allocator.free(file_path);
 
-    const file_contents = helpers.read_file(file_path, std.Io.Dir.cwd(), io, allocator) catch {
-        return 1;
-    };
-    defer allocator.free(file_contents);
-
-    var diagnostics = TapeDiagnostics.DiagnosticsReporter.init(allocator);
-    defer diagnostics.deinit();
-
-    var parser = TapeParser.Parser.init(allocator, file_contents, &diagnostics, file_path) catch {
-        if (diagnostics.has_errors) {
-            diagnostics.report_all(io) catch {};
-        }
-        return 1;
-    };
-    const program = parser.parse() catch {
-        if (diagnostics.has_errors) {
-            diagnostics.report_all(io) catch {};
-        }
+    workspace.compile_workspace(file_path) catch {
         return 1;
     };
 
-    var env = TapeEnvironment.Environment.init(allocator, null);
-    defer env.deinit();
-    var registry = TapeTypeRegistry.TypeRegistry.init(allocator) catch {
-        return 1;
-    };
-    defer registry.deinit();
-    var checker = TapeTypeChecker.TypeChecker.init(allocator, &registry, &env, &diagnostics, file_path);
-    _ = checker.check(program) catch |err| {
-        if (!diagnostics.has_errors) {
-            diagnostics.add_diagnostic(.{
-                .stage = .TypeChecker,
-                .severity = .Error,
-                .message = @errorName(err),
-                .file_path = file_path,
-                .line = 0,
-                .column = 0,
-            }) catch {};
-        }
-        diagnostics.report_all(io) catch {};
-        return 1;
-    };
+    // const file_contents = helpers.read_file(file_path, std.Io.Dir.cwd(), io, allocator) catch {
+    //     return 1;
+    // };
+    // defer allocator.free(file_contents);
+
+    // var diagnostics = TapeDiagnostics.DiagnosticsReporter.init(allocator);
+    // defer diagnostics.deinit();
+
+    // var parser = TapeParser.Parser.init(allocator, file_contents, &diagnostics, file_path) catch {
+    //     if (diagnostics.has_errors) {
+    //         diagnostics.report_all(io) catch {};
+    //     }
+    //     return 1;
+    // };
+    // const program = parser.parse() catch {
+    //     if (diagnostics.has_errors) {
+    //         diagnostics.report_all(io) catch {};
+    //     }
+    //     return 1;
+    // };
+
+    // var env = TapeEnvironment.Environment.init(allocator, null);
+    // defer env.deinit();
+    // var registry = TapeTypeRegistry.TypeRegistry.init(allocator) catch {
+    //     return 1;
+    // };
+    // defer registry.deinit();
+    // var checker = TapeTypeChecker.TypeChecker.init(allocator, &registry, &env, &diagnostics, file_path);
+    // _ = checker.check(program) catch |err| {
+    //     if (!diagnostics.has_errors) {
+    //         diagnostics.add_diagnostic(.{
+    //             .stage = .TypeChecker,
+    //             .severity = .Error,
+    //             .message = @errorName(err),
+    //             .file_path = file_path,
+    //             .line = 0,
+    //             .column = 0,
+    //         }) catch {};
+    //     }
+    //     diagnostics.report_all(io) catch {};
+    //     return 1;
+    // };
     return 0;
 }
 

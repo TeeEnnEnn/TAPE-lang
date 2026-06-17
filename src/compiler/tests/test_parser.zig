@@ -1,12 +1,15 @@
 const std = @import("std");
 const Parser = @import("../parser.zig").Parser;
 const AST = @import("../ast.zig");
-const DiagnosticsReporter = @import("../../helpers/diagnostics.zig").DiagnosticsReporter;
+const Workspace = @import("../workspace.zig").Workspace;
+const Module = @import("../workspace.zig").Module;
 
 fn parseFirstDecl(allocator: std.mem.Allocator, source: []const u8) !*AST.ASTNode {
-    var diagnostics = DiagnosticsReporter.init(allocator);
-    defer diagnostics.deinit();
-    var p = try Parser.init(allocator, source, &diagnostics, "test");
+    const io = std.testing.io;
+    var workspace = Workspace.init(allocator, io);
+    defer workspace.deinit();
+    const mod = try Module.init("test", source, allocator);
+    var p = try Parser.init(allocator, &workspace, mod, io);
     const node = try p.parse();
     try std.testing.expect(node.* == .program);
     try std.testing.expect(node.program.declarations.len > 0);
@@ -307,4 +310,49 @@ test "Parser can parse struct methods" {
     try std.testing.expectEqual(@as(usize, 1), struct_decl.methods.len);
     try std.testing.expect(struct_decl.methods[0].method.* == .fn_decl);
     try std.testing.expectEqualStrings("next", struct_decl.methods[0].method.fn_decl.name.lexeme);
+}
+
+test "Parser can parse use declaration with single import" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const allocator = arena.allocator();
+
+    const node = try parseFirstDecl(allocator, "use println from \"print.tape\";");
+
+    try std.testing.expect(node.* == .use_decl);
+    const use_decl = node.use_decl;
+    try std.testing.expectEqual(@as(usize, 1), use_decl.items.len);
+    try std.testing.expectEqualStrings("println", use_decl.items[0].name.lexeme);
+    try std.testing.expect(use_decl.items[0].alias == null);
+    try std.testing.expectEqualStrings("print.tape", use_decl.module.lexeme[1 .. use_decl.module.lexeme.len - 1]);
+}
+
+test "Parser can parse use declaration with alias" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const allocator = arena.allocator();
+
+    const node = try parseFirstDecl(allocator, "use println as print from \"print.tape\";");
+
+    try std.testing.expect(node.* == .use_decl);
+    const use_decl = node.use_decl;
+    try std.testing.expectEqual(@as(usize, 1), use_decl.items.len);
+    try std.testing.expectEqualStrings("println", use_decl.items[0].name.lexeme);
+    try std.testing.expect(use_decl.items[0].alias != null);
+    try std.testing.expectEqualStrings("print", use_decl.items[0].alias.?.lexeme);
+    try std.testing.expectEqualStrings("print.tape", use_decl.module.lexeme[1 .. use_decl.module.lexeme.len - 1]);
+}
+
+test "Parser can parse use declaration with multiple imports" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const allocator = arena.allocator();
+
+    const node = try parseFirstDecl(allocator, "use foo, bar from \"module.tape\";");
+
+    try std.testing.expect(node.* == .use_decl);
+    const use_decl = node.use_decl;
+    try std.testing.expectEqual(@as(usize, 2), use_decl.items.len);
+    try std.testing.expectEqualStrings("foo", use_decl.items[0].name.lexeme);
+    try std.testing.expectEqualStrings("bar", use_decl.items[1].name.lexeme);
 }
