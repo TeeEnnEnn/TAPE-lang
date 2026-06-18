@@ -24,8 +24,9 @@ pub const Parser = struct {
     previous: Token,
     io: std.Io,
     module: *Module,
+    group: *std.Io.Group,
 
-    pub fn init(allocator: std.mem.Allocator, workspace: *Workspace, module: *Module, io: std.Io) !Parser {
+    pub fn init(allocator: std.mem.Allocator, workspace: *Workspace, module: *Module, io: std.Io, group: *std.Io.Group) !Parser {
         var parser = Parser{
             .allocator = allocator,
             .workspace = workspace,
@@ -34,6 +35,7 @@ pub const Parser = struct {
             .current = Token{ .token_type = .EOF, .lexeme = "", .line = 0, .column = 0 },
             .previous = Token{ .token_type = .EOF, .lexeme = "", .line = 0, .column = 0 },
             .io = io,
+            .group = group,
         };
         try parser.advance();
         return parser;
@@ -1478,7 +1480,7 @@ pub const Parser = struct {
         use_decl.* = .{ .items = try items.toOwnedSlice(self.allocator), .module = module, .line = module.line, .column = module.column, .modifier_pub = is_pub };
 
         // add the module to the workspace
-        self.workspace.parse_module(module.lexeme[1 .. module.lexeme.len - 1]) catch |err| {
+        self.workspace.submit_import(self.group, self.module.filepath, module.lexeme[1 .. module.lexeme.len - 1]) catch |err| {
             try self.workspace.diagnostics_mutex.lock(self.io);
             try self.workspace.diagnostics.add_diagnostic(.{
                 .file_path = self.module.filepath,
