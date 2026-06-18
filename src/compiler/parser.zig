@@ -1478,7 +1478,7 @@ pub const Parser = struct {
         use_decl.* = .{ .items = try items.toOwnedSlice(self.allocator), .module = module, .line = module.line, .column = module.column, .modifier_pub = is_pub };
 
         // add the module to the workspace
-        self.workspace.add_module(module.lexeme[1 .. module.lexeme.len - 1]) catch |err| {
+        self.workspace.parse_module(module.lexeme[1 .. module.lexeme.len - 1]) catch |err| {
             try self.workspace.diagnostics_mutex.lock(self.io);
             try self.workspace.diagnostics.add_diagnostic(.{
                 .file_path = self.module.filepath,

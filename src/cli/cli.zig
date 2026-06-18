@@ -135,6 +135,7 @@ pub fn run_file(io: std.Io, parsed_args: [][]const u8, allocator: std.mem.Alloca
 
 pub fn run_check(io: std.Io, parsed_args: [][]const u8, allocator: std.mem.Allocator) u8 {
     var workspace = TapeWorkspace.Workspace.init(allocator, io);
+    defer workspace.deinit();
 
     const file_path = if (parsed_args.len == 0) blk: {
         break :blk helpers.get_package_entrypoint(allocator, std.Io.Dir.cwd(), io) catch {
@@ -152,8 +153,21 @@ pub fn run_check(io: std.Io, parsed_args: [][]const u8, allocator: std.mem.Alloc
     defer allocator.free(file_path);
 
     workspace.compile_workspace(file_path) catch {
+        workspace.diagnostics.report_all(io) catch {
+            return 1;
+        };
         return 1;
     };
+    const has_errors = workspace.diagnostics.has_errors;
+
+    if (has_errors or workspace.diagnostics.has_infos or workspace.diagnostics.has_warnings) {
+        workspace.diagnostics.report_all(io) catch {
+            return 1;
+        };
+    }
+    if (has_errors) {
+        return 1;
+    }
 
     // const file_contents = helpers.read_file(file_path, std.Io.Dir.cwd(), io, allocator) catch {
     //     return 1;
