@@ -10,10 +10,11 @@ const Module = @import("../workspace.zig").Module;
 fn resolveType(allocator: std.mem.Allocator, registry: *TypeRegistry, type_str: []const u8) !TypeId {
     const source = try std.fmt.allocPrint(allocator, "var x: {s} = 0;", .{type_str});
     const io = std.testing.io;
+    var group = std.Io.Group.init;
     var workspace = Workspace.init(allocator, io);
     defer workspace.deinit();
     const mod = try Module.init("test", source, allocator);
-    var p = try Parser.init(allocator, &workspace, mod, io);
+    var p = try Parser.init(allocator, &workspace, mod, io, &group);
     const node = try p.parse();
     const var_decl = node.program.declarations[0].var_decl;
     return try registry.resolve(var_decl.type_annotation.?);

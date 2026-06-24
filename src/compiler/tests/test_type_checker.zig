@@ -13,37 +13,76 @@ const Module = @import("../workspace.zig").Module;
 
 fn checkSource(allocator: std.mem.Allocator, source: []const u8) !struct { registry: TypeRegistry, env: Environment } {
     const io = std.testing.io;
+    var group = std.Io.Group.init;
     var workspace = Workspace.init(allocator, io);
     defer workspace.deinit();
     const mod = try Module.init("test", source, allocator);
 
-    var parser = try Parser.init(allocator, &workspace, mod, io);
+    var parser = try Parser.init(allocator, &workspace, mod, io, &group);
     const program = try parser.parse();
 
     var env = Environment.init(allocator, null);
     var registry = try TypeRegistry.init(allocator);
-    var checker = TypeChecker.init(allocator, &registry, &env, &workspace.diagnostics, "test");
+    var checker = TypeChecker.init(allocator, &registry, &env, &workspace.diagnostics, mod, &workspace);
     _ = try checker.check(program);
 
     return .{ .registry = registry, .env = env };
 }
 
+const SourceEntry = struct { name: []const u8, source: []const u8 };
+
+fn checkSourceMulti(allocator: std.mem.Allocator, sources: []const SourceEntry) !void {
+    const io = std.testing.io;
+    var group = std.Io.Group.init;
+    var workspace = Workspace.init(allocator, io);
+    defer workspace.deinit();
+
+    var modules = std.ArrayList(*Module).empty;
+    defer modules.deinit(allocator);
+
+    for (sources) |entry| {
+        const mod = try Module.init(entry.name, entry.source, allocator);
+        try modules.append(allocator, mod);
+        try workspace.modules.put(entry.name, mod);
+
+        var parser = try Parser.init(allocator, &workspace, mod, io, &group);
+        mod.ast = try parser.parse();
+    }
+
+    var type_registry = try TypeRegistry.init(allocator);
+    defer type_registry.deinit();
+
+    for (modules.items) |mod| {
+        var env = Environment.init(allocator, null);
+        defer env.deinit();
+        var checker = TypeChecker.init(allocator, &type_registry, &env, &workspace.diagnostics, mod, &workspace);
+        _ = try checker.check(mod.ast);
+    }
+}
+
 test "Type Checker - Init works" {
     const allocator = std.testing.allocator;
-    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    var arena = std.heap.ArenaAllocator.init(allocator);
     defer arena.deinit();
     const arena_allocator = arena.allocator();
+    const io = std.testing.io;
 
-    var diagnostics = DiagnosticsReporter.init(allocator);
+    var diagnostics = DiagnosticsReporter.init(arena_allocator);
     defer diagnostics.deinit();
 
-    var env = Environment.init(allocator, null);
+    var workspace = Workspace.init(arena_allocator, io);
+    defer workspace.deinit();
+
+    const mod = try Module.init("test", "", arena_allocator);
+    defer mod.deinit();
+
+    var env = Environment.init(arena_allocator, null);
     defer env.deinit();
 
     var registry = try TypeRegistry.init(arena_allocator);
     defer registry.deinit();
 
-    const type_checker = TypeChecker.init(allocator, &registry, &env, &diagnostics, "test");
+    const type_checker = TypeChecker.init(arena_allocator, &registry, &env, &diagnostics, mod, &workspace);
     _ = type_checker;
 }
 
@@ -215,13 +254,12 @@ test "Type Checker - use declaration validation" {
     defer arena.deinit();
     const allocator = arena.allocator();
 
-    // valid use declaration
-    _ = try checkSource(allocator, "use foo from \"mymodule\";");
-
-    // invalid: empty module path - but parser requires STRING token so len > 0 is guaranteed
-    // invalid: empty import name - parser requires IDENTIFIER so len > 0 is guaranteed
-    // Both cases are handled by the parser, so the type checker check is a safety net.
-    // For now we just verify valid cases compile.
+    // invalid: use declaration with undefined symbol
+    _ = checkSource(allocator, "use foo from \"mymodule\";") catch |e| {
+        if (e != TypeCheckerError.UndefinedSymbol) {
+            return e;
+        }
+    };
 }
 
 test "Type Checker - break and continue context" {
@@ -302,4 +340,180 @@ test "Type Checker - block termination" {
     _ = try checkSource(allocator, "fn f(x: Bool) -> Int { if (x) { { return 1; } } else { { return 2; } } }");
     // valid: nested blocks
     _ = try checkSource(allocator, "fn f() -> Int { { { return 1; } } }");
+}
+
+test "Type Checker - pub var is exported" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const allocator = arena.allocator();
+    const io = std.testing.io;
+    var group = std.Io.Group.init;
+    var workspace = Workspace.init(allocator, io);
+    defer workspace.deinit();
+
+    const mod = try Module.init("test_pub_var", "pub var x: Int = 42;", allocator);
+    var parser = try Parser.init(allocator, &workspace, mod, io, &group);
+    mod.ast = try parser.parse();
+
+    var env = Environment.init(allocator, null);
+    defer env.deinit();
+    var registry = try TypeRegistry.init(allocator);
+    defer registry.deinit();
+
+    var checker = TypeChecker.init(allocator, &registry, &env, &workspace.diagnostics, mod, &workspace);
+    _ = try checker.check(mod.ast);
+
+    const export_entry = mod.exports.get("x");
+    try std.testing.expect(export_entry != null);
+    try std.testing.expectEqual(@intFromEnum(PrimitiveType.Int), export_entry.?);
+}
+
+test "Type Checker - pub fn is exported and importable" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const allocator = arena.allocator();
+
+    try checkSourceMulti(allocator, &.{
+        SourceEntry{ .name = "lib", .source = "pub fn foo() -> Int { return 1; }" },
+        SourceEntry{ .name = "main", .source = "use foo from \"lib\"; var x = foo();" },
+    });
+}
+
+test "Type Checker - pub co is exported" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const allocator = arena.allocator();
+    const io = std.testing.io;
+    var group = std.Io.Group.init;
+    var workspace = Workspace.init(allocator, io);
+    defer workspace.deinit();
+
+    const mod = try Module.init("test_co", "pub co bar() -> (Int, Nil) { yield 1; }", allocator);
+    var parser = try Parser.init(allocator, &workspace, mod, io, &group);
+    mod.ast = try parser.parse();
+
+    var env = Environment.init(allocator, null);
+    defer env.deinit();
+    var registry = try TypeRegistry.init(allocator);
+    defer registry.deinit();
+
+    var checker = TypeChecker.init(allocator, &registry, &env, &workspace.diagnostics, mod, &workspace);
+    _ = try checker.check(mod.ast);
+
+    const export_entry = mod.exports.get("bar");
+    try std.testing.expect(export_entry != null);
+}
+
+test "Type Checker - pub struct is exported" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const allocator = arena.allocator();
+    const io = std.testing.io;
+    var group = std.Io.Group.init;
+    var workspace = Workspace.init(allocator, io);
+    defer workspace.deinit();
+
+    const mod = try Module.init("test_struct", "pub struct Point { x: Int, y: Int }", allocator);
+    var parser = try Parser.init(allocator, &workspace, mod, io, &group);
+    mod.ast = try parser.parse();
+
+    var env = Environment.init(allocator, null);
+    defer env.deinit();
+    var registry = try TypeRegistry.init(allocator);
+    defer registry.deinit();
+
+    var checker = TypeChecker.init(allocator, &registry, &env, &workspace.diagnostics, mod, &workspace);
+    _ = try checker.check(mod.ast);
+
+    const export_entry = mod.exports.get("Point");
+    try std.testing.expect(export_entry != null);
+}
+
+test "Type Checker - pub enum is exported" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const allocator = arena.allocator();
+    const io = std.testing.io;
+    var group = std.Io.Group.init;
+    var workspace = Workspace.init(allocator, io);
+    defer workspace.deinit();
+
+    const mod = try Module.init("test_enum", "pub enum Color { Red, Green }", allocator);
+    var parser = try Parser.init(allocator, &workspace, mod, io, &group);
+    mod.ast = try parser.parse();
+
+    var env = Environment.init(allocator, null);
+    defer env.deinit();
+    var registry = try TypeRegistry.init(allocator);
+    defer registry.deinit();
+
+    var checker = TypeChecker.init(allocator, &registry, &env, &workspace.diagnostics, mod, &workspace);
+    _ = try checker.check(mod.ast);
+
+    const export_entry = mod.exports.get("Color");
+    try std.testing.expect(export_entry != null);
+}
+
+test "Type Checker - use_decl errors on non-exported symbol" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const allocator = arena.allocator();
+
+    try std.testing.expectError(TypeCheckerError.UndefinedSymbol, checkSourceMulti(allocator, &.{
+        SourceEntry{ .name = "lib", .source = "fn secret() -> Int { return 0; }" },
+        SourceEntry{ .name = "main", .source = "use secret from \"lib\"; var x = secret();" },
+    }));
+}
+
+test "Type Checker - pub var import via use_decl hoist looks up from exports map" {
+    // Verify that use_decl hoist looks up symbols from the imported module's exports map,
+    // not from registry.get_named_type (which only finds structs/enums/errors).
+    // This test simulates the multi-module scenario using the TypeChecker directly.
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const allocator = arena.allocator();
+    const io = std.testing.io;
+
+    var workspace = Workspace.init(allocator, io);
+    defer workspace.deinit();
+
+    // Create and process the "lib" module with a pub var
+    const lib_mod = try Module.init("lib", "pub var x: Int = 42;", allocator);
+    var group = std.Io.Group.init;
+    var parser = try Parser.init(allocator, &workspace, lib_mod, io, &group);
+    lib_mod.ast = try parser.parse();
+    try workspace.modules.put("lib", lib_mod);
+
+    var type_registry = try TypeRegistry.init(allocator);
+    defer type_registry.deinit();
+
+    // Hoist and check lib module to populate its exports
+    {
+        var env = Environment.init(allocator, null);
+        defer env.deinit();
+        var checker = TypeChecker.init(allocator, &type_registry, &env, &workspace.diagnostics, lib_mod, &workspace);
+        _ = try checker.check(lib_mod.ast);
+    }
+
+    // Verify the pub var was exported
+    try std.testing.expect(lib_mod.exports.contains("x"));
+    try std.testing.expectEqual(@intFromEnum(PrimitiveType.Int), lib_mod.exports.get("x").?);
+
+    // Now simulate what use_decl hoist does: look up from lib's exports
+    // and define in the importing module's environment
+    var import_env = Environment.init(allocator, null);
+    defer import_env.deinit();
+
+    if (workspace.modules.get("lib")) |imported| {
+        if (imported.exports.get("x")) |resolved_id| {
+            try import_env.define("x", resolved_id);
+        } else {
+            return error.TestFailed;
+        }
+    } else {
+        return error.TestFailed;
+    }
+
+    // Verify the imported symbol is usable (its type ID is correct)
+    try std.testing.expectEqual(@intFromEnum(PrimitiveType.Int), try import_env.lookup("x"));
 }

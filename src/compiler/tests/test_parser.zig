@@ -6,10 +6,11 @@ const Module = @import("../workspace.zig").Module;
 
 fn parseFirstDecl(allocator: std.mem.Allocator, source: []const u8) !*AST.ASTNode {
     const io = std.testing.io;
+    var group = std.Io.Group.init;
     var workspace = Workspace.init(allocator, io);
     defer workspace.deinit();
     const mod = try Module.init("test", source, allocator);
-    var p = try Parser.init(allocator, &workspace, mod, io);
+    var p = try Parser.init(allocator, &workspace, mod, io, &group);
     const node = try p.parse();
     try std.testing.expect(node.* == .program);
     try std.testing.expect(node.program.declarations.len > 0);

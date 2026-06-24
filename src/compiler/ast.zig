@@ -673,6 +673,8 @@ pub const UseDecl = struct {
     modifier_pub: bool,
     items: []ImportItem,
     module: Token,
+    /// The resolved path of the module.
+    resolved_module_path: []const u8,
     line: usize,
     column: usize,
 };
@@ -755,6 +757,7 @@ pub const CoType = struct {
 
 pub const IdentifierType = struct {
     name: Token,
+    source_file: []const u8,
     generic_args: ?[]*ASTNode,
 };
 

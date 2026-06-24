@@ -4,7 +4,9 @@ const helpers = @import("../cli/helpers.zig");
 const options = @import("TAPE_lang_build_options");
 const Parser = @import("parser.zig").Parser;
 const TypeChecker = @import("type_checker.zig").TypeChecker;
+const TypeRegistry = @import("type_registry.zig").TypeRegistry;
 const Diagnostics = @import("../helpers/diagnostics.zig").DiagnosticsReporter;
+const Environment = @import("environment.zig").Environment;
 
 pub const WorkspaceError = std.mem.Allocator.Error || std.Io.OperateTimeoutError || error{
     CircularDependencyError,
@@ -13,6 +15,12 @@ pub const WorkspaceError = std.mem.Allocator.Error || std.Io.OperateTimeoutError
 
 /// The possible state a module (file) can be in when being handled by the compiler
 pub const ModuleState = enum { Parsing, Parsed, Hoisted, Checked };
+
+pub const ModuleVisitState = enum {
+    NotVisited,
+    Visiting,
+    Visited,
+};
 
 /// A single file handled by the compiler
 pub const Module = struct {
@@ -23,6 +31,9 @@ pub const Module = struct {
     exports: std.StringHashMap(AST.TypeId),
     file_contents: []const u8,
     mutex: std.Io.Mutex,
+    dependencies: std.ArrayList(*Module),
+    visit_state: ModuleVisitState = .NotVisited,
+    allocator: std.mem.Allocator,
 
     pub fn init(filepath: []const u8, file_contents: []const u8, allocator: std.mem.Allocator) !*Module {
         const module = try allocator.create(Module);
@@ -34,8 +45,28 @@ pub const Module = struct {
             .exports = std.StringHashMap(AST.TypeId).init(allocator),
             .file_contents = file_contents,
             .mutex = std.Io.Mutex.init,
+            .dependencies = .empty,
+            .allocator = allocator,
         };
         return module;
+    }
+
+    pub fn deinit(self: *Module) void {
+        self.exports.deinit();
+        self.dependencies.deinit(self.allocator);
+        self.arena.deinit();
+    }
+
+    fn detect_cycles(self: *Module) !void {
+        if (self.visit_state == .Visited) return;
+        if (self.visit_state == .Visiting) {
+            return WorkspaceError.CircularDependencyError;
+        }
+        self.visit_state = .Visiting;
+        for (self.dependencies.items) |dep| {
+            try dep.detect_cycles();
+        }
+        self.visit_state = .Visited;
     }
 };
 
@@ -72,8 +103,7 @@ pub const Workspace = struct {
         while (modules_it.next()) |mod| {
             self.allocator.free(mod.*.file_contents);
             self.allocator.free(mod.*.filepath);
-            mod.*.exports.deinit();
-            mod.*.arena.deinit();
+            mod.*.deinit();
             self.allocator.destroy(mod.*);
         }
 
@@ -106,21 +136,21 @@ pub const Workspace = struct {
             };
         };
 
-        const module = try Module.init(entrypoint_absolute, file_contents, self.allocator);
+        const entrypoint_module = try Module.init(entrypoint_absolute, file_contents, self.allocator);
         errdefer {
             self.allocator.free(file_contents);
             self.allocator.free(entrypoint_absolute);
-            self.allocator.destroy(module);
+            self.allocator.destroy(entrypoint_module);
         }
 
         try self.modules_mutex.lock(self.io);
-        try self.modules.put(entrypoint_absolute, module);
+        try self.modules.put(entrypoint_absolute, entrypoint_module);
         self.modules_mutex.unlock(self.io);
 
         // Dispatch the entrypoint task to the Io group
         group.async(self.io, worker_parse_module, .{ParserWorkerParam{
             .workspace = self,
-            .module = module,
+            .module = entrypoint_module,
             .group = &group,
             .io = self.io,
         }});
@@ -130,7 +160,39 @@ pub const Workspace = struct {
 
         if (self.diagnostics.has_errors) {
             self.diagnostics.report_all(self.io) catch {};
+            return;
         }
+
+        // detect cycles
+        try entrypoint_module.detect_cycles();
+
+        // sort modules
+        const sorted_modules = try self.sort_modules(entrypoint_module);
+        // type check
+
+        // all modules share the same type registry
+        var type_registry = try TypeRegistry.init(self.allocator);
+        defer type_registry.deinit();
+
+        for (sorted_modules) |module| {
+            std.debug.print("Type checking {s}\n", .{module.filepath});
+            // each module has its own environment and type checker
+            var global_environment = Environment.init(self.allocator, null);
+            defer global_environment.deinit();
+            var type_checker = TypeChecker.init(self.allocator, &type_registry, &global_environment, &self.diagnostics, module, self);
+            _ = type_checker.check(module.ast) catch {};
+
+            if (self.diagnostics.has_content()) {
+                self.diagnostics.report_all(self.io) catch {};
+                if (self.diagnostics.has_errors) {
+                    return;
+                }
+            }
+            std.debug.print("Type checked {s}\n", .{module.filepath});
+        }
+
+        // emit Bytecode
+
     }
 
     /// submits an imported file to the group for parsing
@@ -147,38 +209,50 @@ pub const Workspace = struct {
         try self.modules_mutex.lock(self.io);
         defer self.modules_mutex.unlock(self.io);
 
-        if (self.modules.get(resolved_filepath) != null) {
+        var module: *Module = undefined;
+        var is_new = false;
+
+        if (self.modules.get(resolved_filepath)) |existing_module| {
+            module = existing_module;
             self.allocator.free(resolved_filepath);
-            return;
+        } else {
+            const file_contents = helpers.read_file(resolved_filepath, std.Io.Dir.cwd(), self.io, self.allocator) catch {
+                self.allocator.free(resolved_filepath);
+                try self.diagnostics_mutex.lock(self.io);
+                defer self.diagnostics_mutex.unlock(self.io);
+                try self.diagnostics.add_diagnostic(.{
+                    .column = 0,
+                    .line = 0,
+                    .stage = .Parser,
+                    .severity = .Error,
+                    .message = "Imported file not found",
+                    .file_path = importer_filepath,
+                });
+                return;
+            };
+
+            module = try Module.init(resolved_filepath, file_contents, self.allocator);
+            try self.modules.put(resolved_filepath, module);
+            is_new = true;
+            // resolved_filepath is now owned by the module and modules HashMap
         }
 
-        const file_contents = helpers.read_file(resolved_filepath, std.Io.Dir.cwd(), self.io, self.allocator) catch {
-            self.allocator.free(resolved_filepath);
-            try self.diagnostics_mutex.lock(self.io);
-            defer self.diagnostics_mutex.unlock(self.io);
-            try self.diagnostics.add_diagnostic(.{
-                .column = 0,
-                .line = 0,
-                .stage = .Parser,
-                .severity = .Error,
-                .message = "Imported file not found",
-                .file_path = importer_filepath,
-            });
-            return;
-        };
 
-        const module = try Module.init(resolved_filepath, file_contents, self.allocator);
-        try self.modules.put(resolved_filepath, module);
+        if (self.modules.get(importer_filepath)) |importer_module| {
+            importer_module.dependencies.append(self.allocator, module) catch {};
+        }
 
-        group.async(self.io, worker_parse_module, .{ParserWorkerParam{
-            .workspace = self,
-            .module = module,
-            .group = group,
-            .io = self.io,
-        }});
+        if (is_new) {
+            group.async(self.io, worker_parse_module, .{ParserWorkerParam{
+                .workspace = self,
+                .module = module,
+                .group = group,
+                .io = self.io,
+            }});
+        }
     }
 
-    fn resolve_path(self: *Workspace, importer_filepath: []const u8, import_path: []const u8) ![]const u8 {
+    pub fn resolve_path(self: *Workspace, importer_filepath: []const u8, import_path: []const u8) ![]const u8 {
         if (std.fs.path.isAbsolute(import_path)) {
             return try self.allocator.dupe(u8, import_path);
         }
@@ -232,5 +306,27 @@ pub const Workspace = struct {
         param.module.mutex.unlock(param.io);
 
         std.debug.print("Finished Parsing {s}\n", .{param.module.filepath});
+    }
+
+    fn sort_modules(self: *Workspace, entrypoint_module: *Module) ![]*Module {
+        var modules_it = self.modules.valueIterator();
+        while (modules_it.next()) |module| {
+            module.*.visit_state = .NotVisited;
+        }
+        var list: std.ArrayList(*Module) = .empty;
+        errdefer list.deinit(self.allocator);
+
+        try self.sort_visit(entrypoint_module, &list);
+        return list.toOwnedSlice(self.allocator);
+    }
+
+    fn sort_visit(self: *Workspace, module: *Module, list: *std.ArrayList(*Module)) !void {
+        if (module.visit_state == .Visited) return;
+
+        for (module.dependencies.items) |dep| {
+            try self.sort_visit(dep, list);
+        }
+        module.visit_state = .Visited;
+        try list.append(self.allocator, module);
     }
 };

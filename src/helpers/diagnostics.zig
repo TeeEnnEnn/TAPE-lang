@@ -114,4 +114,8 @@ pub const DiagnosticsReporter = struct {
         self.has_infos = false;
         try stderr.writeStreamingAll(io, RESET);
     }
+
+    pub fn has_content(self: *DiagnosticsReporter) bool {
+        return self.has_errors or self.has_warnings or self.has_infos;
+    }
 };

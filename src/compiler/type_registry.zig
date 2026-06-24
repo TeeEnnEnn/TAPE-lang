@@ -46,12 +46,12 @@ pub const TypeInfo = union(enum) {
     function: struct { args: []TypeId, ret: TypeId },
     coroutine: struct { args: []TypeId, ret: TypeId, yield: TypeId },
     _union: struct { left: TypeId, right: TypeId },
-    _error: struct { name: []const u8, variants: [][]const u8 },
-    _enum: struct { name: []const u8, variants: [][]const u8 },
-    _struct: struct { name: []const u8, fields: []StructField, methods: []StructMethod },
-    _type: struct { name: []const u8, resolved_type: TypeId },
+    _error: struct { name: []const u8, variants: [][]const u8, source_file: []const u8 },
+    _enum: struct { name: []const u8, variants: [][]const u8, source_file: []const u8 },
+    _struct: struct { name: []const u8, fields: []StructField, methods: []StructMethod, source_file: []const u8 },
+    _type: struct { name: []const u8, resolved_type: TypeId, source_file: []const u8 },
     shape: []ShapeField,
-    identifier: struct { name: []const u8, generics: ?[]TypeId }, // errors, enums, structs
+    identifier: struct { name: []const u8, source_file: []const u8, generics: ?[]TypeId }, // errors, enums, structs
 };
 
 pub const TypeRegistry = struct {
@@ -142,8 +142,9 @@ pub const TypeRegistry = struct {
 
             .identifier_type => |identifier| {
                 const name = identifier.name.lexeme;
+                const source_file = identifier.source_file;
 
-                const existing_type = self.get_named_type(name);
+                const existing_type = self.get_named_type(name, source_file);
                 if (existing_type) |id| {
                     return id;
                 }
@@ -360,11 +361,11 @@ pub const TypeRegistry = struct {
         return id;
     }
 
-    pub fn add_type_type(self: *TypeRegistry, name: []const u8, resolved_type: TypeId) !TypeId {
+    pub fn add_type_type(self: *TypeRegistry, name: []const u8, resolved_type: TypeId, source_file: []const u8) !TypeId {
         for (self.types.items, 0..) |info, index| {
             switch (info) {
                 ._type => |existing_type| {
-                    if (!std.mem.eql(u8, existing_type.name, name)) continue;
+                    if (!std.mem.eql(u8, existing_type.name, name) or !std.mem.eql(u8, existing_type.source_file, source_file)) continue;
                     if (existing_type.resolved_type != resolved_type) {
                         return TypeRegistryError.TypeResolutionConflict; // names are the same but the resolved types differ
                     }
@@ -376,15 +377,15 @@ pub const TypeRegistry = struct {
 
         // add new type
         const id = @as(TypeId, @intCast(self.types.items.len));
-        try self.types.append(self.allocator, .{ ._type = .{ .name = name, .resolved_type = resolved_type } });
+        try self.types.append(self.allocator, .{ ._type = .{ .name = name, .resolved_type = resolved_type, .source_file = source_file } });
         return id;
     }
 
-    pub fn add_struct_type(self: *TypeRegistry, name: []const u8, fields: []StructField, methods: []StructMethod) !TypeId {
+    pub fn add_struct_type(self: *TypeRegistry, name: []const u8, fields: []StructField, methods: []StructMethod, source_file: []const u8) !TypeId {
         for (self.types.items, 0..) |info, index| {
             switch (info) {
                 ._struct => |existing_struct| {
-                    if (!std.mem.eql(u8, existing_struct.name, name)) continue;
+                    if (!std.mem.eql(u8, existing_struct.name, name) or !std.mem.eql(u8, existing_struct.source_file, source_file)) continue;
                     if (existing_struct.fields.len != fields.len or existing_struct.methods.len != methods.len) {
                         return TypeRegistryError.TypeResolutionConflict; // names are the same but the number of fields or methods differ
                     }
@@ -410,15 +411,15 @@ pub const TypeRegistry = struct {
 
         // add new type
         const id = @as(TypeId, @intCast(self.types.items.len));
-        try self.types.append(self.allocator, .{ ._struct = .{ .name = name, .fields = fields, .methods = methods } });
+        try self.types.append(self.allocator, .{ ._struct = .{ .name = name, .fields = fields, .methods = methods, .source_file = source_file } });
         return id;
     }
 
-    pub fn add_error_type(self: *TypeRegistry, name: []const u8, variants: [][]const u8) !TypeId {
+    pub fn add_error_type(self: *TypeRegistry, name: []const u8, variants: [][]const u8, source_file: []const u8) !TypeId {
         for (self.types.items, 0..) |info, index| {
             switch (info) {
                 ._error => |existing_error| {
-                    if (!std.mem.eql(u8, existing_error.name, name)) continue;
+                    if (!std.mem.eql(u8, existing_error.name, name) or !std.mem.eql(u8, existing_error.source_file, source_file)) continue;
                     if (existing_error.variants.len != variants.len) {
                         return TypeRegistryError.TypeResolutionConflict; // names are the same but the number of variants differ
                     }
@@ -438,15 +439,15 @@ pub const TypeRegistry = struct {
 
         // add new type
         const id = @as(TypeId, @intCast(self.types.items.len));
-        try self.types.append(self.allocator, .{ ._error = .{ .name = name, .variants = variants } });
+        try self.types.append(self.allocator, .{ ._error = .{ .name = name, .variants = variants, .source_file = source_file } });
         return id;
     }
 
-    pub fn add_enum_type(self: *TypeRegistry, name: []const u8, variants: [][]const u8) !TypeId {
+    pub fn add_enum_type(self: *TypeRegistry, name: []const u8, variants: [][]const u8, source_file: []const u8) !TypeId {
         for (self.types.items, 0..) |info, index| {
             switch (info) {
                 ._enum => |existing_enum| {
-                    if (!std.mem.eql(u8, existing_enum.name, name)) continue;
+                    if (!std.mem.eql(u8, existing_enum.name, name) or !std.mem.eql(u8, existing_enum.source_file, source_file)) continue;
                     if (existing_enum.variants.len != variants.len) {
                         return TypeRegistryError.TypeResolutionConflict; // names are the same but the number of variants differ
                     }
@@ -466,7 +467,7 @@ pub const TypeRegistry = struct {
 
         // add new type
         const id = @as(TypeId, @intCast(self.types.items.len));
-        try self.types.append(self.allocator, .{ ._enum = .{ .name = name, .variants = variants } });
+        try self.types.append(self.allocator, .{ ._enum = .{ .name = name, .variants = variants, .source_file = source_file } });
         return id;
     }
 
@@ -474,7 +475,34 @@ pub const TypeRegistry = struct {
         return self.types.items[id];
     }
 
-    pub fn get_named_type(self: *TypeRegistry, name: []const u8) ?TypeId {
+    pub fn get_named_type(self: *TypeRegistry, name: []const u8, source_file: []const u8) ?TypeId {
+        // First try exact match with source_file (local types take precedence)
+        for (self.types.items, 0..) |info, index| {
+            switch (info) {
+                ._enum => |enum_info| {
+                    if (!std.mem.eql(u8, enum_info.name, name)) continue;
+                    if (!std.mem.eql(u8, enum_info.source_file, source_file)) continue;
+                    return @as(TypeId, @intCast(index));
+                },
+                ._struct => |struct_info| {
+                    if (!std.mem.eql(u8, struct_info.name, name)) continue;
+                    if (!std.mem.eql(u8, struct_info.source_file, source_file)) continue;
+                    return @as(TypeId, @intCast(index));
+                },
+                ._type => |type_info| {
+                    if (!std.mem.eql(u8, type_info.name, name)) continue;
+                    if (!std.mem.eql(u8, type_info.source_file, source_file)) continue;
+                    return @as(TypeId, @intCast(index));
+                },
+                ._error => |error_info| {
+                    if (!std.mem.eql(u8, error_info.name, name)) continue;
+                    if (!std.mem.eql(u8, error_info.source_file, source_file)) continue;
+                    return @as(TypeId, @intCast(index));
+                },
+                else => continue,
+            }
+        }
+        // Fallback: match by name only (handles types imported via use_decl)
         for (self.types.items, 0..) |info, index| {
             switch (info) {
                 ._enum => |enum_info| {

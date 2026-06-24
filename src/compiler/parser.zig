@@ -903,7 +903,7 @@ pub const Parser = struct {
             }
 
             const id_type = try self.allocator.create(AST.IdentifierType);
-            id_type.* = .{ .name = name, .generic_args = generic_args };
+            id_type.* = .{ .name = name, .generic_args = generic_args, .source_file = self.module.filepath };
             const node = try self.allocator.create(AST.ASTNode);
             node.* = .{ .identifier_type = id_type };
             left = node;
@@ -1476,8 +1476,12 @@ pub const Parser = struct {
         const module = self.previous;
         try self.consume(.SEMICOLON);
 
+        const workspace_resolved_module_path = try self.workspace.resolve_path(self.module.filepath, module.lexeme[1 .. module.lexeme.len - 1]);
+        const parser_resolved_module_path = try self.allocator.dupe(u8, workspace_resolved_module_path);
+        self.workspace.allocator.free(workspace_resolved_module_path);
+
         const use_decl = try self.allocator.create(AST.UseDecl);
-        use_decl.* = .{ .items = try items.toOwnedSlice(self.allocator), .module = module, .line = module.line, .column = module.column, .modifier_pub = is_pub };
+        use_decl.* = .{ .items = try items.toOwnedSlice(self.allocator), .module = module, .line = module.line, .column = module.column, .modifier_pub = is_pub, .resolved_module_path = parser_resolved_module_path };
 
         // add the module to the workspace
         self.workspace.submit_import(self.group, self.module.filepath, module.lexeme[1 .. module.lexeme.len - 1]) catch |err| {
