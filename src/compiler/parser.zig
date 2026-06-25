@@ -50,13 +50,13 @@ pub const Parser = struct {
         }
     }
 
-    fn consume(self: *Parser, expected: TokenType) ParserError!void {
+    fn consume(self: *Parser, expected: TokenType, diagnostic_message: []const u8) ParserError!void {
         if (self.current.token_type == expected) {
             try self.advance();
             return;
         }
         try self.workspace.diagnostics_mutex.lock(self.io);
-        try self.workspace.diagnostics.add_diagnostic(.{ .column = self.scanner.column(), .line = self.scanner.line, .stage = .Parser, .severity = .Error, .message = "Unexpected token", .file_path = self.module.filepath });
+        try self.workspace.diagnostics.add_diagnostic(.{ .column = self.scanner.column(), .line = self.scanner.line, .stage = .Parser, .severity = .Error, .message = diagnostic_message, .file_path = self.module.filepath });
         self.workspace.diagnostics_mutex.unlock(self.io);
         return ParserError.UnexpectedToken;
     }
@@ -425,7 +425,7 @@ pub const Parser = struct {
                         if (!try self.match(.COMMA)) break;
                     }
                 }
-                try self.consume(.RIGHT_PAREN);
+                try self.consume(.RIGHT_PAREN, "Expected ')' after function arguments");
 
                 const call = try self.allocator.create(AST.CallExpr);
                 call.* = .{ .expr = expr, .args = try args.toOwnedSlice(self.allocator), .line = self.previous.line, .column = self.previous.column };
@@ -435,7 +435,7 @@ pub const Parser = struct {
             } else if (try self.match(.LEFT_SQUARE)) {
                 // Index
                 const index = try self.parse_expression();
-                try self.consume(.RIGHT_SQUARE);
+                try self.consume(.RIGHT_SQUARE, "Expected ']' after index expression");
 
                 const index_expr = try self.allocator.create(AST.IndexExpr);
                 index_expr.* = .{ .expr = expr, .index = index, .line = self.previous.line, .column = self.previous.column };
@@ -444,7 +444,7 @@ pub const Parser = struct {
                 expr = node;
             } else if (try self.match(.DOT)) {
                 // dot member access
-                try self.consume(.IDENTIFIER);
+                try self.consume(.IDENTIFIER, "Expected identifier after '.'"); // TODO: make this also allow for numbers for tuple indexing
                 const member = self.previous;
 
                 const inst_expr = try self.allocator.create(AST.DotExpr);
@@ -454,7 +454,7 @@ pub const Parser = struct {
                 expr = node;
             } else if (try self.match(.COLON_COLON)) {
                 // Static Member
-                try self.consume(.IDENTIFIER);
+                try self.consume(.IDENTIFIER, "Expected identifier after '::'");
                 const member = self.previous;
 
                 const static_expr = try self.allocator.create(AST.StaticMemberExpr);
@@ -573,7 +573,7 @@ pub const Parser = struct {
     }
 
     fn parse_group_or_tuple(self: *Parser) ParserError!*AST.ASTNode {
-        try self.consume(.LEFT_PAREN);
+        try self.consume(.LEFT_PAREN, "Expected '(' at the start of a group or tuple");
 
         // Empty tuple: ()
         if (try self.match(.RIGHT_PAREN)) {
@@ -597,7 +597,7 @@ pub const Parser = struct {
                     if (!try self.match(.COMMA)) break;
                 }
             }
-            try self.consume(.RIGHT_PAREN);
+            try self.consume(.RIGHT_PAREN, "Expected ')' at the end of a tuple");
 
             const tuple_expr = try self.allocator.create(AST.TupleExpr);
             tuple_expr.* = .{ .exprs = try elements.toOwnedSlice(self.allocator), .resolved_type = 0, .line = self.previous.line, .column = self.previous.column };
@@ -606,7 +606,7 @@ pub const Parser = struct {
             return node;
         } else {
             // It's a group: (expr)
-            try self.consume(.RIGHT_PAREN);
+            try self.consume(.RIGHT_PAREN, "Expected ')' at the end of a grouping expression");
             const group = try self.allocator.create(AST.GroupExpr);
             group.* = .{ .expr = first_expr, .resolved_type = 0, .line = self.previous.line, .column = self.previous.column };
             const node = try self.allocator.create(AST.ASTNode);
@@ -616,17 +616,17 @@ pub const Parser = struct {
     }
 
     fn parse_new_expression(self: *Parser) ParserError!*AST.ASTNode {
-        try self.consume(.IDENTIFIER);
+        try self.consume(.IDENTIFIER, "Expected identifier after 'new'");
         const struct_name = self.previous;
 
-        try self.consume(.LEFT_BRACE);
+        try self.consume(.LEFT_BRACE, "Expected '{' to start struct initialization");
         var fields: std.ArrayList(AST.StructInitField) = .empty;
 
         if (!self.check(.RIGHT_BRACE)) {
             while (true) {
-                try self.consume(.IDENTIFIER);
+                try self.consume(.IDENTIFIER, "Expected field name after");
                 const field_name = self.previous;
-                try self.consume(.EQUAL);
+                try self.consume(.EQUAL, "Expected '=' after field name to initialize it");
                 const value = try self.parse_expression();
 
                 try fields.append(self.allocator, AST.StructInitField{ .name = field_name, .value = value });
@@ -634,7 +634,7 @@ pub const Parser = struct {
                 if (!try self.match(.COMMA)) break;
             }
         }
-        try self.consume(.RIGHT_BRACE);
+        try self.consume(.RIGHT_BRACE, "Expected '}' to end struct initialization");
 
         const new_expr = try self.allocator.create(AST.NewExpr);
         new_expr.* = .{ .struct_name = struct_name, .fields = try fields.toOwnedSlice(self.allocator), .resolved_type = 0, .line = struct_name.line, .column = struct_name.column };
@@ -644,7 +644,7 @@ pub const Parser = struct {
     }
 
     fn parse_identifier_expression(self: *Parser) ParserError!*AST.ASTNode {
-        try self.consume(.IDENTIFIER);
+        try self.consume(.IDENTIFIER, "Expected identifier");
         const token = self.previous;
         const identifier = try self.allocator.create(AST.IdentifierExpr);
         identifier.* = .{ .name = token, .line = token.line, .column = token.column };
@@ -654,7 +654,7 @@ pub const Parser = struct {
     }
 
     fn parse_anonymous_coroutine(self: *Parser) ParserError!*AST.ASTNode {
-        try self.consume(.LEFT_PAREN);
+        try self.consume(.LEFT_PAREN, "Expected '(' to start anonymous coroutine parameter list.");
         var params: std.ArrayList(*AST.TypedNamedField) = .empty;
 
         if (!self.check(.RIGHT_PAREN)) {
@@ -664,14 +664,14 @@ pub const Parser = struct {
                 if (!try self.match(.COMMA)) break;
             }
         }
-        try self.consume(.RIGHT_PAREN);
+        try self.consume(.RIGHT_PAREN, "Expected ')' to end anonymous coroutine parameter list.");
 
-        try self.consume(.ARROW);
-        try self.consume(.LEFT_PAREN);
+        try self.consume(.ARROW, "Expected '->' to separate anonymous coroutine parameter list from return type.");
+        try self.consume(.LEFT_PAREN, "Expected '(' to start anonymous coroutine yield, return type annotation.");
         const yield_type = try self.parse_type_expression();
-        try self.consume(.COMMA);
+        try self.consume(.COMMA, "Expected ',' to separate yield type from return type.");
         const return_type = try self.parse_type_expression();
-        try self.consume(.RIGHT_PAREN);
+        try self.consume(.RIGHT_PAREN, "Expected ')' to end anonymous coroutine yield, return type annotation.");
 
         const body = try self.parse_statement();
 
@@ -691,7 +691,7 @@ pub const Parser = struct {
     }
 
     fn parse_anonymous_function(self: *Parser) ParserError!*AST.ASTNode {
-        try self.consume(.LEFT_PAREN);
+        try self.consume(.LEFT_PAREN, "Expected '(' to start anonymous function parameter list.");
         var params: std.ArrayList(*AST.TypedNamedField) = .empty;
 
         if (!self.check(.RIGHT_PAREN)) {
@@ -701,9 +701,9 @@ pub const Parser = struct {
                 if (!try self.match(.COMMA)) break;
             }
         }
-        try self.consume(.RIGHT_PAREN);
+        try self.consume(.RIGHT_PAREN, "Expected ')' to end anonymous function parameter list.");
 
-        try self.consume(.ARROW);
+        try self.consume(.ARROW, "Expected '->' to separate anonymous function parameter list from return type.");
         const return_type = try self.parse_type_expression();
 
         const body = try self.parse_statement();
@@ -723,9 +723,9 @@ pub const Parser = struct {
     }
 
     fn parse_typed_named_field(self: *Parser) ParserError!*AST.TypedNamedField {
-        try self.consume(.IDENTIFIER);
+        try self.consume(.IDENTIFIER, "Expected identifier for typed named field.");
         const token = self.previous;
-        try self.consume(.COLON);
+        try self.consume(.COLON, "Expected ':' to separate identifier from type annotation.");
         const type_ = try self.parse_type_expression();
         const named_field = try self.allocator.create(AST.TypedNamedField);
         named_field.* = .{ .name = token, .type_annotation = type_ };
@@ -733,9 +733,9 @@ pub const Parser = struct {
     }
 
     fn parse_struct_field(self: *Parser, is_public: bool, is_static: bool) ParserError!*AST.TypedNamedStructField {
-        try self.consume(.IDENTIFIER);
+        try self.consume(.IDENTIFIER, "Expected identifier for struct field.");
         const token = self.previous;
-        try self.consume(.COLON);
+        try self.consume(.COLON, "Expected ':' to separate identifier from type annotation.");
         const type_ = try self.parse_type_expression();
         var has_default = false;
         var default_value: ?*AST.ASTNode = null;
@@ -755,7 +755,7 @@ pub const Parser = struct {
             left = try self.parse_shape_expression();
         } else if (try self.match(.FN)) {
             // Function Type: fn (Int, Float) -> Bool
-            try self.consume(.LEFT_PAREN);
+            try self.consume(.LEFT_PAREN, "Expected '(' to start function type parameters.");
             var params: std.ArrayList(*AST.ASTNode) = .empty;
             if (!self.check(.RIGHT_PAREN)) {
                 while (true) {
@@ -763,9 +763,9 @@ pub const Parser = struct {
                     if (!try self.match(.COMMA)) break;
                 }
             }
-            try self.consume(.RIGHT_PAREN);
+            try self.consume(.RIGHT_PAREN, "Expected ')' to end function type parameters.");
 
-            try self.consume(.ARROW);
+            try self.consume(.ARROW, "Expected '->' to separate function type parameters and return type.");
             const return_type = try self.parse_type_expression();
 
             const fn_type = try self.allocator.create(AST.FnType);
@@ -775,7 +775,7 @@ pub const Parser = struct {
             left = node;
         } else if (try self.match(.CO)) {
             // Coroutine Type: co (Int, Float) -> (Bool, Int)
-            try self.consume(.LEFT_PAREN);
+            try self.consume(.LEFT_PAREN, "Expected '(' to start coroutine type parameters.");
             var params: std.ArrayList(*AST.ASTNode) = .empty;
             if (!self.check(.RIGHT_PAREN)) {
                 while (true) {
@@ -783,15 +783,15 @@ pub const Parser = struct {
                     if (!try self.match(.COMMA)) break;
                 }
             }
-            try self.consume(.RIGHT_PAREN);
+            try self.consume(.RIGHT_PAREN, "Expected ')' to end coroutine type parameters.");
 
-            try self.consume(.ARROW);
-            try self.consume(.CO);
-            try self.consume(.LEFT_SQUARE);
+            try self.consume(.ARROW, "Expected '->' to separate coroutine type parameters and return type.");
+            try self.consume(.CO, "Expected 'co' to start coroutine type.");
+            try self.consume(.LEFT_SQUARE, "Expected '[' to start coroutine type return type.");
             const yield_type = try self.parse_type_expression();
-            try self.consume(.COMMA);
+            try self.consume(.COMMA, "Expected ',' to separate coroutine type return type and yield type.");
             const return_type = try self.parse_type_expression();
-            try self.consume(.RIGHT_SQUARE);
+            try self.consume(.RIGHT_SQUARE, "Expected ']' to end coroutine type return type.");
 
             const co_type = try self.allocator.create(AST.CoType);
             co_type.* = .{ .params = try params.toOwnedSlice(self.allocator), .return_type = return_type, .yield_type = yield_type };
@@ -835,36 +835,36 @@ pub const Parser = struct {
             node.* = .{ .never_type = never_type };
             left = node;
         } else if (try self.match(.ARRAY_TYPE)) {
-            try self.consume(.LEFT_SQUARE);
+            try self.consume(.LEFT_SQUARE, "Expected '[' to start array type.");
             const element = try self.parse_type_expression();
-            try self.consume(.RIGHT_SQUARE);
+            try self.consume(.RIGHT_SQUARE, "Expected ']' to end array type.");
             const array_type = try self.allocator.create(AST.ArrayType);
             array_type.* = .{ .element_type = element };
             const node = try self.allocator.create(AST.ASTNode);
             node.* = .{ .array_type = array_type };
             left = node;
         } else if (try self.match(.TABLE_TYPE)) {
-            try self.consume(.LEFT_SQUARE);
+            try self.consume(.LEFT_SQUARE, "Expected '[' to start table type.");
             const key = try self.parse_type_expression();
-            try self.consume(.COMMA);
+            try self.consume(.COMMA, "Expected ',' to separate key type from value type.");
             const val = try self.parse_type_expression();
-            try self.consume(.RIGHT_SQUARE);
+            try self.consume(.RIGHT_SQUARE, "Expected ']' to end table type.");
             const table_type = try self.allocator.create(AST.TableType);
             table_type.* = .{ .key_type = key, .element_type = val };
             const node = try self.allocator.create(AST.ASTNode);
             node.* = .{ .table_type = table_type };
             left = node;
         } else if (try self.match(.RANGE_TYPE)) {
-            try self.consume(.LEFT_SQUARE);
+            try self.consume(.LEFT_SQUARE, "Expected '[' to start range type.");
             const start = try self.parse_type_expression();
-            try self.consume(.COMMA);
+            try self.consume(.COMMA, "Expected ',' to separate start from end.");
             const end = try self.parse_type_expression();
             var step: u32 = 1;
             if (try self.match(.COMMA)) {
-                try self.consume(.INT);
+                try self.consume(.INT, "Expected integer for step size.");
                 step = try std.fmt.parseInt(u32, self.previous.lexeme, 10);
             }
-            try self.consume(.RIGHT_SQUARE);
+            try self.consume(.RIGHT_SQUARE, "Expected ']' to end range type.");
             const range_type = try self.allocator.create(AST.RangeType);
             range_type.* = .{ .start = start, .end = end, .step = step };
             const node = try self.allocator.create(AST.ASTNode);
@@ -879,7 +879,7 @@ pub const Parser = struct {
                     if (!try self.match(.COMMA)) break;
                 }
             }
-            try self.consume(.RIGHT_PAREN);
+            try self.consume(.RIGHT_PAREN, "Expected ')' to end tuple type.");
 
             const tuple_type = try self.allocator.create(AST.TupleType);
             tuple_type.* = .{ .element_types = try elements.toOwnedSlice(self.allocator) };
@@ -888,7 +888,7 @@ pub const Parser = struct {
             left = node;
         } else {
             // Identifiers and Generics: Array[Int]
-            try self.consume(.IDENTIFIER);
+            try self.consume(.IDENTIFIER, "Expected identifier for type expression.");
             const name = self.previous;
 
             var generic_args: ?[]*AST.ASTNode = null;
@@ -898,7 +898,7 @@ pub const Parser = struct {
                     try args.append(self.allocator, try self.parse_type_expression());
                     if (!try self.match(.COMMA)) break;
                 }
-                try self.consume(.RIGHT_SQUARE);
+                try self.consume(.RIGHT_SQUARE, "Expected ']' to end generic argument list.");
                 generic_args = try args.toOwnedSlice(self.allocator);
             }
 
@@ -928,16 +928,16 @@ pub const Parser = struct {
 
         while (true) {
             const key_type = try self.parse_expression();
-            try self.consume(.COLON);
+            try self.consume(.COLON, "Expected ':' to separate key from value.");
             const value_type = try self.parse_expression();
             try key_types.append(self.allocator, key_type);
             try value_types.append(self.allocator, value_type);
             if (self.check(.RIGHT_BRACE)) {
                 break;
             }
-            try self.consume(.COMMA);
+            try self.consume(.COMMA, "Expected ',' to separate key-value pairs in table literal.");
         }
-        try self.consume(.RIGHT_BRACE);
+        try self.consume(.RIGHT_BRACE, "Expected '}' to end table literal.");
 
         const table_literal = try self.allocator.create(AST.TableExpr);
         table_literal.* = .{
@@ -961,9 +961,9 @@ pub const Parser = struct {
             if (self.check(.RIGHT_SQUARE)) {
                 break;
             }
-            try self.consume(.COMMA);
+            try self.consume(.COMMA, "Expected ',' to separate array elements.");
         }
-        try self.consume(.RIGHT_SQUARE);
+        try self.consume(.RIGHT_SQUARE, "Expected ']' to end array literal.");
 
         const array_literal = try self.allocator.create(AST.ArrayExpr);
         array_literal.* = .{
@@ -979,7 +979,7 @@ pub const Parser = struct {
     }
 
     fn parse_var_declaration(self: *Parser, is_pub: bool) ParserError!*AST.ASTNode {
-        try self.consume(.IDENTIFIER);
+        try self.consume(.IDENTIFIER, "Expected identifier for variable declaration.");
         const name = self.previous;
 
         var type_annotation: ?*AST.ASTNode = null;
@@ -987,9 +987,9 @@ pub const Parser = struct {
             type_annotation = try self.parse_type_expression();
         }
 
-        try self.consume(.EQUAL);
+        try self.consume(.EQUAL, "Expected '=' to separate variable name from initializer.");
         const initializer = try self.parse_expression();
-        try self.consume(.SEMICOLON);
+        try self.consume(.SEMICOLON, "Expected ';' to end variable declaration.");
 
         const var_decl = try self.allocator.create(AST.VarDecl);
         var_decl.* = .{
@@ -1008,10 +1008,10 @@ pub const Parser = struct {
     }
 
     fn parse_function_declaration(self: *Parser, is_pub: bool, is_static: bool) ParserError!*AST.ASTNode {
-        try self.consume(.IDENTIFIER);
+        try self.consume(.IDENTIFIER, "Expected identifier for function declaration.");
         const name = self.previous;
 
-        try self.consume(.LEFT_PAREN);
+        try self.consume(.LEFT_PAREN, "Expected '(' to start function parameters.");
         var params: std.ArrayList(*AST.TypedNamedField) = .empty;
 
         if (!self.check(.RIGHT_PAREN)) {
@@ -1021,9 +1021,9 @@ pub const Parser = struct {
                 if (!try self.match(.COMMA)) break;
             }
         }
-        try self.consume(.RIGHT_PAREN);
+        try self.consume(.RIGHT_PAREN, "Expected ')' to end function parameters.");
 
-        try self.consume(.ARROW);
+        try self.consume(.ARROW, "Expected '->' to separate parameters from return type.");
         const return_type = try self.parse_type_expression();
 
         const body = try self.parse_statement();
@@ -1047,10 +1047,10 @@ pub const Parser = struct {
     }
 
     fn parse_coroutine_declaration(self: *Parser, is_pub: bool, is_static: bool) ParserError!*AST.ASTNode {
-        try self.consume(.IDENTIFIER);
+        try self.consume(.IDENTIFIER, "Expected identifier for coroutine declaration.");
         const name = self.previous;
 
-        try self.consume(.LEFT_PAREN);
+        try self.consume(.LEFT_PAREN, "Expected '(' to start coroutine parameters.");
         var params: std.ArrayList(*AST.TypedNamedField) = .empty;
 
         if (!self.check(.RIGHT_PAREN)) {
@@ -1060,14 +1060,14 @@ pub const Parser = struct {
                 if (!try self.match(.COMMA)) break;
             }
         }
-        try self.consume(.RIGHT_PAREN);
+        try self.consume(.RIGHT_PAREN, "Expected ')' to end coroutine parameters.");
 
-        try self.consume(.ARROW);
-        try self.consume(.LEFT_PAREN);
+        try self.consume(.ARROW, "Expected '->' to separate parameters from return type.");
+        try self.consume(.LEFT_PAREN, "Expected '(' to start coroutine yield, return type.");
         const yield_type = try self.parse_type_expression();
-        try self.consume(.COMMA);
+        try self.consume(.COMMA, "Expected ',' to separate yield type from return type.");
         const return_type = try self.parse_type_expression();
-        try self.consume(.RIGHT_PAREN);
+        try self.consume(.RIGHT_PAREN, "Expected ')' to end coroutine yield, return type.");
 
         const body = try self.parse_statement();
 
@@ -1089,7 +1089,7 @@ pub const Parser = struct {
     }
 
     fn parse_shape_expression(self: *Parser) ParserError!*AST.ASTNode {
-        try self.consume(.LEFT_BRACE);
+        try self.consume(.LEFT_BRACE, "Expected '{' to start shape expression.");
         var fields: std.ArrayList(*AST.TypedNamedField) = .empty;
         if (!self.check(.RIGHT_BRACE)) {
             while (true) {
@@ -1098,10 +1098,10 @@ pub const Parser = struct {
                 if (self.check(.RIGHT_BRACE)) {
                     break;
                 }
-                try self.consume(.COMMA);
+                try self.consume(.COMMA, "Expected ',' to separate shape fields.");
             }
         }
-        try self.consume(.RIGHT_BRACE);
+        try self.consume(.RIGHT_BRACE, "Expected '}' to end shape expression.");
         const shape_expr = try self.allocator.create(AST.ShapeExpr);
         shape_expr.* = .{ .fields = try fields.toOwnedSlice(self.allocator), .line = self.previous.line, .column = self.previous.column };
         const node = try self.allocator.create(AST.ASTNode);
@@ -1110,9 +1110,9 @@ pub const Parser = struct {
     }
 
     fn parse_type_declaration(self: *Parser, is_pub: bool) ParserError!*AST.ASTNode {
-        try self.consume(.IDENTIFIER);
+        try self.consume(.IDENTIFIER, "Expected identifier for type declaration.");
         const name = self.previous;
-        try self.consume(.EQUAL);
+        try self.consume(.EQUAL, "Expected '=' to start type annotation.");
         if (self.check(.LEFT_BRACE)) {
             const shape_expr = try self.parse_shape_expression();
             const type_decl = try self.allocator.create(AST.TypeDecl);
@@ -1135,14 +1135,14 @@ pub const Parser = struct {
     }
 
     fn parse_for_statement(self: *Parser) ParserError!*AST.ASTNode {
-        try self.consume(.LEFT_PAREN);
-        try self.consume(.VAR);
-        try self.consume(.IDENTIFIER);
+        try self.consume(.LEFT_PAREN, "Expected '(' to start for statement.");
+        try self.consume(.VAR, "Expected 'var' to declare iterator.");
+        try self.consume(.IDENTIFIER, "Expected identifier for iterator name.");
         const iterator_name = self.previous; // the type of this is var will be int
-        try self.consume(.IN);
+        try self.consume(.IN, "Expected 'in' to start iterator expression.");
         // for now, assume the iterator expression is a range expression
         const range_expr = try self.parse_expression();
-        try self.consume(.RIGHT_PAREN);
+        try self.consume(.RIGHT_PAREN, "Expected ')' to end for statement.");
         const body = try self.parse_statement();
         const for_stmt = try self.allocator.create(AST.ForStmt);
         for_stmt.* = .{ .iterator_name = iterator_name, .iterator_expr = range_expr, .body = body, .line = iterator_name.line, .column = iterator_name.column };
@@ -1152,9 +1152,9 @@ pub const Parser = struct {
     }
 
     fn parse_while_statement(self: *Parser) ParserError!*AST.ASTNode {
-        try self.consume(.LEFT_PAREN);
+        try self.consume(.LEFT_PAREN, "Expected '(' to start while statement condition.");
         const condition = try self.parse_expression();
-        try self.consume(.RIGHT_PAREN);
+        try self.consume(.RIGHT_PAREN, "Expected ')' to end while statement condition.");
         const body = try self.parse_statement();
         const while_stmt = try self.allocator.create(AST.WhileStmt);
         while_stmt.* = .{ .condition = condition, .body = body, .line = self.previous.line, .column = self.previous.column };
@@ -1164,14 +1164,14 @@ pub const Parser = struct {
     }
 
     fn parse_if_statement(self: *Parser) ParserError!*AST.ASTNode {
-        try self.consume(.LEFT_PAREN);
+        try self.consume(.LEFT_PAREN, "Expected '(' to start if statement condition.");
         const condition = try self.parse_expression();
-        try self.consume(.RIGHT_PAREN);
+        try self.consume(.RIGHT_PAREN, "Expected ')' to end if statement condition.");
         const then_branch = try self.parse_statement();
 
         var else_branch: ?*AST.ASTNode = null;
         if (self.check(.ELSE)) {
-            try self.consume(.ELSE);
+            try self.consume(.ELSE, "Expected 'else' to start else branch.");
             else_branch = try self.parse_statement();
         }
 
@@ -1184,7 +1184,7 @@ pub const Parser = struct {
 
     fn parse_expression_statement(self: *Parser) ParserError!*AST.ASTNode {
         const expr = try self.parse_expression();
-        try self.consume(.SEMICOLON);
+        try self.consume(.SEMICOLON, "Expected ';' to end expression statement.");
         const expr_stmt = try self.allocator.create(AST.ExprStmt);
         expr_stmt.* = .{ .expr = expr, .line = self.previous.line, .column = self.previous.column };
         const node = try self.allocator.create(AST.ASTNode);
@@ -1194,7 +1194,7 @@ pub const Parser = struct {
 
     fn parse_return_statement(self: *Parser) ParserError!*AST.ASTNode {
         if (self.check(.SEMICOLON)) {
-            try self.consume(.SEMICOLON);
+            try self.consume(.SEMICOLON, "Expected ';' to end return statement.");
             const return_stmt = try self.allocator.create(AST.ReturnStmt);
             return_stmt.* = .{ .expr = null, .line = self.previous.line, .column = self.previous.column };
             const node = try self.allocator.create(AST.ASTNode);
@@ -1203,7 +1203,7 @@ pub const Parser = struct {
         }
 
         const expr = try self.parse_expression();
-        try self.consume(.SEMICOLON);
+        try self.consume(.SEMICOLON, "Expected ';' to end return statement.");
         const return_stmt = try self.allocator.create(AST.ReturnStmt);
         return_stmt.* = .{ .expr = expr, .line = self.previous.line, .column = self.previous.column };
         const node = try self.allocator.create(AST.ASTNode);
@@ -1212,7 +1212,7 @@ pub const Parser = struct {
     }
 
     fn parse_break_statement(self: *Parser) ParserError!*AST.ASTNode {
-        try self.consume(.SEMICOLON);
+        try self.consume(.SEMICOLON, "Expected ';' to end break statement.");
         const break_stmt = try self.allocator.create(AST.BreakStmt);
         break_stmt.* = .{ .line = self.previous.line, .column = self.previous.column };
         const node = try self.allocator.create(AST.ASTNode);
@@ -1221,7 +1221,7 @@ pub const Parser = struct {
     }
 
     fn parse_continue_statement(self: *Parser) ParserError!*AST.ASTNode {
-        try self.consume(.SEMICOLON);
+        try self.consume(.SEMICOLON, "Expected ';' to end continue statement.");
         const continue_stmt = try self.allocator.create(AST.ContinueStmt);
         continue_stmt.* = .{ .line = self.previous.line, .column = self.previous.column };
         const node = try self.allocator.create(AST.ASTNode);
@@ -1231,7 +1231,7 @@ pub const Parser = struct {
 
     fn parse_panic_statement(self: *Parser) ParserError!*AST.ASTNode {
         const expr = try self.parse_expression();
-        try self.consume(.SEMICOLON);
+        try self.consume(.SEMICOLON, "Expected ';' to end panic statement.");
         const panic_stmt = try self.allocator.create(AST.PanicStmt);
         panic_stmt.* = .{ .expr = expr, .line = self.previous.line, .column = self.previous.column };
         const node = try self.allocator.create(AST.ASTNode);
@@ -1240,14 +1240,14 @@ pub const Parser = struct {
     }
 
     fn parse_block_statement(self: *Parser) ParserError!*AST.ASTNode {
-        try self.consume(.LEFT_BRACE);
+        try self.consume(.LEFT_BRACE, "Expected '{' to start block statement.");
         var statements: std.ArrayList(*AST.ASTNode) = .empty;
         while (!self.check(.RIGHT_BRACE) and !self.check(.EOF)) {
             const stmt = try self.parse_declaration();
             try statements.append(self.allocator, stmt);
         }
 
-        try self.consume(.RIGHT_BRACE);
+        try self.consume(.RIGHT_BRACE, "Expected '}' to end block statement.");
 
         const block = try self.allocator.create(AST.BlockStmt);
         block.* = .{ .stmts = try statements.toOwnedSlice(self.allocator), .line = self.previous.line, .column = self.previous.column };
@@ -1260,7 +1260,7 @@ pub const Parser = struct {
 
     fn parse_match_case(self: *Parser) ParserError!*MatchCase {
         if (try self.match(.DEFAULT)) {
-            try self.consume(.EQUAL_ARROW);
+            try self.consume(.EQUAL_ARROW, "Expected '=>' to start default match case.");
             const stmt = try self.parse_statement();
             const pat = try self.allocator.create(AST.DefaultPat);
             pat.* = .{};
@@ -1271,7 +1271,7 @@ pub const Parser = struct {
             return case;
         }
         const expr = try self.parse_expression();
-        try self.consume(.EQUAL_ARROW);
+        try self.consume(.EQUAL_ARROW, "Expected '=>' to start match case.");
         const stmt = try self.parse_statement();
         const case = try self.allocator.create(MatchCase);
         case.* = .{ .pattern = expr, .stmt = stmt, .line = self.previous.line, .column = self.previous.column };
@@ -1279,17 +1279,17 @@ pub const Parser = struct {
     }
 
     fn parse_match_expression(self: *Parser) ParserError!*AST.ASTNode {
-        try self.consume(.LEFT_PAREN);
+        try self.consume(.LEFT_PAREN, "Expected '(' to start match target expression.");
         const expr = try self.parse_expression();
-        try self.consume(.RIGHT_PAREN);
-        try self.consume(.LEFT_BRACE);
+        try self.consume(.RIGHT_PAREN, "Expected ')' to end match target expression.");
+        try self.consume(.LEFT_BRACE, "Expected '{' to start match expression body.");
         var cases: std.ArrayList(*MatchCase) = .empty;
         while (!self.check(.RIGHT_BRACE) and !self.check(.EOF)) {
             const case = try self.parse_match_case();
             try cases.append(self.allocator, case);
-            if (!self.check(.RIGHT_BRACE)) try self.consume(.COMMA);
+            if (!self.check(.RIGHT_BRACE)) try self.consume(.COMMA, "Expected ',' to separate match cases.");
         }
-        try self.consume(.RIGHT_BRACE);
+        try self.consume(.RIGHT_BRACE, "Expected '}' to end match expression body.");
 
         const match_expr = try self.allocator.create(AST.MatchExpr);
         match_expr.* = .{ .expr = expr, .cases = try cases.toOwnedSlice(self.allocator), .line = self.previous.line, .column = self.previous.column };
@@ -1301,7 +1301,7 @@ pub const Parser = struct {
 
     fn parse_give_statement(self: *Parser) ParserError!*AST.ASTNode {
         const expr = try self.parse_expression();
-        try self.consume(.SEMICOLON);
+        try self.consume(.SEMICOLON, "Expected ';' to end give statement.");
 
         const give_stmt = try self.allocator.create(AST.GiveStmt);
         give_stmt.* = .{ .expr = expr, .line = self.previous.line, .column = self.previous.column };
@@ -1313,7 +1313,7 @@ pub const Parser = struct {
 
     fn parse_yield_statement(self: *Parser) ParserError!*AST.ASTNode {
         const expr = try self.parse_expression();
-        try self.consume(.SEMICOLON);
+        try self.consume(.SEMICOLON, "Expected ';' to end yield statement.");
 
         const yield_stmt = try self.allocator.create(AST.YieldStmt);
         yield_stmt.* = .{ .expr = expr, .line = self.previous.line, .column = self.previous.column };
@@ -1325,7 +1325,7 @@ pub const Parser = struct {
 
     fn parse_resume_expression(self: *Parser) ParserError!*AST.ASTNode {
         const expr = try self.parse_expression();
-        try self.consume(.SEMICOLON);
+        try self.consume(.SEMICOLON, "Expected ';' to end resume expression.");
 
         const resume_expr = try self.allocator.create(AST.ResumeExpr);
         resume_expr.* = .{ .expr = expr, .line = self.previous.line, .column = self.previous.column };
@@ -1336,21 +1336,21 @@ pub const Parser = struct {
     }
 
     fn parse_error_declaration(self: *Parser, is_pub: bool) ParserError!*AST.ASTNode {
-        try self.consume(.IDENTIFIER);
+        try self.consume(.IDENTIFIER, "Expected identifier for error declaration.");
         const token = self.previous;
 
-        try self.consume(.LEFT_BRACE);
+        try self.consume(.LEFT_BRACE, "Expected '{' to start error declaration body.");
         var variants: std.ArrayList(Token) = .empty;
         while (!self.check(.RIGHT_BRACE) and !self.check(.EOF)) {
-            try self.consume(.IDENTIFIER);
+            try self.consume(.IDENTIFIER, "Expected identifier for error variant.");
             const variant = self.previous;
             try variants.append(self.allocator, variant);
             if (self.check(.RIGHT_BRACE)) {
                 break;
             }
-            try self.consume(.COMMA);
+            try self.consume(.COMMA, "Expected ',' to separate error variants.");
         }
-        try self.consume(.RIGHT_BRACE);
+        try self.consume(.RIGHT_BRACE, "Expected '}' to end error declaration body.");
 
         const error_decl = try self.allocator.create(AST.ErrorDecl);
         error_decl.* = .{ .name = token, .variants = try variants.toOwnedSlice(self.allocator), .modifier_pub = is_pub, .line = token.line, .column = token.column };
@@ -1360,21 +1360,21 @@ pub const Parser = struct {
     }
 
     fn parse_enum_declaration(self: *Parser, is_pub: bool) ParserError!*AST.ASTNode {
-        try self.consume(.IDENTIFIER);
+        try self.consume(.IDENTIFIER, "Expected identifier for enum declaration.");
         const token = self.previous;
 
-        try self.consume(.LEFT_BRACE);
+        try self.consume(.LEFT_BRACE, "Expected '{' to start enum declaration body.");
         var variants: std.ArrayList(Token) = .empty;
         while (!self.check(.RIGHT_BRACE) and !self.check(.EOF)) {
-            try self.consume(.IDENTIFIER);
+            try self.consume(.IDENTIFIER, "Expected identifier for enum variant.");
             const variant = self.previous;
             try variants.append(self.allocator, variant);
             if (self.check(.RIGHT_BRACE)) {
                 break;
             }
-            try self.consume(.COMMA);
+            try self.consume(.COMMA, "Expected ',' to separate enum variants.");
         }
-        try self.consume(.RIGHT_BRACE);
+        try self.consume(.RIGHT_BRACE, "Expected '}' to end enum declaration body.");
 
         const enum_decl = try self.allocator.create(AST.EnumDecl);
         enum_decl.* = .{ .name = token, .variants = try variants.toOwnedSlice(self.allocator), .modifier_pub = is_pub, .line = token.line, .column = token.column };
@@ -1384,9 +1384,9 @@ pub const Parser = struct {
     }
 
     fn parse_struct_declaration(self: *Parser, is_pub: bool) ParserError!*AST.ASTNode {
-        try self.consume(.IDENTIFIER);
+        try self.consume(.IDENTIFIER, "Expected identifier for struct declaration.");
         const name = self.previous;
-        try self.consume(.LEFT_BRACE);
+        try self.consume(.LEFT_BRACE, "Expected '{' to start struct declaration body.");
         var fields: std.ArrayList(*AST.TypedNamedStructField) = .empty;
         var methods: std.ArrayList(*AST.StructMethodField) = .empty;
 
@@ -1431,9 +1431,9 @@ pub const Parser = struct {
             if (self.check(.RIGHT_BRACE)) {
                 break;
             }
-            try self.consume(.COMMA);
+            try self.consume(.COMMA, "Expected ',' to separate struct fields.");
         }
-        try self.consume(.RIGHT_BRACE);
+        try self.consume(.RIGHT_BRACE, "Expected '}' to end struct declaration body.");
         const struct_decl = try self.allocator.create(AST.StructDecl);
 
         if (is_pub) {}
@@ -1457,24 +1457,24 @@ pub const Parser = struct {
         var items: std.ArrayList(AST.ImportItem) = .empty;
 
         while (true) {
-            try self.consume(.IDENTIFIER);
+            try self.consume(.IDENTIFIER, "Expected identifier for import item.");
             const name = self.previous;
 
             var alias: ?Token = null;
             if (try self.match(.AS)) {
-                try self.consume(.IDENTIFIER);
+                try self.consume(.IDENTIFIER, "Expected identifier for alias.");
                 alias = self.previous;
             }
 
             try items.append(self.allocator, AST.ImportItem{ .name = name, .alias = alias });
 
             if (try self.match(.FROM)) break;
-            try self.consume(.COMMA);
+            try self.consume(.COMMA, "Expected ',' to separate import items.");
         }
 
-        try self.consume(.STRING);
+        try self.consume(.STRING, "Expected string for module path.");
         const module = self.previous;
-        try self.consume(.SEMICOLON);
+        try self.consume(.SEMICOLON, "Expected ';' to end import statement.");
 
         const workspace_resolved_module_path = try self.workspace.resolve_path(self.module.filepath, module.lexeme[1 .. module.lexeme.len - 1]);
         const parser_resolved_module_path = try self.allocator.dupe(u8, workspace_resolved_module_path);
