@@ -16,6 +16,13 @@ pub const diagnostics = @import("helpers/diagnostics.zig");
 pub const cli = @import("cli/cli.zig");
 pub const cli_helpers = @import("cli/helpers.zig");
 
+// VM
+pub const entities = @import("vm/entities.zig");
+pub const chunk = @import("vm/chunk.zig");
+
+// Memory
+pub const basic_allocator = @import("memory/basic_allocator.zig");
+
 test {
     _ = @import("compiler/scanner.zig");
     _ = @import("compiler/parser.zig");
@@ -30,9 +37,18 @@ test {
     _ = @import("compiler/tests/test_environement.zig");
     _ = @import("compiler/tests/test_type_checker.zig");
 
+    _ = @import("vm/entities.zig");
+    _ = @import("vm/chunk.zig");
+
+    _ = @import("vm/tests/test_chunk.zig");
+    _ = @import("vm/tests/test_entities.zig");
+
     _ = @import("helpers/diagnostics.zig");
 
     _ = @import("cli/cli.zig");
     _ = @import("cli/helpers.zig");
     _ = @import("cli/test_helpers.zig");
+
+    _ = @import("memory/basic_allocator.zig");
+    _ = @import("memory/tests/test_basic_allocator.zig");
 }
