@@ -7,6 +7,7 @@ pub const parser = @import("compiler/parser.zig");
 pub const type_registry = @import("compiler/type_registry.zig");
 pub const environment = @import("compiler/environment.zig");
 pub const type_checker = @import("compiler/type_checker.zig");
+pub const binding_resolver = @import("compiler/binding_resolver.zig");
 pub const workspace = @import("compiler/workspace.zig");
 
 // Helpers
@@ -21,7 +22,9 @@ pub const entities = @import("vm/entities.zig");
 pub const chunk = @import("vm/chunk.zig");
 
 // Memory
-pub const basic_allocator = @import("memory/basic_allocator.zig");
+pub const basic_garbage_collector = @import("memory/basic_garbage_collector.zig");
+pub const managed_allocator = @import("memory/managed_allocator.zig");
+pub const slab_allocator = @import("memory/slab_allocator.zig");
 
 test {
     _ = @import("compiler/scanner.zig");
@@ -29,6 +32,7 @@ test {
     _ = @import("compiler/type_registry.zig");
     _ = @import("compiler/environment.zig");
     _ = @import("compiler/type_checker.zig");
+    _ = @import("compiler/binding_resolver.zig");
     _ = @import("compiler/workspace.zig");
 
     _ = @import("compiler/tests/test_scanner.zig");
@@ -49,6 +53,7 @@ test {
     _ = @import("cli/helpers.zig");
     _ = @import("cli/test_helpers.zig");
 
-    _ = @import("memory/basic_allocator.zig");
-    _ = @import("memory/tests/test_basic_allocator.zig");
+    _ = @import("memory/basic_garbage_collector.zig");
+    _ = @import("memory/managed_allocator.zig");
+    _ = @import("memory/slab_allocator.zig");
 }

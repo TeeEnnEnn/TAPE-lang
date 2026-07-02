@@ -3,8 +3,19 @@
 
 const std = @import("std");
 const Chunk = @import("chunk.zig").Chunk;
+const Isolate = @import("../vm/vm.zig").Isolate;
+const BasicGarbageCollector = @import("../memory/basic_garbage_collector.zig");
+const basic_gc = *BasicGarbageCollector.BasicGarbageCollector;
+const mark_object = basic_gc.mark_object;
 
-pub const ObjectType = enum {
+pub const CallFrame = struct {
+    closure: *ObjectClosure,
+    ip: usize,
+    slots: []Value,
+};
+
+/// Type of a heap allocated TAPE object.
+pub const ObjectType = enum(u8) {
     ObjectString,
     ObjectArray,
     ObjectTable,
@@ -15,7 +26,8 @@ pub const ObjectType = enum {
     ObjectUpvalue,
 };
 
-pub const ObjectHeader = struct {
+pub const ObjectHeader = packed struct {
+    next: ?*ObjectHeader,
     object_type: ObjectType,
     marked: bool,
 };
@@ -134,24 +146,8 @@ pub fn print_object(obj: *ObjectHeader) void {
     switch (obj.object_type) {}
 }
 
-pub fn allocate_object(allocator: std.mem.Allocator, object_type: ObjectType) !*ObjectHeader {
-    const obj: *ObjectHeader = switch (object_type) {
-        .ObjectString => @ptrCast(try allocator.create(ObjectString)),
-        .ObjectArray => @ptrCast(try allocator.create(ObjectArray)),
-        .ObjectTable => @ptrCast(try allocator.create(ObjectTable)),
-        .ObjectTuple => @ptrCast(try allocator.create(ObjectTuple)),
-        .ObjectFunction => @ptrCast(try allocator.create(ObjectFunction)),
-        .ObjectClosure => @ptrCast(try allocator.create(ObjectClosure)),
-        .ObjectCoroutine => @ptrCast(try allocator.create(ObjectCoroutine)),
-        .ObjectUpvalue => @ptrCast(try allocator.create(ObjectUpvalue)),
-    };
-    obj.object_type = object_type;
-    obj.marked = false;
-    return obj;
-}
-
-pub fn new_string_object(allocator: std.mem.Allocator, chars: []const u8) !*ObjectString {
-    const string: *ObjectString = @ptrCast(try allocate_object(allocator, .ObjectString));
+pub fn new_string_object(isolate: *Isolate, chars: []const u8) !*ObjectString {
+    const string: *ObjectString = @ptrCast(try isolate.allocate_object(isolate, .ObjectString));
     string.hash = std.hash.Fnv1a_64.hash(chars);
     string.chars = chars;
     // TODO: fix byte_length and code_point_length calculations
@@ -160,66 +156,180 @@ pub fn new_string_object(allocator: std.mem.Allocator, chars: []const u8) !*Obje
     return string;
 }
 
-pub fn new_array_object(allocator: std.mem.Allocator, element_count: usize) !*ObjectArray {
-    const array: *ObjectArray = @ptrCast(try allocate_object(allocator, .ObjectArray));
+pub fn new_array_object(isolate: *Isolate, element_count: usize) !*ObjectArray {
+    const array: *ObjectArray = @ptrCast(try isolate.allocate_object(isolate, .ObjectArray));
     array.capacity = element_count;
     array.length = 0;
-    array.elements = try allocator.alloc(Value, element_count);
+    array.elements = try isolate.garbage_allocator.alloc(Value, element_count);
     for (array.elements) |*element| {
         element.* = .nil;
     }
     return array;
 }
 
-pub fn new_table_object(allocator: std.mem.Allocator) !*ObjectTable {
-    const table: *ObjectTable = @ptrCast(try allocate_object(allocator, .ObjectTable));
+pub fn new_table_object(isolate: *Isolate) !*ObjectTable {
+    const table: *ObjectTable = @ptrCast(try isolate.allocate_object(isolate, .ObjectTable));
     table.capacity = 0;
     table.length = 0;
-    table.keys = try allocator.alloc(Value, 0);
-    table.values = try allocator.alloc(Value, 0);
+    table.keys = try isolate.garbage_allocator.alloc(Value, 0);
+    table.values = try isolate.garbage_allocator.alloc(Value, 0);
     return table;
 }
 
-pub fn new_tuple_object(allocator: std.mem.Allocator, length: usize) !*ObjectTuple {
-    const tuple: *ObjectTuple = @ptrCast(try allocate_object(allocator, .ObjectTuple));
-    tuple.elements = try allocator.alloc(Value, length);
+pub fn new_tuple_object(isolate: *Isolate, length: usize) !*ObjectTuple {
+    const tuple: *ObjectTuple = @ptrCast(try isolate.allocate_object(isolate, .ObjectTuple));
+    tuple.elements = try isolate.garbage_allocator.alloc(Value, length);
     for (tuple.elements) |*element| {
         element.* = .nil;
     }
     return tuple;
 }
 
-pub fn new_function_object(allocator: std.mem.Allocator) !*ObjectFunction {
-    const func: *ObjectFunction = @ptrCast(try allocate_object(allocator, .ObjectFunction));
-    func.chunk = Chunk.init(allocator);
+pub fn new_function_object(isolate: *Isolate) !*ObjectFunction {
+    const func: *ObjectFunction = @ptrCast(try isolate.allocate_object(isolate, .ObjectFunction));
+    func.chunk = Chunk.init(isolate.garbage_allocator);
     func.upvalue_count = 0;
     func.name = undefined;
     return func;
 }
 
-pub fn new_closure_object(allocator: std.mem.Allocator, function: *ObjectFunction) !*ObjectClosure {
-    const closure: *ObjectClosure = @ptrCast(try allocate_object(allocator, .ObjectClosure));
+pub fn new_closure_object(isolate: *Isolate, function: *ObjectFunction) !*ObjectClosure {
+    const closure: *ObjectClosure = @ptrCast(try isolate.allocate_object(isolate, .ObjectClosure));
     closure.function = function;
-    closure.upvalues = try allocator.alloc(*ObjectUpvalue, function.upvalue_count);
+    closure.upvalues = try isolate.garbage_allocator.alloc(*ObjectUpvalue, function.upvalue_count);
     for (closure.upvalues) |*upvalue| {
         upvalue.* = undefined;
     }
     return closure;
 }
 
-pub fn new_upvalue_object(allocator: std.mem.Allocator, location: *Value) !*ObjectUpvalue {
-    const upvalue: *ObjectUpvalue = @ptrCast(try allocate_object(allocator, .ObjectUpvalue));
+pub fn new_upvalue_object(isolate: *Isolate, location: *Value) !*ObjectUpvalue {
+    const upvalue: *ObjectUpvalue = @ptrCast(try isolate.allocate_object(isolate, .ObjectUpvalue));
     upvalue.location = location;
     upvalue.closed_value = .nil;
     return upvalue;
 }
 
-pub fn new_coroutine_object(allocator: std.mem.Allocator, function: *ObjectFunction) !*ObjectCoroutine {
-    const coroutine: *ObjectCoroutine = @ptrCast(try allocate_object(allocator, .ObjectCoroutine));
+pub fn new_coroutine_object(isolate: *Isolate, function: *ObjectFunction) !*ObjectCoroutine {
+    const coroutine: *ObjectCoroutine = @ptrCast(try isolate.allocate_object(isolate, .ObjectCoroutine));
     coroutine.function = function;
-    coroutine.upvalues = try allocator.alloc(*ObjectUpvalue, function.upvalue_count);
+    coroutine.upvalues = try isolate.allocator.alloc(*ObjectUpvalue, function.upvalue_count);
     for (coroutine.upvalues) |*upvalue| {
         upvalue.* = undefined;
     }
     return coroutine;
+}
+
+pub fn mark_value(garbage_collector: basic_gc, value: Value) !void {
+    switch (value) {
+        .object => |obj| {
+            try mark_object(garbage_collector, obj);
+        },
+        else => {},
+    }
+}
+
+pub fn blacken_object(garbage_collector: basic_gc, obj: *ObjectHeader) !void {
+    switch (obj.*) {
+        .ObjectFunction => |func| {
+            func.name.marked = true;
+        },
+        .ObjectClosure => {
+            const closure: *ObjectClosure = @ptrCast(obj);
+            try mark_object(garbage_collector, closure.function);
+            for (closure.upvalues) |upvalue| {
+                try mark_object(garbage_collector, @ptrCast(upvalue));
+            }
+        },
+        .ObjectCoroutine => {
+            const coroutine: *ObjectCoroutine = @ptrCast(obj);
+            try mark_object(garbage_collector, coroutine.function);
+            for (coroutine.upvalues) |upvalue| {
+                try mark_object(garbage_collector, @ptrCast(upvalue));
+            }
+        },
+        .ObjectString => {},
+        .ObjectTuple => {
+            const tuple: *ObjectTuple = @ptrCast(obj);
+            for (tuple.elements) |value| {
+                try mark_value(garbage_collector, value);
+            }
+        },
+        .ObjectTable => {
+            const table: *ObjectTable = @ptrCast(obj);
+            for (table.pairs) |pair| {
+                try mark_value(garbage_collector, pair.key);
+                try mark_value(garbage_collector, pair.value);
+            }
+        },
+        .ObjectArray => {
+            const array: *ObjectArray = @ptrCast(obj);
+            for (array.elements) |value| {
+                try mark_value(garbage_collector, value);
+            }
+        },
+        .ObjectUpvalue => |upvalue| {
+            const up: *ObjectUpvalue = @ptrCast(upvalue);
+            try mark_value(garbage_collector, up.closed_value);
+            try mark_value(garbage_collector, *up.location);
+        },
+    }
+}
+
+pub fn get_size_of_object(obj: *ObjectHeader) usize {
+    return switch (obj.object_type) {
+        .ObjectFunction => @sizeOf(ObjectFunction),
+        .ObjectArray => @sizeOf(ObjectArray),
+        .ObjectTuple => @sizeOf(ObjectTuple),
+        .ObjectTable => @sizeOf(ObjectTable),
+        .ObjectString => @sizeOf(ObjectString),
+        .ObjectUpvalue => @sizeOf(ObjectUpvalue),
+        .ObjectClosure => @sizeOf(ObjectClosure),
+        .ObjectCoroutine => @sizeOf(ObjectCoroutine),
+    };
+}
+
+pub fn free_object(allocator: std.mem.Allocator, obj: *ObjectHeader) void {
+    switch (obj.object_type) {
+        .ObjectFunction => {
+            const func: *ObjectFunction = @ptrCast(obj);
+            func.chunk.deinit();
+            allocator.destroy(func);
+        },
+        .ObjectArray => {
+            const array: *ObjectArray = @ptrCast(obj);
+            allocator.free(array.elements);
+            allocator.destroy(array);
+        },
+        .ObjectTuple => {
+            const tuple: *ObjectTuple = @ptrCast(obj);
+            allocator.free(tuple.elements);
+            allocator.destroy(tuple);
+        },
+        .ObjectTable => {
+            const table: *ObjectTable = @ptrCast(obj);
+            allocator.free(table.keys);
+            allocator.free(table.values);
+            allocator.destroy(table);
+        },
+        .ObjectString => {
+            const str: *ObjectString = @ptrCast(obj);
+            allocator.free(str.chars);
+            allocator.destroy(str);
+        },
+        .ObjectUpvalue => {
+            const up: *ObjectUpvalue = @ptrCast(obj);
+            allocator.destroy(up);
+        },
+        .ObjectClosure => {
+            const closure: *ObjectClosure = @ptrCast(obj);
+            allocator.free(closure.upvalues);
+            allocator.destroy(closure);
+        },
+        .ObjectCoroutine => {
+            const coroutine: *ObjectCoroutine = @ptrCast(obj);
+            allocator.free(coroutine.upvalues);
+            allocator.destroy(coroutine);
+        },
+    }
 }
