@@ -7,6 +7,9 @@ const TypeChecker = @import("type_checker.zig").TypeChecker;
 const TypeRegistry = @import("type_registry.zig").TypeRegistry;
 const Diagnostics = @import("../helpers/diagnostics.zig").DiagnosticsReporter;
 const Environment = @import("environment.zig").Environment;
+const BindingResolver = @import("../compiler/binding_resolver.zig").BindingResolver;
+const BindingResolution = @import("../compiler/binding_resolver.zig").BindingResolution;
+const ASTDebugPrinter = @import("debug.zig").ASTDebugPrinter;
 
 pub const WorkspaceError = std.mem.Allocator.Error || std.Io.OperateTimeoutError || error{
     CircularDependencyError,
@@ -28,6 +31,7 @@ pub const Module = struct {
     state: ModuleState,
     arena: std.heap.ArenaAllocator,
     ast: *AST.ASTNode,
+    binding_resolution: BindingResolution,
     exports: std.StringHashMap(AST.TypeId),
     file_contents: []const u8,
     mutex: std.Io.Mutex,
@@ -42,6 +46,7 @@ pub const Module = struct {
             .state = ModuleState.Parsing,
             .arena = std.heap.ArenaAllocator.init(allocator),
             .ast = undefined,
+            .binding_resolution = BindingResolution.init(allocator),
             .exports = std.StringHashMap(AST.TypeId).init(allocator),
             .file_contents = file_contents,
             .mutex = std.Io.Mutex.init,
@@ -54,6 +59,7 @@ pub const Module = struct {
     pub fn deinit(self: *Module) void {
         self.exports.deinit();
         self.dependencies.deinit(self.allocator);
+        self.binding_resolution.deinit();
         self.arena.deinit();
     }
 
@@ -168,6 +174,11 @@ pub const Workspace = struct {
 
         // sort modules
         const sorted_modules = try self.sort_modules(entrypoint_module);
+
+        for (sorted_modules) |module| {
+            ASTDebugPrinter.print_node(module.ast);
+        }
+
         // type check
 
         // all modules share the same type registry
@@ -183,8 +194,34 @@ pub const Workspace = struct {
             _ = type_checker.check(module.ast) catch {};
 
             if (self.diagnostics.has_content()) {
+                const had_errors = self.diagnostics.has_errors;
                 self.diagnostics.report_all(self.io) catch {};
-                if (self.diagnostics.has_errors) {
+                if (had_errors) {
+                    return;
+                }
+            }
+            std.debug.print("Type checked {s}\n", .{module.filepath});
+        }
+
+        std.debug.print("has errors: {}\n", .{self.diagnostics.has_errors});
+
+        // resolve bindings
+        std.debug.print("Resolving bindings...", .{});
+        for (sorted_modules) |module| {
+            module.binding_resolution.deinit();
+            module.binding_resolution = BindingResolver.resolve(module.allocator, &type_registry, &self.diagnostics, module, self, module.ast) catch {
+                if (self.diagnostics.has_content()) {
+                    const had_errors = self.diagnostics.has_errors;
+                    self.diagnostics.report_all(self.io) catch {};
+                    if (had_errors) return;
+                }
+                return;
+            };
+
+            if (self.diagnostics.has_content()) {
+                const had_errors = self.diagnostics.has_errors;
+                self.diagnostics.report_all(self.io) catch {};
+                if (had_errors) {
                     return;
                 }
             }
@@ -192,7 +229,6 @@ pub const Workspace = struct {
         }
 
         // emit Bytecode
-
     }
 
     /// submits an imported file to the group for parsing
@@ -236,7 +272,6 @@ pub const Workspace = struct {
             is_new = true;
             // resolved_filepath is now owned by the module and modules HashMap
         }
-
 
         if (self.modules.get(importer_filepath)) |importer_module| {
             importer_module.dependencies.append(self.allocator, module) catch {};

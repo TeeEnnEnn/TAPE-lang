@@ -61,27 +61,20 @@ pub const DiagnosticsReporter = struct {
     }
 
     pub fn add_diagnostic(self: *DiagnosticsReporter, diagnostic: Diagnostic) !void {
-        if (diagnostic.severity == .Error or diagnostic.severity == .Fatal) {
-            self.has_errors = true;
-        } else if (diagnostic.severity == .Warning) {
-            self.has_warnings = true;
-        } else if (diagnostic.severity == .Info) {
-            self.has_infos = true;
+        switch (diagnostic.severity) {
+            .Error, .Fatal => self.has_errors = true,
+            .Warning => self.has_warnings = true,
+            .Info => self.has_infos = true,
         }
 
-        self.diagnostics.append(self.allocator, diagnostic) catch {
-            // we failed to allocate memory for a diagnostic.
-            if (self.diagnostics.items.len > 0) {
-                _ = self.diagnostics.orderedRemove(0);
-                try self.diagnostics.append(self.allocator, diagnostic);
-            }
-        };
+        try self.diagnostics.append(self.allocator, diagnostic);
     }
 
     pub fn report_all(self: *DiagnosticsReporter, io: std.Io) !void {
         const stderr = std.Io.File.stderr();
         var buf: [32]u8 = undefined;
         for (self.diagnostics.items) |diagnostic| {
+            try stderr.writeStreamingAll(io, "\n");
             const color = switch (diagnostic.severity) {
                 .Fatal => BOLD_RED,
                 .Error => RED,
