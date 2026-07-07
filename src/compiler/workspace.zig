@@ -9,7 +9,7 @@ const Diagnostics = @import("../helpers/diagnostics.zig").DiagnosticsReporter;
 const Environment = @import("environment.zig").Environment;
 const BindingResolver = @import("../compiler/binding_resolver.zig").BindingResolver;
 const BindingResolution = @import("../compiler/binding_resolver.zig").BindingResolution;
-const ASTDebugPrinter = @import("debug.zig").ASTDebugPrinter;
+const print_node = @import("debug.zig").print_node;
 
 pub const WorkspaceError = std.mem.Allocator.Error || std.Io.OperateTimeoutError || error{
     CircularDependencyError,
@@ -176,7 +176,7 @@ pub const Workspace = struct {
         const sorted_modules = try self.sort_modules(entrypoint_module);
 
         for (sorted_modules) |module| {
-            ASTDebugPrinter.print_node(module.ast);
+            print_node(module.ast, 0, 4);
         }
 
         // type check
