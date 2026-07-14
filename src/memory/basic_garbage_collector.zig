@@ -7,23 +7,26 @@ pub const RootMarker = *const fn (isolate_ptr: *anyopaque, gc: *BasicGarbageColl
 pub const BasicGarbageCollector = struct {
     /// Used for the gray stack
     allocator: std.mem.Allocator,
-    managed_allocator: *ManagedAllocator.ManagedAllocator,
+    managed_allocator: ManagedAllocator.ManagedAllocator,
     objects: ?*Entities.ObjectHeader = null,
     gray_stack: std.ArrayList(*Entities.ObjectHeader),
-
     next_gc: usize = 1024 * 1024,
-
     isolate_ptr: *anyopaque,
     mark_roots_fn: RootMarker,
 
-    pub fn init(allocator: std.mem.Allocator, managed: *ManagedAllocator.ManagedAllocator, isolate_ptr: *anyopaque, mark_roots_fn: RootMarker) BasicGarbageCollector {
-        return .{
+    const slab_capacity: usize = 1024;
+
+    pub fn init(allocator: std.mem.Allocator, isolate_ptr: *anyopaque, mark_roots_fn: RootMarker) !*BasicGarbageCollector {
+        const gc = try allocator.create(BasicGarbageCollector);
+        gc.* = .{
             .allocator = allocator,
-            .managed_allocator = managed,
+            .managed_allocator = try ManagedAllocator.ManagedAllocator.init(allocator, slab_capacity),
             .gray_stack = .empty,
             .isolate_ptr = isolate_ptr,
             .mark_roots_fn = mark_roots_fn,
         };
+
+        return gc;
     }
 
     pub fn deinit(self: *BasicGarbageCollector) void {
@@ -32,6 +35,7 @@ pub const BasicGarbageCollector = struct {
 
         // deinit managed allocator
         self.managed_allocator.deinit();
+        self.allocator.destroy(self);
     }
 
     pub fn allocate_object(self: *BasicGarbageCollector, comptime T: type, object_type: Entities.ObjectType) !*T {
@@ -40,7 +44,7 @@ pub const BasicGarbageCollector = struct {
         }
 
         const alloc = self.managed_allocator.allocator();
-        const ptr = alloc.create(T);
+        const ptr = try alloc.create(T);
 
         ptr.header = .{ .object_type = object_type, .marked = false, .next = self.objects };
         self.objects = &ptr.header;
@@ -67,7 +71,7 @@ pub const BasicGarbageCollector = struct {
     pub fn trace_references(self: *BasicGarbageCollector) !void {
         while (self.gray_stack.items.len > 0) {
             const obj = self.gray_stack.pop();
-            try Entities.blacken_object(self, obj);
+            try Entities.blacken_object(self, obj.?);
         }
     }
 

@@ -18,14 +18,11 @@ pub const SlabAllocator = struct {
     capacity: usize,
 
     pub fn init(allocator: std.mem.Allocator, capacity: usize, slot_size: usize) SlabAllocatorError!*SlabAllocator {
-        if (!std.math.isPowerOfTwo(slot_size)) {
-            return .InvalidSlotSize;
-        }
         if (slot_size < @sizeOf(*anyopaque)) {
-            return .InvalidSlotSize;
+            return SlabAllocatorError.InvalidSlotSize;
         }
         if (capacity == 0) {
-            return .InvalidCapacity;
+            return SlabAllocatorError.InvalidCapacity;
         }
 
         const self = try allocator.create(SlabAllocator);
@@ -74,7 +71,7 @@ pub const SlabAllocator = struct {
             current_slot.* = @ptrCast(next_addr);
         }
 
-        const last_addr = memory.ptr + (self.capacity - 1) * self.slot_size;
+        const last_addr = memory + (self.capacity - 1) * self.slot_size;
         const last_slot: *?*anyopaque = @ptrCast(@alignCast(last_addr));
         last_slot.* = self.free_list;
 
@@ -86,13 +83,13 @@ pub const SlabAllocator = struct {
             try self.append_new_slab();
         }
 
-        const ptr = self.free_list;
+        const ptr = self.free_list orelse return error.OutOfMemory;
         const next_slot: *?*anyopaque = @ptrCast(@alignCast(ptr));
         self.free_list = next_slot.*;
         return ptr;
     }
 
-    pub fn free_from_slab(self: *SlabAllocator, ptr: *anyopaque) void {
+    pub fn deallocate_from_slab(self: *SlabAllocator, ptr: *anyopaque) void {
         const slot: *?*anyopaque = @ptrCast(@alignCast(ptr));
         slot.* = self.free_list;
         self.free_list = ptr;
