@@ -1,0 +1,7 @@
+[book]
+title = "TAPE-lang Documentation"
+authors = ["Theophilus Nenhanga"]
+language = "en"
+
+[output.html]
+no-section-label = true
