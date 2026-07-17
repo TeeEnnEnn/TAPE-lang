@@ -1,11 +1,11 @@
 //! Diagnostics utilities for the TAPE compiler.
 const std = @import("std");
-const cli_helpers = @import("../cli/helpers.zig");
-const BOLD_RED = cli_helpers.BOLD_RED;
-const RED = cli_helpers.RED;
-const YELLOW = cli_helpers.YELLOW;
-const GRAY = cli_helpers.GRAY;
-const RESET = cli_helpers.RESET;
+const CLI = @import("../cli/cli.zig");
+const BOLD_RED = CLI.BOLD_RED;
+const RED = CLI.RED;
+const YELLOW = CLI.YELLOW;
+const GRAY = CLI.GRAY;
+const RESET = CLI.RESET;
 
 pub const Severity = enum {
     Fatal,

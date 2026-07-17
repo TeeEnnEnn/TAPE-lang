@@ -1,11 +1,11 @@
 const std = @import("std");
-const Parser = @import("../parser.zig").Parser;
-const TypeRegistry = @import("../type_registry.zig").TypeRegistry;
-const TypeId = @import("../type_registry.zig").TypeId;
-const PrimitiveType = @import("../type_registry.zig").PrimitiveType;
-const DiagnosticsReporter = @import("../../helpers/diagnostics.zig").DiagnosticsReporter;
-const Workspace = @import("../workspace.zig").Workspace;
-const Module = @import("../workspace.zig").Module;
+const Parser = @import("../../compiler/parser.zig").Parser;
+const TypeRegistry = @import("../../compiler/type_registry.zig").TypeRegistry;
+const TypeId = @import("../../compiler/type_registry.zig").TypeId;
+const PrimitiveType = @import("../../compiler/type_registry.zig").PrimitiveType;
+const DiagnosticsReporter = @import("../../diagnostics/diagnostics.zig").DiagnosticsReporter;
+const Workspace = @import("../../compiler/workspace.zig").Workspace;
+const Module = @import("../../compiler/workspace.zig").Module;
 
 fn resolveType(allocator: std.mem.Allocator, registry: *TypeRegistry, type_str: []const u8) !TypeId {
     const source = try std.fmt.allocPrint(allocator, "var x: {s} = 0;", .{type_str});

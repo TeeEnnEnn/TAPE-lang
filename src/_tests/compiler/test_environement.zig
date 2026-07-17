@@ -1,7 +1,7 @@
 const std = @import("std");
-const Environment = @import("../environment.zig").Environment;
-const EnvironmentError = @import("../environment.zig").EnvironmentError;
-const TypeId = @import("../ast.zig").TypeId;
+const Environment = @import("../../compiler/environment.zig").Environment;
+const EnvironmentError = @import("../../compiler/environment.zig").EnvironmentError;
+const TypeId = @import("../../compiler/ast.zig").TypeId;
 
 test "Environment - define works" {
     const allocator = std.testing.allocator;

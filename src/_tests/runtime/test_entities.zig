@@ -1,6 +1,6 @@
 const std = @import("std");
-const Value = @import("../entities.zig").Value;
-const values_equal = @import("../entities.zig").values_equal;
+const Value = @import("../../runtime/entities.zig").Value;
+const values_equal = @import("../../runtime/entities.zig").values_equal;
 
 test "values_equal" {
     const a = Value{ .int = 42 };

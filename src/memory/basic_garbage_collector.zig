@@ -1,5 +1,5 @@
 const std = @import("std");
-const Entities = @import("../vm/entities.zig");
+const Entities = @import("../runtime/entities.zig");
 const ManagedAllocator = @import("managed_allocator.zig");
 
 pub const RootMarker = *const fn (isolate_ptr: *anyopaque, gc: *BasicGarbageCollector) void;

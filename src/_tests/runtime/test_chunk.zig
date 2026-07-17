@@ -1,6 +1,6 @@
 const std = @import("std");
-const Chunk = @import("../chunk.zig").Chunk;
-const Opcode = @import("../chunk.zig").Opcode;
+const Chunk = @import("../../runtime/chunk.zig").Chunk;
+const Opcode = @import("../../runtime/chunk.zig").Opcode;
 
 test "Can initialize" {
     const allocator = std.testing.allocator;

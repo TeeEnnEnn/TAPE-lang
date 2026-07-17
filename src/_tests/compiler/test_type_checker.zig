@@ -1,15 +1,15 @@
 const std = @import("std");
-const TypeChecker = @import("../type_checker.zig").TypeChecker;
-const TypeCheckerError = @import("../type_checker.zig").TypeCheckerError;
-const Environment = @import("../environment.zig").Environment;
-const EnvironmentError = @import("../environment.zig").EnvironmentError;
-const TypeRegistry = @import("../type_registry.zig").TypeRegistry;
-const TypeId = @import("../ast.zig").TypeId;
-const Parser = @import("../parser.zig").Parser;
-const PrimitiveType = @import("../type_registry.zig").PrimitiveType;
-const DiagnosticsReporter = @import("../../helpers/diagnostics.zig").DiagnosticsReporter;
-const Workspace = @import("../workspace.zig").Workspace;
-const Module = @import("../workspace.zig").Module;
+const TypeChecker = @import("../../compiler/type_checker.zig").TypeChecker;
+const TypeCheckerError = @import("../../compiler/type_checker.zig").TypeCheckerError;
+const Environment = @import("../../compiler/environment.zig").Environment;
+const EnvironmentError = @import("../../compiler/environment.zig").EnvironmentError;
+const TypeRegistry = @import("../../compiler/type_registry.zig").TypeRegistry;
+const TypeId = @import("../../compiler/ast.zig").TypeId;
+const Parser = @import("../../compiler/parser.zig").Parser;
+const PrimitiveType = @import("../../compiler/type_registry.zig").PrimitiveType;
+const DiagnosticsReporter = @import("../../diagnostics/diagnostics.zig").DiagnosticsReporter;
+const Workspace = @import("../../compiler/workspace.zig").Workspace;
+const Module = @import("../../compiler/workspace.zig").Module;
 
 fn checkSource(allocator: std.mem.Allocator, source: []const u8) !struct { registry: TypeRegistry, env: Environment } {
     const io = std.testing.io;

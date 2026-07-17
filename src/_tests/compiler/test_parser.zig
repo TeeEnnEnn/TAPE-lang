@@ -1,8 +1,8 @@
 const std = @import("std");
-const Parser = @import("../parser.zig").Parser;
-const AST = @import("../ast.zig");
-const Workspace = @import("../workspace.zig").Workspace;
-const Module = @import("../workspace.zig").Module;
+const Parser = @import("../../compiler/parser.zig").Parser;
+const AST = @import("../../compiler/ast.zig");
+const Workspace = @import("../../compiler/workspace.zig").Workspace;
+const Module = @import("../../compiler/workspace.zig").Module;
 
 fn parseFirstDecl(allocator: std.mem.Allocator, source: []const u8) !*AST.ASTNode {
     const io = std.testing.io;

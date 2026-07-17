@@ -1,4 +1,4 @@
-const scanner = @import("../scanner.zig");
+const scanner = @import("../../compiler/scanner.zig");
 const Token = scanner.Token;
 const TokenType = scanner.TokenType;
 const Scanner = scanner.Scanner;
