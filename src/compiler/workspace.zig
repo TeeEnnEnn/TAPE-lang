@@ -1,19 +1,24 @@
 const std = @import("std");
 const AST = @import("ast.zig");
-const helpers = @import("../cli/helpers.zig");
+const helpers = @import("../cli/cli.zig");
 const options = @import("TAPE_lang_build_options");
 const Parser = @import("parser.zig").Parser;
 const TypeChecker = @import("type_checker.zig").TypeChecker;
 const TypeRegistry = @import("type_registry.zig").TypeRegistry;
-const Diagnostics = @import("../helpers/diagnostics.zig").DiagnosticsReporter;
+const Diagnostics = @import("../diagnostics/diagnostics.zig").DiagnosticsReporter;
 const Environment = @import("environment.zig").Environment;
 const BindingResolver = @import("../compiler/binding_resolver.zig").BindingResolver;
 const BindingResolution = @import("../compiler/binding_resolver.zig").BindingResolution;
-const print_node = @import("debug.zig").print_node;
+const Entities = @import("../runtime/entities.zig");
+const CodeGenerator = @import("code_gen.zig").CodeGenerator;
+const Runtime = @import("../runtime/vm.zig");
+const print_node = @import("ast_debug.zig").print_node;
+const CodeGeneratorDebug = @import("code_gen_debug.zig").ChunkDisassembler;
 
 pub const WorkspaceError = std.mem.Allocator.Error || std.Io.OperateTimeoutError || error{
     CircularDependencyError,
     FileNotFoundError,
+    CodeGenerationError,
 };
 
 /// The possible state a module (file) can be in when being handled by the compiler
@@ -37,6 +42,7 @@ pub const Module = struct {
     mutex: std.Io.Mutex,
     dependencies: std.ArrayList(*Module),
     visit_state: ModuleVisitState = .NotVisited,
+    function: *Entities.ObjectFunction,
     allocator: std.mem.Allocator,
 
     pub fn init(filepath: []const u8, file_contents: []const u8, allocator: std.mem.Allocator) !*Module {
@@ -51,6 +57,7 @@ pub const Module = struct {
             .file_contents = file_contents,
             .mutex = std.Io.Mutex.init,
             .dependencies = .empty,
+            .function = undefined,
             .allocator = allocator,
         };
         return module;
@@ -92,6 +99,7 @@ pub const Workspace = struct {
     diagnostics: Diagnostics,
     /// Mutex for accessing diagnostics
     diagnostics_mutex: std.Io.Mutex,
+    vm: ?*Runtime.VM,
 
     pub fn init(allocator: std.mem.Allocator, io: std.Io) Workspace {
         return Workspace{
@@ -101,10 +109,16 @@ pub const Workspace = struct {
             .io = io,
             .diagnostics = Diagnostics.init(allocator),
             .diagnostics_mutex = std.Io.Mutex.init,
+            .vm = null,
         };
     }
 
     pub fn deinit(self: *Workspace) void {
+        if (self.vm) |vm| {
+            vm.deinit();
+            self.allocator.destroy(vm);
+        }
+
         var modules_it = self.modules.valueIterator();
         while (modules_it.next()) |mod| {
             self.allocator.free(mod.*.file_contents);
@@ -202,11 +216,8 @@ pub const Workspace = struct {
             }
             std.debug.print("Type checked {s}\n", .{module.filepath});
         }
-
-        std.debug.print("has errors: {}\n", .{self.diagnostics.has_errors});
-
         // resolve bindings
-        std.debug.print("Resolving bindings...", .{});
+        std.debug.print("Resolving bindings...\n", .{});
         for (sorted_modules) |module| {
             module.binding_resolution.deinit();
             module.binding_resolution = BindingResolver.resolve(module.allocator, &type_registry, &self.diagnostics, module, self, module.ast) catch {
@@ -228,7 +239,41 @@ pub const Workspace = struct {
             std.debug.print("Type checked {s}\n", .{module.filepath});
         }
 
+        // Code Generation is where the VM needs to be set up and the first isolate is created
+
+        std.debug.print("Generating code ...\n", .{});
+        // empty config for defaults
+        var vm = try Runtime.VM.init(.{}, self, self.allocator);
+        self.vm = vm;
+        // first isolate
+        const first_isolate = try vm.new_isolate();
+
         // emit Bytecode
+        for (sorted_modules) |module| {
+            var code_gen = try CodeGenerator.init(self.allocator, first_isolate, &module.binding_resolution, module.ast);
+
+            const function = code_gen.generate();
+            if (function) |f| {
+                module.function = f;
+                CodeGeneratorDebug.disassemble(&f.chunk, module.filepath);
+            } else {
+                try self.diagnostics.add_diagnostic(.{ .column = 0, .line = 0, .file_path = module.filepath, .message = "Code generation failed", .severity = .Error, .stage = .CodeGenerator });
+                return WorkspaceError.CodeGenerationError;
+            }
+            //
+        }
+        std.debug.print("Code Generated ...\n", .{});
+        // at this point all the modules should have bytecode in a ObjectFunction
+
+        std.debug.print("Creating Script Closure...\n", .{});
+        const entrypoint_closure = try Entities.new_closure_object(first_isolate, entrypoint_module.function);
+        first_isolate.isolate_closure = entrypoint_closure;
+
+        std.debug.print("Executing...\n", .{});
+
+        const result = try first_isolate.execute();
+        _ = result;
+        std.debug.print("Done.\n", .{});
     }
 
     /// submits an imported file to the group for parsing
