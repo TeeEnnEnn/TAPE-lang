@@ -495,17 +495,23 @@ pub const Isolate = struct {
                     Entities.print_value(v);
                     std.debug.print("\n", .{});
                 },
+
+                .OP_POP_N => {
+                    const pop_count = frame.read_u16();
+                    self.stack_top_index -= pop_count;
+                },
+
                 .OP_LOAD_GLOBAL => {
                     const index = frame.read_u16();
                     try self.push_value(self.globals[index]);
                 },
                 .OP_STORE_GLOBAL => {
                     const index = frame.read_u16();
-                    self.globals[index] = try self.pop_value();
+                    self.globals[index] = try self.peek_value(0);
                 },
                 .OP_STORE_LOCAL => {
                     const index = frame.read_u16();
-                    self.stack[frame.slot_start + index] = try self.pop_value();
+                    self.stack[frame.slot_start + index] = try self.peek_value(0);
                 },
                 .OP_LOAD_LOCAL => {
                     const index = frame.read_u16();
@@ -531,7 +537,10 @@ pub const Isolate = struct {
                         else => {},
                     }
                 },
-                .OP_LOOP => {},
+                .OP_LOOP => {
+                    const offset = frame.read_u16();
+                    frame.ip -= offset;
+                },
                 .OP_CALL => {},
                 .OP_CLOSURE => {},
             }
