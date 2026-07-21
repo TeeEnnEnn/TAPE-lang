@@ -20,7 +20,7 @@ pub const InterpretResult = enum {
     Error,
 };
 
-pub const RuntimePanic = error{ StackOverflow, StackUnderflow, DivisionByZero, ArgumentCountMismatch, CorruptedState };
+pub const RuntimePanic = error{ StackOverflow, StackUnderflow, DivisionByZero, ArgumentCountMismatch, CorruptedState, NegativeDenominator };
 
 /// Represents the virtual machine - the orchestrator of execution.
 pub const VM = struct {
@@ -129,6 +129,13 @@ pub const Isolate = struct {
         return self.stack[self.stack_top_index];
     }
 
+    pub fn peek_value(self: *Isolate, offset: usize) !TapeValue {
+        if (offset >= self.stack_top_index) {
+            return error.StackUnderflow;
+        }
+        return self.stack[self.stack_top_index - 1 - offset];
+    }
+
     pub fn call(self: *Isolate, closure: *Entities.ObjectClosure, arg_count: usize) !void {
         if (arg_count != closure.function.arity) {
             return RuntimePanic.ArgumentCountMismatch;
@@ -202,6 +209,36 @@ pub const Isolate = struct {
                 .OP_LOGICAL_NOT => {
                     const value = try self.pop_value();
                     try self.push_value(.{ .boolean = !value.boolean });
+                },
+
+                .OP_BITWISE_AND => {
+                    const b = try self.pop_value();
+                    const a = try self.pop_value();
+                    try self.push_value(TapeValue{ .int = a.int & b.int });
+                },
+                .OP_BITWISE_NOT => {
+                    const v = try self.pop_value();
+                    try self.push_value(TapeValue{ .int = ~v.int });
+                },
+                .OP_BITWISE_OR => {
+                    const b = try self.pop_value();
+                    const a = try self.pop_value();
+                    try self.push_value(TapeValue{ .int = a.int | b.int });
+                },
+                .OP_BITWISE_XOR => {
+                    const b = try self.pop_value();
+                    const a = try self.pop_value();
+                    try self.push_value(TapeValue{ .int = a.int ^ b.int });
+                },
+                .OP_LEFT_SHIFT => {
+                    const b = try self.pop_value();
+                    const a = try self.pop_value();
+                    try self.push_value(TapeValue{ .int = a.int << @intCast(b.int) });
+                },
+                .OP_RIGHT_SHIFT => {
+                    const b = try self.pop_value();
+                    const a = try self.pop_value();
+                    try self.push_value(TapeValue{ .int = a.int >> @intCast(b.int) });
                 },
 
                 .OP_EQUAL => {
@@ -406,6 +443,52 @@ pub const Isolate = struct {
                     const a = try self.pop_value(); // float
                     try self.push_value(.{ .float = a.float / @as(f64, @floatFromInt(b.int)) });
                 },
+
+                .OP_EXPONENT_INT => {
+                    const b = try self.pop_value(); // int
+                    const a = try self.pop_value(); // int
+                    try self.push_value(.{ .int = std.math.pow(i64, a.int, b.int) });
+                },
+                .OP_EXPONENT_FLOAT => {
+                    const b = try self.pop_value(); // float
+                    const a = try self.pop_value(); // float
+                    try self.push_value(.{ .float = std.math.pow(f64, a.float, b.float) });
+                },
+                .OP_EXPONENT_INT_FLOAT => {
+                    const b = try self.pop_value(); // float
+                    const a = try self.pop_value(); // int
+                    try self.push_value(.{ .float = std.math.pow(f64, @floatFromInt(a.int), b.float) });
+                },
+                .OP_EXPONENT_FLOAT_INT => {
+                    const b = try self.pop_value(); // int
+                    const a = try self.pop_value(); // float
+                    try self.push_value(.{ .float = std.math.pow(f64, a.float, @floatFromInt(b.int)) });
+                },
+
+                .OP_MOD_INT => {
+                    const b = try self.pop_value(); // int
+                    const a = try self.pop_value(); // int
+                    if (b.int == 0) {
+                        return error.DivisionByZero;
+                    }
+                    try self.push_value(.{ .int = @mod(a.int, b.int) });
+                },
+                .OP_MOD_FLOAT => {
+                    const b = try self.pop_value(); // float
+                    const a = try self.pop_value(); // float
+                    try self.push_value(.{ .float = try std.math.mod(f64, a.float, b.float) });
+                },
+                .OP_MOD_INT_FLOAT => {
+                    const b = try self.pop_value(); // float
+                    const a = try self.pop_value(); // int
+                    try self.push_value(.{ .float = try std.math.mod(f64, @floatFromInt(a.int), b.float) });
+                },
+                .OP_MOD_FLOAT_INT => {
+                    const b = try self.pop_value(); // int
+                    const a = try self.pop_value(); // float
+                    try self.push_value(.{ .float = try std.math.mod(f64, a.float, @floatFromInt(b.int)) });
+                },
+
                 .OP_POP => {
                     const v = try self.pop_value();
                     // for debugging
@@ -428,8 +511,26 @@ pub const Isolate = struct {
                     const index = frame.read_u16();
                     try self.push_value(self.stack[frame.slot_start + index]);
                 },
-                .OP_JUMP => {},
-                .OP_JUMP_IF_FALSE => {},
+                .OP_JUMP => {
+                    const offset = frame.read_u16();
+                    frame.ip += offset;
+                },
+                .OP_JUMP_IF_FALSE => {
+                    const offset = frame.read_u16();
+                    if (Entities.is_falsy(try self.peek_value(0))) {
+                        frame.ip += offset;
+                    }
+                },
+                .OP_JUMP_IF_NIL => {
+                    const offset = frame.read_u16();
+                    const value = try self.peek_value(0);
+                    switch (value) {
+                        .nil => {
+                            frame.ip += offset;
+                        },
+                        else => {},
+                    }
+                },
                 .OP_LOOP => {},
                 .OP_CALL => {},
                 .OP_CLOSURE => {},

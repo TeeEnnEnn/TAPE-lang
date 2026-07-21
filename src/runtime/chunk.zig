@@ -14,6 +14,13 @@ pub const Opcode = enum(u8) {
     OP_EQUAL,
     OP_NOT_EQUAL,
 
+    OP_BITWISE_NOT,
+    OP_BITWISE_AND,
+    OP_BITWISE_OR,
+    OP_BITWISE_XOR,
+    OP_LEFT_SHIFT,
+    OP_RIGHT_SHIFT,
+
     OP_GREATER_INT,
     OP_LESS_INT,
     OP_GREATER_EQUAL_INT,
@@ -53,6 +60,16 @@ pub const Opcode = enum(u8) {
     OP_DIV_INT_FLOAT,
     OP_DIV_FLOAT_INT,
 
+    OP_EXPONENT_INT,
+    OP_EXPONENT_FLOAT,
+    OP_EXPONENT_INT_FLOAT,
+    OP_EXPONENT_FLOAT_INT,
+
+    OP_MOD_INT,
+    OP_MOD_FLOAT,
+    OP_MOD_INT_FLOAT,
+    OP_MOD_FLOAT_INT,
+
     OP_POP,
     OP_LOAD_GLOBAL,
     OP_STORE_GLOBAL,
@@ -60,6 +77,7 @@ pub const Opcode = enum(u8) {
     OP_LOAD_LOCAL,
     OP_JUMP,
     OP_JUMP_IF_FALSE,
+    OP_JUMP_IF_NIL,
     OP_LOOP,
     OP_CALL,
 
