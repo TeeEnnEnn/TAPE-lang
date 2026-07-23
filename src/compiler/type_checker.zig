@@ -4,7 +4,7 @@ const TypeRegistry = @import("type_registry.zig");
 const PrimitiveType = TypeRegistry.PrimitiveType;
 const Environment = @import("environment.zig").Environment;
 const EnvironmentError = @import("environment.zig").EnvironmentError;
-const DiagnosticReporter = @import("../helpers/diagnostics.zig").DiagnosticsReporter;
+const DiagnosticReporter = @import("../diagnostics/diagnostics.zig").DiagnosticsReporter;
 const TypeRegistryError = TypeRegistry.TypeRegistryError;
 const ShapeField = TypeRegistry.ShapeField;
 const StructMethod = TypeRegistry.StructMethod;
@@ -82,10 +82,10 @@ pub const TypeChecker = struct {
                     return TypeCheckerError.UndefinedSymbol;
                 };
 
-                for (decl.items) |item| {
+                for (decl.items, 0..) |item, index| {
                     const alias = item.alias orelse item.name;
                     if (imported_module.exports.get(item.name.lexeme)) |resolved_id| {
-                        try self.environment.define(alias.lexeme, resolved_id);
+                        try self.environment.define_binding(alias.lexeme, resolved_id, .{ .import = .{ .use_decl = node, .index = @as(u32, @intCast(index)) } });
                     } else {
                         try self.diagnostics.add_diagnostic(.{ .file_path = self.module.filepath, .column = alias.column, .line = alias.line, .stage = .TypeChecker, .severity = .Error, .message = "Failed to import symbol from external module.", .hint = "Check that the module path is correct and that the symbol is exported with the 'pub' keyword." });
                         return TypeCheckerError.UndefinedSymbol;
@@ -103,7 +103,7 @@ pub const TypeChecker = struct {
 
                 const return_id = try self.registry.resolve(decl.return_type_annotation);
                 const fn_id = try self.registry.add_function_type(try param_types.toOwnedSlice(self.allocator), return_id);
-                try self.environment.define(decl.name.lexeme, fn_id);
+                try self.environment.define_binding(decl.name.lexeme, fn_id, .{ .node = node });
                 if (decl.modifier_pub) {
                     try self.module.exports.put(decl.name.lexeme, fn_id);
                 }
@@ -120,7 +120,7 @@ pub const TypeChecker = struct {
                 const return_id = try self.registry.resolve(decl.return_type_annotation);
                 const yield_id = try self.registry.resolve(decl.yield_type_annotation);
                 const co_id = try self.registry.add_coroutine_type(try param_types.toOwnedSlice(self.allocator), return_id, yield_id);
-                try self.environment.define(decl.name.lexeme, co_id);
+                try self.environment.define_binding(decl.name.lexeme, co_id, .{ .node = node });
                 if (decl.modifier_pub) {
                     try self.module.exports.put(decl.name.lexeme, co_id);
                 }
@@ -149,7 +149,7 @@ pub const TypeChecker = struct {
                 // Update the struct with actual methods
                 self.registry.types.items[struct_id]._struct.methods = try method_types.toOwnedSlice(self.allocator);
 
-                try self.environment.define(decl.name.lexeme, struct_id);
+                try self.environment.define_binding(decl.name.lexeme, struct_id, .{ .node = node });
                 if (decl.modifier_pub) {
                     try self.module.exports.put(decl.name.lexeme, struct_id);
                 }
@@ -157,7 +157,7 @@ pub const TypeChecker = struct {
             .type_decl => |decl| {
                 const type_annot_id = try self.registry.resolve(decl.type_annotation);
                 const type_id = try self.registry.add_type_type(decl.name.lexeme, type_annot_id, self.module.filepath);
-                try self.environment.define(decl.name.lexeme, type_id);
+                try self.environment.define_binding(decl.name.lexeme, type_id, .{ .node = node });
                 if (decl.modifier_pub) {
                     try self.module.exports.put(decl.name.lexeme, type_id);
                 }
@@ -169,7 +169,7 @@ pub const TypeChecker = struct {
                     try variants.append(self.allocator, variant.lexeme);
                 }
                 const enum_id = try self.registry.add_enum_type(decl.name.lexeme, try variants.toOwnedSlice(self.allocator), self.module.filepath);
-                try self.environment.define(decl.name.lexeme, enum_id);
+                try self.environment.define_binding(decl.name.lexeme, enum_id, .{ .node = node });
                 if (decl.modifier_pub) {
                     try self.module.exports.put(decl.name.lexeme, enum_id);
                 }
@@ -181,7 +181,7 @@ pub const TypeChecker = struct {
                     try variants.append(self.allocator, variant.lexeme);
                 }
                 const error_id = try self.registry.add_error_type(decl.name.lexeme, try variants.toOwnedSlice(self.allocator), self.module.filepath);
-                try self.environment.define(decl.name.lexeme, error_id);
+                try self.environment.define_binding(decl.name.lexeme, error_id, .{ .node = node });
                 if (decl.modifier_pub) {
                     try self.module.exports.put(decl.name.lexeme, error_id);
                 }
@@ -215,7 +215,7 @@ pub const TypeChecker = struct {
                     try self.diagnostics.add_diagnostic(.{ .file_path = self.module.filepath, .column = decl.name.column, .line = decl.name.line, .stage = .TypeChecker, .severity = .Error, .message = "Duplicate symbol", .hint = "Symbol is already defined." });
                     return TypeCheckerError.DuplicateSymbol;
                 }
-                try self.environment.define(decl.name.lexeme, target_type);
+                try self.environment.define_binding(decl.name.lexeme, target_type, .{ .node = node });
 
                 if (decl.modifier_pub) {
                     try self.module.exports.put(decl.name.lexeme, target_type);
@@ -250,12 +250,17 @@ pub const TypeChecker = struct {
                 // Define self if this is a method
                 const has_self = type_info.function.args.len == decl.params.len + 1;
                 if (has_self) {
-                    try self.environment.define("self", type_info.function.args[0]);
+                    try self.environment.define_binding(
+                        "self",
+                        type_info.function.args[0],
+                        .{ .param = .{ .func = node, .index = 0 } },
+                    );
                 }
 
                 // Define params locally
-                for (decl.params, type_info.function.args[if (has_self) 1 else 0..]) |param, param_id| {
-                    try self.environment.define(param.name.lexeme, param_id);
+                const param_offset: usize = if (has_self) 1 else 0;
+                for (decl.params, type_info.function.args[param_offset..], 0..) |param, param_id, index| {
+                    try self.environment.define_binding(param.name.lexeme, param_id, .{ .param = .{ .func = node, .index = @as(u32, @intCast(index + param_offset)) } });
                 }
 
                 const prev_in_func = self.in_function;
@@ -293,9 +298,9 @@ pub const TypeChecker = struct {
                 defer self.environment = prev_env;
 
                 const type_info = self.registry.get_type_info(struct_typeid);
-                try self.environment.define("Self", struct_typeid);
-                for (type_info._struct.methods) |sm| {
-                    try self.environment.define(sm.name, sm.type);
+                try self.environment.define("self", struct_typeid);
+                for (decl.methods, type_info._struct.methods) |method_decl, sm| {
+                    try self.environment.define_binding(sm.name, sm.type, .{ .node = method_decl.method });
                 }
 
                 for (decl.methods) |method| {
@@ -335,12 +340,17 @@ pub const TypeChecker = struct {
                 // Define self if this is a method
                 const has_self = type_info.coroutine.args.len == decl.params.len + 1;
                 if (has_self) {
-                    try self.environment.define("self", type_info.coroutine.args[0]);
+                    try self.environment.define_binding(
+                        "self",
+                        type_info.coroutine.args[0],
+                        .{ .param = .{ .func = node, .index = 0 } },
+                    );
                 }
 
                 // Define params locally
-                for (decl.params, type_info.coroutine.args[if (has_self) 1 else 0..]) |param, param_id| {
-                    try self.environment.define(param.name.lexeme, param_id);
+                const param_offset: usize = if (has_self) 1 else 0;
+                for (decl.params, type_info.coroutine.args[param_offset..], 0..) |param, param_id, index| {
+                    try self.environment.define_binding(param.name.lexeme, param_id, .{ .param = .{ .func = node, .index = @as(u32, @intCast(index + param_offset)) } });
                 }
 
                 const body_term = try self.check(decl.body);
@@ -435,7 +445,7 @@ pub const TypeChecker = struct {
                 self.environment = &local_env;
                 defer self.environment = prev_env;
 
-                try self.environment.define(stmt.iterator_name.lexeme, @intFromEnum(PrimitiveType.Int));
+                try self.environment.define_binding(stmt.iterator_name.lexeme, @intFromEnum(PrimitiveType.Int), .{ .node = node });
                 const prev_loop = self.in_loop;
                 self.in_loop = true;
                 _ = try self.check(stmt.body);
@@ -558,14 +568,16 @@ pub const TypeChecker = struct {
                 return TypeCheckerError.InvalidOperation; //
             },
             .identifier_expr => |expr| {
-                const expr_type = self.environment.lookup(expr.name.lexeme) catch {
+                const info = self.environment.lookup_binding(expr.name.lexeme) catch {
                     try self.diagnostics.add_diagnostic(.{ .file_path = self.module.filepath, .column = expr.column, .line = expr.line, .stage = .TypeChecker, .severity = .Error, .message = "Undefined symbol", .hint = "Symbol is not defined." });
                     return TypeCheckerError.UndefinedSymbol;
                 };
-                expr.resolved_type = expr_type;
-                return expr_type;
+                expr.resolved_type = info.type_id;
+                expr.resolved_decl = info.decl;
+                return info.type_id;
             },
             .cast_expr => |expr| {
+                // TODO: REMOVE
                 const left_type = try self.check_expression(expr.expr);
                 const right_type = try self.registry.resolve(expr.type);
 
@@ -617,7 +629,6 @@ pub const TypeChecker = struct {
                 expr.resolved_type = union_type;
                 return union_type;
             },
-
             .binary_expr => |expr| {
                 const left_type: AST.TypeId = try self.check_expression(expr.left);
                 const right_type: AST.TypeId = try self.check_expression(expr.right);
@@ -659,25 +670,19 @@ pub const TypeChecker = struct {
                     expr.resolved_type = @intFromEnum(PrimitiveType.Int);
                     return expr.resolved_type;
                 } else if (std.mem.eql(u8, op, "orelse")) {
-                    // orelse is only valid for T | Nil and T | Error
-                    const left_type_info = self.registry.get_type_info(left_type);
-                    const right_type_info = self.registry.get_type_info(right_type);
+                    // orelse is only valid for T | Nil
+                    // TODO: add catch for T | Error
+                    // const left_type_info = self.registry.get_type_info(left_type);
+                    // const right_type_info = self.registry.get_type_info(right_type);
 
                     const left_nil = left_type == @intFromEnum(PrimitiveType.Nil);
                     const right_nil = right_type == @intFromEnum(PrimitiveType.Nil);
-                    const left_error = left_type_info == ._error;
-                    const right_error = right_type_info == ._error;
-                    if (!(left_nil or right_nil) and !(left_error or right_error)) return TypeCheckerError.TypeMismatch;
+
+                    if (!(left_nil or right_nil)) return TypeCheckerError.TypeMismatch;
                     if (left_nil) {
                         expr.resolved_type = right_type;
                         return expr.resolved_type;
                     } else if (right_nil) {
-                        expr.resolved_type = left_type;
-                        return expr.resolved_type;
-                    } else if (left_error) {
-                        expr.resolved_type = right_type;
-                        return expr.resolved_type;
-                    } else if (right_error) {
                         expr.resolved_type = left_type;
                         return expr.resolved_type;
                     }
@@ -856,7 +861,6 @@ pub const TypeChecker = struct {
                 }
                 return TypeCheckerError.InvalidMemberAccess;
             },
-
             .array_expr => |expr| {
                 var current_id: ?AST.TypeId = null;
                 for (expr.elements) |element| {
@@ -1029,8 +1033,8 @@ pub const TypeChecker = struct {
                 defer self.environment = prev_env;
 
                 // Define params locally
-                for (expr.params, arg_types.items) |param, param_id| {
-                    try self.environment.define(param.name.lexeme, param_id);
+                for (expr.params, arg_types.items, 0..) |param, param_id, index| {
+                    try self.environment.define_binding(param.name.lexeme, param_id, .{ .param = .{ .func = node, .index = @as(u32, @intCast(index)) } });
                 }
 
                 // Typecheck inner body
@@ -1075,8 +1079,8 @@ pub const TypeChecker = struct {
                 self.environment = &local_env;
                 defer self.environment = prev_env;
 
-                for (expr.params, arg_types.items) |param, param_id| {
-                    try self.environment.define(param.name.lexeme, param_id);
+                for (expr.params, arg_types.items, 0..) |param, param_id, index| {
+                    try self.environment.define_binding(param.name.lexeme, param_id, .{ .param = .{ .func = node, .index = @as(u32, @intCast(index)) } });
                 }
 
                 const body_term = try self.check(expr.body);

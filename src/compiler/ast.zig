@@ -1,8 +1,18 @@
 const std = @import("std");
 const Token = @import("scanner.zig").Token;
 
+/// A type's unique identifier
 pub const TypeId = u32;
 
+/// A reference to a declaration
+/// Used to emit context aware bytecode
+pub const DeclRef = union(enum) {
+    node: *ASTNode,
+    param: struct { func: *ASTNode, index: u32 },
+    import: struct { use_decl: *ASTNode, index: u32 },
+};
+
+/// A Abstract Syntax Tree Node
 pub const ASTNode = union(enum) {
     program: *Program,
     /// Variable Declaration
@@ -48,7 +58,7 @@ pub const ASTNode = union(enum) {
     cast_expr: *CastExpr, // as
 
     // prefix
-    unary_expr: *UnaryExpr, // !, ~, -
+    unary_expr: *UnaryExpr, // not, ~, -
 
     // infix
     binary_expr: *BinaryExpr, // +, -, *, /, %, <<, >>, &, |, ^
@@ -404,6 +414,7 @@ pub const AssignExpr = struct {
 pub const IdentifierExpr = struct {
     name: Token,
     resolved_type: TypeId = 0,
+    resolved_decl: ?DeclRef = null,
     line: usize,
     column: usize,
 };
