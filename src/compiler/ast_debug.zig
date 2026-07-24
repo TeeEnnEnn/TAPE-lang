@@ -215,13 +215,6 @@ pub fn print_node(node: *AST.ASTNode, depth: usize, indent_amt: usize) void {
                 print_node(arg, depth + 1, indent_amt);
             }
         },
-        .cast_expr => |cast_expr| {
-            std.debug.print("CastExpr:", .{});
-            write_location(cast_expr.line, cast_expr.column);
-            std.debug.print("\n", .{});
-            print_node(cast_expr.expr, depth + 1, indent_amt);
-            print_node(cast_expr.type, depth + 1, indent_amt);
-        },
         .co_type => |co_type| {
             std.debug.print("CoType:\n", .{});
             for (co_type.params) |param| {
@@ -380,24 +373,6 @@ pub fn print_node(node: *AST.ASTNode, depth: usize, indent_amt: usize) void {
             write_location(return_stmt.line, return_stmt.column);
             std.debug.print("\n", .{});
             if (return_stmt.expr) |expr| print_node(expr, depth + 1, indent_amt);
-        },
-        .shape_expr => |shape_expr| {
-            std.debug.print("ShapeExpr:", .{});
-            write_location(shape_expr.line, shape_expr.column);
-            std.debug.print("\n", .{});
-            for (shape_expr.fields) |field| {
-                indent(depth + 1, indent_amt);
-                std.debug.print("{s}: ", .{field.name.lexeme});
-                print_node(field.type_annotation, 0, indent_amt);
-            }
-        },
-        .shape_type => |shape_type| {
-            std.debug.print("ShapeType:\n", .{});
-            for (shape_type.fields) |field| {
-                indent(depth + 1, indent_amt);
-                std.debug.print("{s}: ", .{field.name.lexeme});
-                print_node(field.type_annotation, 0, indent_amt);
-            }
         },
         .static_member_expr => |static_member_expr| {
             std.debug.print("StaticMemberExpr: ::{s}", .{static_member_expr.member.lexeme});

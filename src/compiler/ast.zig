@@ -55,8 +55,6 @@ pub const ASTNode = union(enum) {
     assign_expr: *AssignExpr, // =, +=, -=, *=, /=, %=, <<=, >>=, &=, |=, ^=
     identifier_expr: *IdentifierExpr,
 
-    cast_expr: *CastExpr, // as
-
     // prefix
     unary_expr: *UnaryExpr, // not, ~, -
 
@@ -81,12 +79,6 @@ pub const ASTNode = union(enum) {
     /// [ ]
     /// ```
     array_expr: *ArrayExpr,
-    /// Shape expression node.
-    ///
-    /// ```
-    /// shape {  }
-    /// ```
-    shape_expr: *ShapeExpr,
 
     group_expr: *GroupExpr, // ( )
     tuple_expr: *TupleExpr, // ( )
@@ -119,7 +111,6 @@ pub const ASTNode = union(enum) {
     fn_type: *FnType,
     co_type: *CoType,
     union_type: *UnionType,
-    shape_type: *ShapeType,
 };
 
 // Node Types
@@ -140,6 +131,7 @@ pub const Program = struct {
 /// ```
 pub const VarDecl = struct {
     modifier_pub: bool,
+    is_const: bool,
     name: Token,
     type_annotation: ?*ASTNode,
     initializer: *ASTNode,
@@ -419,19 +411,6 @@ pub const IdentifierExpr = struct {
     column: usize,
 };
 
-/// Cast expression node.
-///
-/// ```
-/// value 'as' type
-/// ```
-pub const CastExpr = struct {
-    expr: *ASTNode,
-    type: *ASTNode,
-    resolved_type: TypeId = 0,
-    line: usize,
-    column: usize,
-};
-
 /// Unary expression node.
 ///
 /// ```
@@ -454,18 +433,6 @@ pub const BinaryExpr = struct {
     operator: Token,
     left: *ASTNode,
     right: *ASTNode,
-    resolved_type: TypeId = 0,
-    line: usize,
-    column: usize,
-};
-
-/// Shape expression node.
-///
-/// ```
-/// shape { field: type, ... }
-/// ```
-pub const ShapeExpr = struct {
-    fields: []*TypedNamedField,
     resolved_type: TypeId = 0,
     line: usize,
     column: usize,
@@ -775,10 +742,6 @@ pub const IdentifierType = struct {
 pub const UnionType = struct {
     left: *ASTNode,
     right: *ASTNode,
-};
-
-pub const ShapeType = struct {
-    fields: []*TypedNamedField,
 };
 
 // match patterns

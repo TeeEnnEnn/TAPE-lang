@@ -94,16 +94,3 @@ test "TypeRegistry - Function Types" {
     const fn_id2 = try resolveType(allocator, &registry, "fn (Int, Float) -> String");
     try std.testing.expectEqual(fn_id, fn_id2);
 }
-
-test "TypeRegistry - Shape Types" {
-    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
-    defer arena.deinit();
-    const allocator = arena.allocator();
-
-    var registry = try TypeRegistry.init(allocator);
-    defer registry.deinit();
-
-    const shape_id = try resolveType(allocator, &registry, "shape { x: Int, y: Float }");
-    const shape_id2 = try resolveType(allocator, &registry, "shape { x: Int, y: Float }");
-    try std.testing.expectEqual(shape_id, shape_id2);
-}

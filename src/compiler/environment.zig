@@ -12,6 +12,7 @@ pub const EnvironmentError = error{
 pub const SymbolInfo = struct {
     type_id: TypeId,
     decl: ?DeclRef = null,
+    // TODO: add is_const tracking
 };
 
 pub const Environment = struct {

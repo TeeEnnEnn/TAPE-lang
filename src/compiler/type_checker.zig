@@ -6,7 +6,6 @@ const Environment = @import("environment.zig").Environment;
 const EnvironmentError = @import("environment.zig").EnvironmentError;
 const DiagnosticReporter = @import("../diagnostics/diagnostics.zig").DiagnosticsReporter;
 const TypeRegistryError = TypeRegistry.TypeRegistryError;
-const ShapeField = TypeRegistry.ShapeField;
 const StructMethod = TypeRegistry.StructMethod;
 const StructField = TypeRegistry.StructField;
 const Module = @import("workspace.zig").Module;
@@ -552,11 +551,19 @@ pub const TypeChecker = struct {
                     if (!std.mem.eql(u8, op, "=")) {
                         const is_numeric = left_type == @intFromEnum(PrimitiveType.Int) or left_type == @intFromEnum(PrimitiveType.Float);
 
-                        if (std.mem.eql(u8, op, "-=") or std.mem.eql(u8, op, "*=") or std.mem.eql(u8, op, "/=") or std.mem.eql(u8, op, "+=")) {
+                        if (std.mem.eql(u8, op, "-=") or std.mem.eql(u8, op, "*=") or std.mem.eql(u8, op, "/=") or std.mem.eql(u8, op, "+=") or std.mem.eql(u8, op, "%=") or std.mem.eql(u8, op, "**=")) {
                             if (!is_numeric) {
                                 return TypeCheckerError.InvalidOperation;
                             }
                         }
+
+                        if (std.mem.eql(u8, op, "++=")) {
+                            if (!(left_type == @intFromEnum(PrimitiveType.String) and right_type == @intFromEnum(PrimitiveType.String))) {
+                                // ++= can only be used for strings
+                                return TypeCheckerError.InvalidOperation;
+                            }
+                        }
+
                         expr.resolved_type = left_type;
                         return left_type;
                     }
@@ -575,15 +582,6 @@ pub const TypeChecker = struct {
                 expr.resolved_type = info.type_id;
                 expr.resolved_decl = info.decl;
                 return info.type_id;
-            },
-            .cast_expr => |expr| {
-                // TODO: REMOVE
-                const left_type = try self.check_expression(expr.expr);
-                const right_type = try self.registry.resolve(expr.type);
-
-                if (!try self.is_compatible(right_type, left_type)) return TypeCheckerError.TypeMismatch;
-                expr.resolved_type = right_type;
-                return right_type;
             },
             .unary_expr => |expr| {
                 const token = expr.operator;
@@ -670,26 +668,49 @@ pub const TypeChecker = struct {
                     expr.resolved_type = @intFromEnum(PrimitiveType.Int);
                     return expr.resolved_type;
                 } else if (std.mem.eql(u8, op, "orelse")) {
-                    // orelse is only valid for T | Nil
-                    // TODO: add catch for T | Error
-                    // const left_type_info = self.registry.get_type_info(left_type);
-                    // const right_type_info = self.registry.get_type_info(right_type);
+                    // a orelse b
+                    // if a is nil then give me b
 
-                    const left_nil = left_type == @intFromEnum(PrimitiveType.Nil);
-                    const right_nil = right_type == @intFromEnum(PrimitiveType.Nil);
+                    // a must be a union with Nil
 
-                    if (!(left_nil or right_nil)) return TypeCheckerError.TypeMismatch;
-                    if (left_nil) {
-                        expr.resolved_type = right_type;
-                        return expr.resolved_type;
-                    } else if (right_nil) {
-                        expr.resolved_type = left_type;
-                        return expr.resolved_type;
+                    const left_info = self.registry.get_type_info(left_type);
+                    if (left_info != ._union) {
+                        // One side of a must be a union
+                        return TypeCheckerError.InvalidOperation;
                     }
-                    return TypeCheckerError.TypeMismatch;
-                } else {
-                    return TypeCheckerError.InvalidOperation;
-                }
+
+                    if (!((left_info._union.left == @intFromEnum(PrimitiveType.Nil) and left_info._union.right != @intFromEnum(PrimitiveType.Nil)) or (left_info._union.left != @intFromEnum(PrimitiveType.Nil) and left_info._union.right == @intFromEnum(PrimitiveType.Nil)))) {
+                        // exactly one of the sides of the union must be Nil
+                        return TypeCheckerError.InvalidOperation;
+                    }
+                    const non_nil_side = if (left_info._union.left == @intFromEnum(PrimitiveType.Nil)) left_info._union.right else left_info._union.left;
+                    const result_union = try self.registry.add_union_type(non_nil_side, right_type);
+                    expr.resolved_type = result_union;
+                    return expr.resolved_type;
+                } else if (std.mem.eql(u8, op, "catch")) {
+                    // a catch b
+                    // if a is error then give me b
+
+                    // a must be a union with Error
+
+                    const left_info = self.registry.get_type_info(left_type);
+                    if (left_info != ._union) {
+                        // One side of a must be a union
+                        return TypeCheckerError.InvalidOperation;
+                    }
+
+                    const union_left = self.registry.get_type_info(left_info._union.left);
+                    const union_right = self.registry.get_type_info(left_info._union.right);
+
+                    if (!((union_left == ._error and union_right != ._error) or (union_left != ._error and union_right == ._error))) {
+                        // exactly one of the sides of the union must be Error
+                        return TypeCheckerError.InvalidOperation;
+                    }
+                    const non_error_side = if (union_left == ._error) left_info._union.right else left_info._union.left;
+                    const result_union = try self.registry.add_union_type(non_error_side, right_type);
+                    expr.resolved_type = result_union;
+                    return expr.resolved_type;
+                } else return TypeCheckerError.InvalidOperation;
             },
             .call_expr => |expr| {
                 // check if the call target is a callable type. Otherwise error
@@ -772,14 +793,6 @@ pub const TypeChecker = struct {
                 const type_info = self.registry.get_type_info(obj_type);
 
                 switch (type_info) {
-                    .shape => |shape| {
-                        for (shape) |field| {
-                            if (std.mem.eql(u8, field.name, expr.member.lexeme)) {
-                                expr.resolved_type = field.type;
-                                return field.type;
-                            }
-                        }
-                    },
                     .tuple => |tuple| {
                         const index_value = std.fmt.parseInt(u8, expr.member.lexeme, 10) catch {
                             return TypeCheckerError.InvalidMemberAccess;
@@ -879,19 +892,6 @@ pub const TypeChecker = struct {
                 expr.resolved_type = array_type;
                 return array_type;
             },
-            .shape_expr => |expr| {
-                var field_types: std.ArrayList(ShapeField) = .empty;
-                defer field_types.deinit(self.allocator);
-
-                for (expr.fields) |field| {
-                    const field_type = try self.registry.resolve(field.type_annotation);
-                    try field_types.append(self.allocator, .{ .name = field.name.lexeme, .type = field_type });
-                }
-
-                const shape_type = try self.registry.add_shape_type(field_types.items);
-                expr.resolved_type = shape_type;
-                return shape_type;
-            },
             .group_expr => |expr| {
                 const expr_type = try self.check_expression(expr.expr);
                 expr.resolved_type = expr_type;
@@ -952,14 +952,14 @@ pub const TypeChecker = struct {
                 const type_info = self.registry.get_type_info(struct_typeid);
                 if (type_info != ._struct) return TypeCheckerError.InvalidOperation;
 
-                const shape_fields = type_info._struct.fields;
+                const struct_fields = type_info._struct.fields;
                 var provided_count: usize = 0;
 
                 for (expr.fields) |provided_field| {
                     const val_type = try self.check_expression(provided_field.value);
 
                     var matched = false;
-                    for (shape_fields) |sf| {
+                    for (struct_fields) |sf| {
                         if (std.mem.eql(u8, sf.name, provided_field.name.lexeme)) {
                             if (!try self.is_compatible(sf.type, val_type)) return TypeCheckerError.TypeMismatch;
                             matched = true;
@@ -972,10 +972,10 @@ pub const TypeChecker = struct {
 
                 // Count fields that have no default — those are required
                 var required_count: usize = 0;
-                for (shape_fields) |sf| {
+                for (struct_fields) |sf| {
                     if (!sf.has_default) required_count += 1;
                 }
-                if (provided_count < required_count or provided_count > shape_fields.len) return TypeCheckerError.InvalidArgumentCount;
+                if (provided_count < required_count or provided_count > struct_fields.len) return TypeCheckerError.InvalidArgumentCount;
 
                 expr.resolved_type = struct_typeid;
                 return struct_typeid;

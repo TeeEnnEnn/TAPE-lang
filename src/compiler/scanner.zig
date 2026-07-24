@@ -36,6 +36,10 @@ pub const TokenType = enum {
     STAR_STAR,
     /// '++' Use for concatenation (e.g. `a ++ b`)
     PLUS_PLUS,
+    /// ++=
+    PLUS_PLUS_EQUAL,
+    /// '**='
+    STAR_STAR_EQUAL,
     /// '%'
     PERCENT,
     /// ':'
@@ -116,12 +120,16 @@ pub const TokenType = enum {
     OR,
     /// 'orelse'
     ORELSE,
+    /// 'catch'
+    CATCH,
     /// 'return'
     RETURN,
     /// 'true'
     TRUE,
     /// 'var'
     VAR,
+    /// 'const'
+    CONST,
     /// 'while'
     WHILE,
     /// 'break'
@@ -150,8 +158,6 @@ pub const TokenType = enum {
     PANIC,
     /// 'struct'
     STRUCT,
-    /// 'shape'
-    SHAPE,
     /// 'type'
     TYPE,
     /// 'static'
@@ -339,7 +345,15 @@ pub const Scanner = struct {
             } else .IDENTIFIER,
             'b' => self.check_keyword(1, "reak", .BREAK),
             'c' => if (len > 1) switch (source[1]) {
-                'o' => if (len == 2) .CO else self.check_keyword(2, "ntinue", .CONTINUE),
+                'o' => if (len == 2) .CO else if (len > 2) switch (source[2]) {
+                    'n' => if (len > 3) switch (source[3]) {
+                        's' => self.check_keyword(4, "t", .CONST),
+                        't' => self.check_keyword(4, "inue", .CONTINUE),
+                        else => .IDENTIFIER,
+                    } else .IDENTIFIER,
+                    else => .IDENTIFIER,
+                } else .IDENTIFIER,
+                'a' => self.check_keyword(2, "tch", .CATCH),
                 else => .IDENTIFIER,
             } else .IDENTIFIER,
             'd' => self.check_keyword(1, "efault", .DEFAULT),
@@ -392,7 +406,6 @@ pub const Scanner = struct {
                     'r' => self.check_keyword(3, "uct", .STRUCT),
                     else => .IDENTIFIER,
                 } else .IDENTIFIER,
-                'h' => self.check_keyword(2, "ape", .SHAPE),
                 else => .IDENTIFIER,
             } else .IDENTIFIER,
             'w' => self.check_keyword(1, "hile", .WHILE),
@@ -483,12 +496,25 @@ pub const Scanner = struct {
                 self.make_token(.ARROW)
             else
                 self.make_token(if (self.match('=')) .MINUS_EQUAL else .MINUS),
-            '+' => self.make_token(if (self.match('=')) .PLUS_EQUAL else if (self.match('+')) .PLUS_PLUS else .PLUS),
+            '+' => blk: {
+                if (self.match('+')) {
+                    break :blk if (self.match('=')) self.make_token(.PLUS_PLUS_EQUAL) else self.make_token(.PLUS_PLUS);
+                }
+                if (self.match('=')) {
+                    break :blk self.make_token(.PLUS_EQUAL);
+                }
+                break :blk self.make_token(.PLUS);
+            },
             '/' => self.make_token(if (self.match('=')) .SLASH_EQUAL else .SLASH),
-            '*' => if (self.match('*'))
-                self.make_token(.STAR_STAR)
-            else
-                self.make_token(if (self.match('=')) .STAR_EQUAL else .STAR),
+            '*' => blk: {
+                if (self.match('*')) {
+                    break :blk if (self.match('=')) self.make_token(.STAR_STAR_EQUAL) else self.make_token(.STAR_STAR);
+                }
+                if (self.match('=')) {
+                    break :blk self.make_token(.STAR_EQUAL);
+                }
+                break :blk self.make_token(.STAR);
+            },
             '%' => self.make_token(if (self.match('=')) .PERCENT_EQUAL else .PERCENT),
             '!' => if (self.match('=')) self.make_token(.NOT_EQUAL) else error.UnexpectedToken,
             '=' => if (self.match('='))

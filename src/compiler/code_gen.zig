@@ -78,7 +78,6 @@ pub const CodeGenerator = struct {
             .unary_expr => |n| n.resolved_type,
             .identifier_expr => |n| n.resolved_type,
             .assign_expr => |n| n.resolved_type,
-            .cast_expr => |n| n.resolved_type,
             .call_expr => |n| n.resolved_type,
             .index_expr => |n| n.resolved_type,
             .dot_expr => |n| n.resolved_type,
@@ -91,7 +90,6 @@ pub const CodeGenerator = struct {
             .match_expr => |n| n.resolved_type,
             .anon_fn_expr => |n| n.resolved_type,
             .anon_co_expr => |n| n.resolved_type,
-            .shape_expr => |n| n.resolved_type,
             .try_expr => |n| n.resolved_type,
             .resume_expr => |n| n.resolved_type,
             else => unreachable, // caller only invokes this on expression nodes
@@ -164,7 +162,7 @@ pub const CodeGenerator = struct {
         try self.generate_expression(decl.initializer);
 
         const ref: AST.DeclRef = .{ .node = node };
-        const binding = self.binding_resolution.decl_bindings.get(ref) orelse return CodeGeneratorError.MissingBinding;
+        const binding = self.binding_resolution.declaration_bindings.get(ref) orelse return CodeGeneratorError.MissingBinding;
 
         switch (binding.kind) {
             .local => {
@@ -237,7 +235,7 @@ pub const CodeGenerator = struct {
     }
 
     fn generate_identifier_expr(self: *CodeGenerator, node: *AST.ASTNode, expr: *AST.IdentifierExpr) CodeGeneratorError!void {
-        const binding = self.binding_resolution.ident_bindings.get(node) orelse return CodeGeneratorError.MissingBinding;
+        const binding = self.binding_resolution.identifier_bindings.get(node) orelse return CodeGeneratorError.MissingBinding;
         switch (binding.kind) {
             .global => {
                 try self.current.chunk().write_opcode(.OP_LOAD_GLOBAL, expr.line);

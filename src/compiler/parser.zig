@@ -123,9 +123,11 @@ pub const Parser = struct {
         return left;
     }
 
+    /// Parses at the logical_or precedence
+    /// Parses `or`, `orelse`, `catch`
     fn parse_logical_or(self: *Parser) ParserError!*AST.ASTNode {
         var left = try self.parse_logical_and();
-        while (self.check(.OR) or self.check(.ORELSE)) {
+        while (self.check(.OR) or self.check(.ORELSE) or self.check(.CATCH)) {
             const operator = self.current;
             try self.advance();
             const right = try self.parse_logical_and();
@@ -393,23 +395,7 @@ pub const Parser = struct {
         }
 
         // If no unary, go to next precedence
-        return try self.parse_cast();
-    }
-
-    fn parse_cast(self: *Parser) ParserError!*AST.ASTNode {
-        var expr = try self.parse_postfix();
-
-        while (try self.match(.AS)) {
-            const type_node = try self.parse_type_expression();
-
-            const cast = try self.allocator.create(AST.CastExpr);
-            cast.* = .{ .expr = expr, .type = type_node, .line = self.previous.line, .column = self.previous.column };
-
-            const node = try self.allocator.create(AST.ASTNode);
-            node.* = .{ .cast_expr = cast };
-            expr = node;
-        }
-        return expr;
+        return try self.parse_postfix();
     }
 
     fn parse_postfix(self: *Parser) ParserError!*AST.ASTNode {
@@ -751,9 +737,7 @@ pub const Parser = struct {
     fn parse_type_expression(self: *Parser) ParserError!*AST.ASTNode {
         var left: *AST.ASTNode = undefined;
 
-        if (try self.match(.SHAPE)) {
-            left = try self.parse_shape_expression();
-        } else if (try self.match(.FN)) {
+        if (try self.match(.FN)) {
             // Function Type: fn (Int, Float) -> Bool
             try self.consume(.LEFT_PAREN, "Expected '(' to start function type parameters.");
             var params: std.ArrayList(*AST.ASTNode) = .empty;
@@ -994,6 +978,37 @@ pub const Parser = struct {
         const var_decl = try self.allocator.create(AST.VarDecl);
         var_decl.* = .{
             .modifier_pub = is_pub,
+            .is_const = false,
+            .name = name,
+            .type_annotation = type_annotation,
+            .initializer = initializer,
+            .line = name.line,
+            .column = name.column,
+        };
+
+        const node = try self.allocator.create(AST.ASTNode);
+        node.* = .{ .var_decl = var_decl };
+
+        return node;
+    }
+
+    fn parse_const_declaration(self: *Parser, is_pub: bool) ParserError!*AST.ASTNode {
+        try self.consume(.IDENTIFIER, "Expected identifier for variable declaration.");
+        const name = self.previous;
+
+        var type_annotation: ?*AST.ASTNode = null;
+        if (try self.match(.COLON)) {
+            type_annotation = try self.parse_type_expression();
+        }
+
+        try self.consume(.EQUAL, "Expected '=' to separate variable name from initializer.");
+        const initializer = try self.parse_expression();
+        try self.consume(.SEMICOLON, "Expected ';' to end variable declaration.");
+
+        const var_decl = try self.allocator.create(AST.VarDecl);
+        var_decl.* = .{
+            .modifier_pub = is_pub,
+            .is_const = true,
             .name = name,
             .type_annotation = type_annotation,
             .initializer = initializer,
@@ -1088,50 +1103,17 @@ pub const Parser = struct {
         return node;
     }
 
-    fn parse_shape_expression(self: *Parser) ParserError!*AST.ASTNode {
-        try self.consume(.LEFT_BRACE, "Expected '{' to start shape expression.");
-        var fields: std.ArrayList(*AST.TypedNamedField) = .empty;
-        if (!self.check(.RIGHT_BRACE)) {
-            while (true) {
-                const field = try self.parse_typed_named_field();
-                try fields.append(self.allocator, field);
-                if (self.check(.RIGHT_BRACE)) {
-                    break;
-                }
-                try self.consume(.COMMA, "Expected ',' to separate shape fields.");
-            }
-        }
-        try self.consume(.RIGHT_BRACE, "Expected '}' to end shape expression.");
-        const shape_expr = try self.allocator.create(AST.ShapeExpr);
-        shape_expr.* = .{ .fields = try fields.toOwnedSlice(self.allocator), .line = self.previous.line, .column = self.previous.column };
-        const node = try self.allocator.create(AST.ASTNode);
-        node.* = .{ .shape_expr = shape_expr };
-        return node;
-    }
-
     fn parse_type_declaration(self: *Parser, is_pub: bool) ParserError!*AST.ASTNode {
         try self.consume(.IDENTIFIER, "Expected identifier for type declaration.");
         const name = self.previous;
         try self.consume(.EQUAL, "Expected '=' to start type annotation.");
-        if (self.check(.LEFT_BRACE)) {
-            const shape_expr = try self.parse_shape_expression();
-            const type_decl = try self.allocator.create(AST.TypeDecl);
-            type_decl.* = .{ .modifier_pub = is_pub, .name = name, .type_annotation = shape_expr, .line = name.line, .column = name.column };
-            const node = try self.allocator.create(AST.ASTNode);
-            node.* = .{ .type_decl = type_decl };
-            return node;
-        } else {
-            const type_expr = try self.parse_type_expression();
-            const type_decl = try self.allocator.create(AST.TypeDecl);
-            type_decl.* = .{ .modifier_pub = is_pub, .name = name, .type_annotation = type_expr, .line = name.line, .column = name.column };
-            const node = try self.allocator.create(AST.ASTNode);
-            node.* = .{ .type_decl = type_decl };
-            return node;
-        }
-        try self.workspace.diagnostics_mutex.lock(self.io);
-        try self.workspace.diagnostics.add_diagnostic(.{ .column = self.scanner.column(), .line = self.scanner.line, .stage = .Parser, .severity = .Error, .message = "Unexpected token", .file_path = self.module.filepath });
-        self.workspace.diagnostics_mutex.unlock(self.io);
-        return ParserError.UnexpectedToken;
+
+        const type_expr = try self.parse_type_expression();
+        const type_decl = try self.allocator.create(AST.TypeDecl);
+        type_decl.* = .{ .modifier_pub = is_pub, .name = name, .type_annotation = type_expr, .line = name.line, .column = name.column };
+        const node = try self.allocator.create(AST.ASTNode);
+        node.* = .{ .type_decl = type_decl };
+        return node;
     }
 
     fn parse_for_statement(self: *Parser) ParserError!*AST.ASTNode {
@@ -1604,6 +1586,8 @@ pub const Parser = struct {
 
         if (try self.match(.VAR)) {
             return try self.parse_var_declaration(is_pub);
+        } else if (try self.match(.CONST)) {
+            return try self.parse_const_declaration(is_pub);
         } else if (try self.match(.FN)) {
             return try self.parse_function_declaration(is_pub, false);
         } else if (try self.match(.CO)) {

@@ -9,7 +9,7 @@ modifier        ::= 'pub' | 'static'
 use_decl        ::= 'use' import_item (',' import_item)* 'from' STRING ';'
 
 
-var_decl        ::= 'var' IDENTIFIER (':' type_expr)? '=' expression ';'
+var_decl        ::= ('var' | 'const') IDENTIFIER (':' type_expr)? '=' expression ';'
 
 fn_decl         ::= 'fn' IDENTIFIER '(' parameters? ')' ('->' type_expr) statement
 
@@ -69,11 +69,11 @@ block           ::= '{' declaration* '}'
 expression      ::= assignment
 
 assignment      ::= range (assign_op assignment)?
-assign_op       ::= '=' | '+=' | '-=' | '*=' | '/=' | '%='
+assign_op       ::= '=' | '+=' | '-=' | '*=' | '/=' | '%=' | '**=' | '++='
 
 range           ::= logic_or ('..' logic_or)?
 
-logic_or        ::= logic_and ('or' logic_and | 'orelse' logic_and)*
+logic_or        ::= logic_and ('or' logic_and | 'orelse' logic_and | 'catch' logic_and)*
 logic_and       ::= bit_or ('and' bit_or)*
 bit_or          ::= bit_xor ('|' bit_xor)*
 bit_xor         ::= bit_and ('^' bit_and)*
@@ -81,13 +81,11 @@ bit_and         ::= equality ('&' equality)*
 equality        ::= comparison (('==' | '!=') comparison)*
 comparison      ::= bit_shift (('<' | '<=' | '>' | '>=') bit_shift)*
 bit_shift       ::= term (('<<' | '>>') term)*
-term            ::= factor (('-' | '+') factor)*
+term            ::= factor (('-' | '+' | '++') factor)*
 factor          ::= unary (('/' | '*' | '%' | '**') unary)*
 
 unary           ::= ('not' | '-' | '~' | 'resume' | 'try') unary
                   | cast
-
-cast            ::= postfix ('as' type_expr)*
 
 postfix         ::= primary (
                       '(' arguments? ')'            /* Call */

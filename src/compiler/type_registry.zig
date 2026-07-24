@@ -3,11 +3,6 @@ const ast = @import("ast.zig");
 
 pub const TypeId = ast.TypeId;
 
-pub const ShapeField = struct {
-    name: []const u8,
-    type: TypeId,
-};
-
 pub const StructField = struct {
     name: []const u8,
     type: TypeId,
@@ -50,7 +45,6 @@ pub const TypeInfo = union(enum) {
     _enum: struct { name: []const u8, variants: [][]const u8, source_file: []const u8 },
     _struct: struct { name: []const u8, fields: []StructField, methods: []StructMethod, source_file: []const u8 },
     _type: struct { name: []const u8, resolved_type: TypeId, source_file: []const u8 },
-    shape: []ShapeField,
     identifier: struct { name: []const u8, source_file: []const u8, generics: ?[]TypeId }, // errors, enums, structs
 };
 
@@ -154,26 +148,6 @@ pub const TypeRegistry = struct {
                 const left_id = try self.resolve(union_node.left);
                 const right_id = try self.resolve(union_node.right);
                 return try self.add_union_type(left_id, right_id);
-            },
-            .shape_type => |shape| {
-                const fields = shape.fields;
-                var field_types: std.ArrayList(ShapeField) = .empty;
-                for (fields) |field| {
-                    const name = field.name.lexeme;
-                    const type_id = try self.resolve(field.type_annotation);
-                    try field_types.append(self.allocator, .{ .name = name, .type = type_id });
-                }
-                return try self.add_shape_type(try field_types.toOwnedSlice(self.allocator));
-            },
-            .shape_expr => |shape| {
-                const fields = shape.fields;
-                var field_types: std.ArrayList(ShapeField) = .empty;
-                for (fields) |field| {
-                    const name = field.name.lexeme;
-                    const type_id = try self.resolve(field.type_annotation);
-                    try field_types.append(self.allocator, .{ .name = name, .type = type_id });
-                }
-                return try self.add_shape_type(try field_types.toOwnedSlice(self.allocator));
             },
             else => {
                 return TypeRegistryError.UnknownType;
@@ -333,31 +307,6 @@ pub const TypeRegistry = struct {
         // add new type
         const id = @as(TypeId, @intCast(self.types.items.len));
         try self.types.append(self.allocator, .{ ._union = .{ .left = left_id, .right = right_id } });
-        return id;
-    }
-
-    pub fn add_shape_type(self: *TypeRegistry, fields: []ShapeField) !TypeId {
-        for (self.types.items, 0..) |info, index| {
-            switch (info) {
-                .shape => |existing_fields| {
-                    if (existing_fields.len != fields.len) continue;
-
-                    var match = true;
-                    for (existing_fields, 0..) |ef, i| {
-                        if (!std.mem.eql(u8, ef.name, fields[i].name) or ef.type != fields[i].type) {
-                            match = false;
-                            break;
-                        }
-                    }
-                    if (match) return @as(TypeId, @intCast(index));
-                },
-                else => continue,
-            }
-        }
-
-        // add new type
-        const id = @as(TypeId, @intCast(self.types.items.len));
-        try self.types.append(self.allocator, .{ .shape = fields });
         return id;
     }
 

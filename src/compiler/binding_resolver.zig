@@ -247,13 +247,11 @@ pub const BindingResolver = struct {
                 try self.resolveNode(expr.right, false);
             },
             .identifier_expr => try self.resolveIdentifier(node),
-            .cast_expr => |expr| try self.resolveNode(expr.expr, false),
             .unary_expr => |expr| try self.resolveNode(expr.expr, false),
             .binary_expr => |expr| {
                 try self.resolveNode(expr.left, false);
                 try self.resolveNode(expr.right, false);
             },
-            .shape_expr => {},
             .call_expr => |expr| {
                 try self.resolveNode(expr.expr, false);
                 for (expr.args) |arg| try self.resolveNode(arg, false);
@@ -290,7 +288,7 @@ pub const BindingResolver = struct {
             .anon_fn_expr => |expr| try self.resolveAnonFnExpr(node, expr),
             .anon_co_expr => |expr| try self.resolveAnonCoExpr(node, expr),
             .int_lit, .float_lit, .str_lit, .bool_lit, .nil_lit, .default_pat => {},
-            .nil_type, .int_type, .float_type, .string_type, .bool_type, .array_type, .table_type, .range_type, .never_type, .tuple_type, .identifier_type, .fn_type, .co_type, .union_type, .shape_type => {},
+            .nil_type, .int_type, .float_type, .string_type, .bool_type, .array_type, .table_type, .range_type, .never_type, .tuple_type, .identifier_type, .fn_type, .co_type, .union_type => {},
         }
     }
 
@@ -449,14 +447,6 @@ pub const BindingResolver = struct {
     fn resolve_dot_expression(self: *BindingResolver, node: *AST.ASTNode, expr: *AST.DotExpr) !void {
         const obj_type = resolved_type_of(expr.expr);
         switch (self.registry.get_type_info(obj_type)) {
-            .shape => |fields| {
-                for (fields, 0..) |field, index| {
-                    if (std.mem.eql(u8, field.name, expr.member.lexeme)) {
-                        try self.result.member_infos.put(node, .{ .field = .{ .index = @intCast(index), .type_id = field.type } });
-                        return;
-                    }
-                }
-            },
             .tuple => |items| {
                 const index = std.fmt.parseInt(u16, expr.member.lexeme, 10) catch return;
                 if (index < items.len) {
@@ -747,10 +737,8 @@ fn resolved_type_of(node: *AST.ASTNode) AST.TypeId {
     return switch (node.*) {
         .assign_expr => |v| v.resolved_type,
         .identifier_expr => |v| v.resolved_type,
-        .cast_expr => |v| v.resolved_type,
         .unary_expr => |v| v.resolved_type,
         .binary_expr => |v| v.resolved_type,
-        .shape_expr => |v| v.resolved_type,
         .call_expr => |v| v.resolved_type,
         .index_expr => |v| v.resolved_type,
         .array_expr => |v| v.resolved_type,
@@ -799,10 +787,8 @@ fn node_position(node: *AST.ASTNode) NodePosition {
         .expr_stmt => |v| .{ .line = v.line, .column = v.column },
         .assign_expr => |v| .{ .line = v.line, .column = v.column },
         .identifier_expr => |v| .{ .line = v.line, .column = v.column },
-        .cast_expr => |v| .{ .line = v.line, .column = v.column },
         .unary_expr => |v| .{ .line = v.line, .column = v.column },
         .binary_expr => |v| .{ .line = v.line, .column = v.column },
-        .shape_expr => |v| .{ .line = v.line, .column = v.column },
         .call_expr => |v| .{ .line = v.line, .column = v.column },
         .index_expr => |v| .{ .line = v.line, .column = v.column },
         .array_expr => |v| .{ .line = v.line, .column = v.column },

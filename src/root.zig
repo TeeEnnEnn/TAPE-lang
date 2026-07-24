@@ -33,8 +33,8 @@ test {
     // cli
     _ = @import("_tests/cli/test_helpers.zig");
     // compiler
-    _ = @import("_tests/compiler/test_binidng_resolver.zig");
-    _ = @import("_tests/compiler/test_environement.zig");
+    _ = @import("_tests/compiler/test_binding_resolver.zig");
+    _ = @import("_tests/compiler/test_environment.zig");
     _ = @import("_tests/compiler/test_parser.zig");
     _ = @import("_tests/compiler/test_scanner.zig");
     _ = @import("_tests/compiler/test_type_checker.zig");
