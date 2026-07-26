@@ -42,6 +42,10 @@ pub const TypeCheckerError = error{
     UnknownExpression,
     /// The index is out of bounds for the given type.
     IndexOutOfBounds,
+    /// Trying to reassignment a constant
+    ConstantReassignmentAttempt,
+    /// An exported constant was initialized with a non constant value
+    NonConstantExport,
 } || EnvironmentError || TypeRegistryError || std.mem.Allocator.Error;
 
 pub const StatementTermination = struct {
@@ -84,7 +88,7 @@ pub const TypeChecker = struct {
                 for (decl.items, 0..) |item, index| {
                     const alias = item.alias orelse item.name;
                     if (imported_module.exports.get(item.name.lexeme)) |resolved_id| {
-                        try self.environment.define_binding(alias.lexeme, resolved_id, .{ .import = .{ .use_decl = node, .index = @as(u32, @intCast(index)) } });
+                        try self.environment.define_binding(alias.lexeme, resolved_id, .{ .import = .{ .use_decl = node, .index = @as(u32, @intCast(index)) } }, true);
                     } else {
                         try self.diagnostics.add_diagnostic(.{ .file_path = self.module.filepath, .column = alias.column, .line = alias.line, .stage = .TypeChecker, .severity = .Error, .message = "Failed to import symbol from external module.", .hint = "Check that the module path is correct and that the symbol is exported with the 'pub' keyword." });
                         return TypeCheckerError.UndefinedSymbol;
@@ -102,7 +106,7 @@ pub const TypeChecker = struct {
 
                 const return_id = try self.registry.resolve(decl.return_type_annotation);
                 const fn_id = try self.registry.add_function_type(try param_types.toOwnedSlice(self.allocator), return_id);
-                try self.environment.define_binding(decl.name.lexeme, fn_id, .{ .node = node });
+                try self.environment.define_binding(decl.name.lexeme, fn_id, .{ .node = node }, true);
                 if (decl.modifier_pub) {
                     try self.module.exports.put(decl.name.lexeme, fn_id);
                 }
@@ -119,7 +123,7 @@ pub const TypeChecker = struct {
                 const return_id = try self.registry.resolve(decl.return_type_annotation);
                 const yield_id = try self.registry.resolve(decl.yield_type_annotation);
                 const co_id = try self.registry.add_coroutine_type(try param_types.toOwnedSlice(self.allocator), return_id, yield_id);
-                try self.environment.define_binding(decl.name.lexeme, co_id, .{ .node = node });
+                try self.environment.define_binding(decl.name.lexeme, co_id, .{ .node = node }, true);
                 if (decl.modifier_pub) {
                     try self.module.exports.put(decl.name.lexeme, co_id);
                 }
@@ -148,7 +152,7 @@ pub const TypeChecker = struct {
                 // Update the struct with actual methods
                 self.registry.types.items[struct_id]._struct.methods = try method_types.toOwnedSlice(self.allocator);
 
-                try self.environment.define_binding(decl.name.lexeme, struct_id, .{ .node = node });
+                try self.environment.define_binding(decl.name.lexeme, struct_id, .{ .node = node }, true);
                 if (decl.modifier_pub) {
                     try self.module.exports.put(decl.name.lexeme, struct_id);
                 }
@@ -156,7 +160,7 @@ pub const TypeChecker = struct {
             .type_decl => |decl| {
                 const type_annot_id = try self.registry.resolve(decl.type_annotation);
                 const type_id = try self.registry.add_type_type(decl.name.lexeme, type_annot_id, self.module.filepath);
-                try self.environment.define_binding(decl.name.lexeme, type_id, .{ .node = node });
+                try self.environment.define_binding(decl.name.lexeme, type_id, .{ .node = node }, true);
                 if (decl.modifier_pub) {
                     try self.module.exports.put(decl.name.lexeme, type_id);
                 }
@@ -168,7 +172,7 @@ pub const TypeChecker = struct {
                     try variants.append(self.allocator, variant.lexeme);
                 }
                 const enum_id = try self.registry.add_enum_type(decl.name.lexeme, try variants.toOwnedSlice(self.allocator), self.module.filepath);
-                try self.environment.define_binding(decl.name.lexeme, enum_id, .{ .node = node });
+                try self.environment.define_binding(decl.name.lexeme, enum_id, .{ .node = node }, true);
                 if (decl.modifier_pub) {
                     try self.module.exports.put(decl.name.lexeme, enum_id);
                 }
@@ -180,7 +184,7 @@ pub const TypeChecker = struct {
                     try variants.append(self.allocator, variant.lexeme);
                 }
                 const error_id = try self.registry.add_error_type(decl.name.lexeme, try variants.toOwnedSlice(self.allocator), self.module.filepath);
-                try self.environment.define_binding(decl.name.lexeme, error_id, .{ .node = node });
+                try self.environment.define_binding(decl.name.lexeme, error_id, .{ .node = node }, true);
                 if (decl.modifier_pub) {
                     try self.module.exports.put(decl.name.lexeme, error_id);
                 }
@@ -214,9 +218,22 @@ pub const TypeChecker = struct {
                     try self.diagnostics.add_diagnostic(.{ .file_path = self.module.filepath, .column = decl.name.column, .line = decl.name.line, .stage = .TypeChecker, .severity = .Error, .message = "Duplicate symbol", .hint = "Symbol is already defined." });
                     return TypeCheckerError.DuplicateSymbol;
                 }
-                try self.environment.define_binding(decl.name.lexeme, target_type, .{ .node = node });
+
+                try self.environment.define_binding(decl.name.lexeme, target_type, .{ .node = node }, decl.is_const);
 
                 if (decl.modifier_pub) {
+                    if (!is_constant_literal(decl.initializer)) {
+                        try self.diagnostics.add_diagnostic(.{
+                            .file_path = self.module.filepath,
+                            .column = decl.column,
+                            .line = decl.line,
+                            .stage = .TypeChecker,
+                            .severity = .Error,
+                            .message = "Exported constants must be initialized with a literal value.",
+                            .hint = "Only literals (numbers, strings, booleans, nil, and their negation) are currently allowed for exported constants.",
+                        });
+                        return TypeCheckerError.NonConstantExport;
+                    }
                     try self.module.exports.put(decl.name.lexeme, target_type);
                 }
 
@@ -253,13 +270,14 @@ pub const TypeChecker = struct {
                         "self",
                         type_info.function.args[0],
                         .{ .param = .{ .func = node, .index = 0 } },
+                        true,
                     );
                 }
 
                 // Define params locally
                 const param_offset: usize = if (has_self) 1 else 0;
                 for (decl.params, type_info.function.args[param_offset..], 0..) |param, param_id, index| {
-                    try self.environment.define_binding(param.name.lexeme, param_id, .{ .param = .{ .func = node, .index = @as(u32, @intCast(index + param_offset)) } });
+                    try self.environment.define_binding(param.name.lexeme, param_id, .{ .param = .{ .func = node, .index = @as(u32, @intCast(index + param_offset)) } }, false);
                 }
 
                 const prev_in_func = self.in_function;
@@ -297,9 +315,9 @@ pub const TypeChecker = struct {
                 defer self.environment = prev_env;
 
                 const type_info = self.registry.get_type_info(struct_typeid);
-                try self.environment.define("self", struct_typeid);
+                try self.environment.define_binding("self", struct_typeid, .{ .node = node }, true);
                 for (decl.methods, type_info._struct.methods) |method_decl, sm| {
-                    try self.environment.define_binding(sm.name, sm.type, .{ .node = method_decl.method });
+                    try self.environment.define_binding(sm.name, sm.type, .{ .node = method_decl.method }, true);
                 }
 
                 for (decl.methods) |method| {
@@ -339,17 +357,13 @@ pub const TypeChecker = struct {
                 // Define self if this is a method
                 const has_self = type_info.coroutine.args.len == decl.params.len + 1;
                 if (has_self) {
-                    try self.environment.define_binding(
-                        "self",
-                        type_info.coroutine.args[0],
-                        .{ .param = .{ .func = node, .index = 0 } },
-                    );
+                    try self.environment.define_binding("self", type_info.coroutine.args[0], .{ .param = .{ .func = node, .index = 0 } }, true);
                 }
 
                 // Define params locally
                 const param_offset: usize = if (has_self) 1 else 0;
                 for (decl.params, type_info.coroutine.args[param_offset..], 0..) |param, param_id, index| {
-                    try self.environment.define_binding(param.name.lexeme, param_id, .{ .param = .{ .func = node, .index = @as(u32, @intCast(index + param_offset)) } });
+                    try self.environment.define_binding(param.name.lexeme, param_id, .{ .param = .{ .func = node, .index = @as(u32, @intCast(index + param_offset)) } }, false);
                 }
 
                 const body_term = try self.check(decl.body);
@@ -444,7 +458,7 @@ pub const TypeChecker = struct {
                 self.environment = &local_env;
                 defer self.environment = prev_env;
 
-                try self.environment.define_binding(stmt.iterator_name.lexeme, @intFromEnum(PrimitiveType.Int), .{ .node = node });
+                try self.environment.define_binding(stmt.iterator_name.lexeme, @intFromEnum(PrimitiveType.Int), .{ .node = node }, true);
                 const prev_loop = self.in_loop;
                 self.in_loop = true;
                 _ = try self.check(stmt.body);
@@ -537,6 +551,17 @@ pub const TypeChecker = struct {
     fn check_expression_term(self: *TypeChecker, node: *AST.ASTNode, out_term: ?*StatementTermination) TypeCheckerError!AST.TypeId {
         return switch (node.*) {
             .assign_expr => |expr| {
+                if (expr.left.* == .identifier_expr) {
+                    const info = self.environment.lookup_binding(expr.left.identifier_expr.name.lexeme) catch {
+                        try self.diagnostics.add_diagnostic(.{ .file_path = self.module.filepath, .column = expr.column, .line = expr.line, .stage = .TypeChecker, .severity = .Error, .message = "Undefined symbol", .hint = "Symbol is not defined. Use `var` or `const` to define the symbol." });
+                        return TypeCheckerError.UndefinedSymbol;
+                    };
+                    if (info.is_const) {
+                        try self.diagnostics.add_diagnostic(.{ .file_path = self.module.filepath, .column = expr.column, .line = expr.line, .stage = .TypeChecker, .severity = .Error, .message = "Constant Redefinition Attempt", .hint = "Symbols defined with `const` cannot be reassigned. Use `var` instead." });
+                        return TypeCheckerError.ConstantReassignmentAttempt;
+                    }
+                }
+
                 const right_type = try self.check_expression(expr.right);
 
                 // if assigning to a variable
@@ -1034,7 +1059,7 @@ pub const TypeChecker = struct {
 
                 // Define params locally
                 for (expr.params, arg_types.items, 0..) |param, param_id, index| {
-                    try self.environment.define_binding(param.name.lexeme, param_id, .{ .param = .{ .func = node, .index = @as(u32, @intCast(index)) } });
+                    try self.environment.define_binding(param.name.lexeme, param_id, .{ .param = .{ .func = node, .index = @as(u32, @intCast(index)) } }, false);
                 }
 
                 // Typecheck inner body
@@ -1080,7 +1105,7 @@ pub const TypeChecker = struct {
                 defer self.environment = prev_env;
 
                 for (expr.params, arg_types.items, 0..) |param, param_id, index| {
-                    try self.environment.define_binding(param.name.lexeme, param_id, .{ .param = .{ .func = node, .index = @as(u32, @intCast(index)) } });
+                    try self.environment.define_binding(param.name.lexeme, param_id, .{ .param = .{ .func = node, .index = @as(u32, @intCast(index)) } }, false);
                 }
 
                 const body_term = try self.check(expr.body);
@@ -1178,6 +1203,17 @@ pub const TypeChecker = struct {
                 return (try self.is_compatible(u.left, source)) or (try self.is_compatible(u.right, source));
             },
             else => return false,
+        };
+    }
+
+    fn is_constant_literal(node: *AST.ASTNode) bool {
+        return switch (node.*) {
+            .int_lit, .float_lit, .str_lit, .bool_lit, .nil_lit => true,
+            .unary_expr => |expr| switch (expr.expr.*) {
+                .int_lit, .float_lit => std.mem.eql(u8, expr.operator.lexeme, "-") or std.mem.eql(u8, expr.operator.lexeme, "~"),
+                else => false,
+            },
+            else => false,
         };
     }
 };

@@ -962,7 +962,22 @@ pub const Parser = struct {
         return node;
     }
 
-    fn parse_var_declaration(self: *Parser, is_pub: bool) ParserError!*AST.ASTNode {
+    fn parse_var_declaration(self: *Parser, is_pub: bool, is_const: bool) ParserError!*AST.ASTNode {
+        if (is_pub and !is_const) {
+            try self.workspace.diagnostics_mutex.lock(self.io);
+            try self.workspace.diagnostics.add_diagnostic(.{
+                .column = self.scanner.column(),
+                .line = self.scanner.line,
+                .stage = .Parser,
+                .severity = .Error,
+                .message = "Unexpected token",
+                .hint = "`pub` can only be used with `const`. Exported values must be constant.",
+                .file_path = self.module.filepath,
+            });
+            self.workspace.diagnostics_mutex.unlock(self.io);
+            return ParserError.UnexpectedToken;
+        }
+
         try self.consume(.IDENTIFIER, "Expected identifier for variable declaration.");
         const name = self.previous;
 
@@ -978,37 +993,7 @@ pub const Parser = struct {
         const var_decl = try self.allocator.create(AST.VarDecl);
         var_decl.* = .{
             .modifier_pub = is_pub,
-            .is_const = false,
-            .name = name,
-            .type_annotation = type_annotation,
-            .initializer = initializer,
-            .line = name.line,
-            .column = name.column,
-        };
-
-        const node = try self.allocator.create(AST.ASTNode);
-        node.* = .{ .var_decl = var_decl };
-
-        return node;
-    }
-
-    fn parse_const_declaration(self: *Parser, is_pub: bool) ParserError!*AST.ASTNode {
-        try self.consume(.IDENTIFIER, "Expected identifier for variable declaration.");
-        const name = self.previous;
-
-        var type_annotation: ?*AST.ASTNode = null;
-        if (try self.match(.COLON)) {
-            type_annotation = try self.parse_type_expression();
-        }
-
-        try self.consume(.EQUAL, "Expected '=' to separate variable name from initializer.");
-        const initializer = try self.parse_expression();
-        try self.consume(.SEMICOLON, "Expected ';' to end variable declaration.");
-
-        const var_decl = try self.allocator.create(AST.VarDecl);
-        var_decl.* = .{
-            .modifier_pub = is_pub,
-            .is_const = true,
+            .is_const = is_const,
             .name = name,
             .type_annotation = type_annotation,
             .initializer = initializer,
@@ -1585,9 +1570,9 @@ pub const Parser = struct {
         }
 
         if (try self.match(.VAR)) {
-            return try self.parse_var_declaration(is_pub);
+            return try self.parse_var_declaration(is_pub, false);
         } else if (try self.match(.CONST)) {
-            return try self.parse_const_declaration(is_pub);
+            return try self.parse_var_declaration(is_pub, true);
         } else if (try self.match(.FN)) {
             return try self.parse_function_declaration(is_pub, false);
         } else if (try self.match(.CO)) {

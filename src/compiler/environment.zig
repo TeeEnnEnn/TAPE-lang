@@ -12,7 +12,7 @@ pub const EnvironmentError = error{
 pub const SymbolInfo = struct {
     type_id: TypeId,
     decl: ?DeclRef = null,
-    // TODO: add is_const tracking
+    is_const: bool,
 };
 
 pub const Environment = struct {
@@ -37,15 +37,15 @@ pub const Environment = struct {
     /// Defines a symbol with no declaration identity. Use for types, struct/enum/error
     /// names, and anything that isn't a runtime value the codegen resolver needs to place.
     pub fn define(self: *Environment, name: []const u8, id: TypeId) EnvironmentError!void {
-        return self.define_binding(name, id, null);
+        return self.define_binding(name, id, null, false);
     }
 
     /// Defines a symbol with declaration identity attached, for the codegen resolver to use.
-    pub fn define_binding(self: *Environment, name: []const u8, id: TypeId, decl: ?DeclRef) EnvironmentError!void {
+    pub fn define_binding(self: *Environment, name: []const u8, id: TypeId, decl: ?DeclRef, is_const: bool) EnvironmentError!void {
         if (self.symbols.contains(name)) {
             return EnvironmentError.DuplicateDefinition;
         }
-        try self.symbols.put(name, .{ .type_id = id, .decl = decl });
+        try self.symbols.put(name, .{ .type_id = id, .decl = decl, .is_const = is_const });
     }
 
     /// Looks up a symbol's type ID only. Existing call sites keep working unchanged.
