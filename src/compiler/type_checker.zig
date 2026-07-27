@@ -90,7 +90,7 @@ pub const TypeChecker = struct {
                     if (imported_module.exports.get(item.name.lexeme)) |resolved_id| {
                         try self.environment.define_binding(alias.lexeme, resolved_id, .{ .import = .{ .use_decl = node, .index = @as(u32, @intCast(index)) } }, true);
                     } else {
-                        try self.diagnostics.add_diagnostic(.{ .file_path = self.module.filepath, .column = alias.column, .line = alias.line, .stage = .TypeChecker, .severity = .Error, .message = "Failed to import symbol from external module.", .hint = "Check that the module path is correct and that the symbol is exported with the 'pub' keyword." });
+                        try self.fail("Failed to import symbol from external module.", "Check that the module path is correct and that the symbol is exported with the 'pub' keyword.", alias.line, alias.column);
                         return TypeCheckerError.UndefinedSymbol;
                     }
                 }
@@ -210,12 +210,12 @@ pub const TypeChecker = struct {
                 if (decl.type_annotation) |annotated| {
                     target_type = try self.registry.resolve(annotated);
                     if (!try self.is_compatible(target_type, expr_type)) {
-                        try self.diagnostics.add_diagnostic(.{ .file_path = self.module.filepath, .column = decl.column, .line = decl.line, .stage = .TypeChecker, .severity = .Error, .message = "Type mismatch" });
+                        try self.fail("Type Mismatch", "Ensure that the initializer type and the annotated type are the same", decl.line, decl.column);
                         return TypeCheckerError.TypeMismatch;
                     }
                 }
                 if (self.environment.contains(decl.name.lexeme)) {
-                    try self.diagnostics.add_diagnostic(.{ .file_path = self.module.filepath, .column = decl.name.column, .line = decl.name.line, .stage = .TypeChecker, .severity = .Error, .message = "Duplicate symbol", .hint = "Symbol is already defined." });
+                    try self.fail("Duplicate symbol", "Symbol is already defined.", decl.name.line, decl.name.column);
                     return TypeCheckerError.DuplicateSymbol;
                 }
 
@@ -223,15 +223,7 @@ pub const TypeChecker = struct {
 
                 if (decl.modifier_pub) {
                     if (!is_constant_literal(decl.initializer)) {
-                        try self.diagnostics.add_diagnostic(.{
-                            .file_path = self.module.filepath,
-                            .column = decl.column,
-                            .line = decl.line,
-                            .stage = .TypeChecker,
-                            .severity = .Error,
-                            .message = "Exported constants must be initialized with a literal value.",
-                            .hint = "Only literals (numbers, strings, booleans, nil, and their negation) are currently allowed for exported constants.",
-                        });
+                        try self.fail("Exported constants must be initialized with a literal value.", "Only literals (numbers, strings, booleans, nil, and their negation) are allowed for exported constants.", decl.line, decl.column);
                         return TypeCheckerError.NonConstantExport;
                     }
                     try self.module.exports.put(decl.name.lexeme, target_type);
@@ -241,13 +233,13 @@ pub const TypeChecker = struct {
             },
             .fn_decl => |decl| {
                 const fn_id = self.environment.lookup(decl.name.lexeme) catch {
-                    try self.diagnostics.add_diagnostic(.{ .file_path = self.module.filepath, .column = decl.name.column, .line = decl.name.line, .stage = .TypeChecker, .severity = .Error, .message = "Undefined symbol", .hint = "Symbol is not defined." });
+                    try self.fail("Undefined symbol", "Symbol is not defined.", decl.name.line, decl.name.column);
                     return TypeCheckerError.UndefinedSymbol;
                 };
 
                 const type_info = self.registry.get_type_info(fn_id);
                 if (type_info != .function) {
-                    try self.diagnostics.add_diagnostic(.{ .file_path = self.module.filepath, .column = decl.name.column, .line = decl.name.line, .stage = .TypeChecker, .severity = .Error, .message = "Not callable", .hint = "Symbol is not a function." });
+                    try self.fail("Not callable", "Symbol is not a function. Functions are defined with the `fn` keyword.", decl.name.line, decl.name.column);
                     return TypeCheckerError.NotCallable;
                 }
 
@@ -288,7 +280,7 @@ pub const TypeChecker = struct {
                 const needs_return = type_info.function.ret != @intFromEnum(PrimitiveType.Nil) and type_info.function.ret != @intFromEnum(PrimitiveType.Never);
 
                 if (needs_return and !body_term.return_ and !body_term.panics) {
-                    try self.diagnostics.add_diagnostic(.{ .file_path = self.module.filepath, .column = decl.name.column, .line = decl.name.line, .stage = .TypeChecker, .severity = .Error, .message = "Missing return", .hint = "Function is missing a return statement." });
+                    try self.fail("Missing return", "Function is missing a `return` statement.", decl.name.line, decl.name.column);
                     return TypeCheckerError.MissingReturn;
                 }
                 return .{};
@@ -299,7 +291,7 @@ pub const TypeChecker = struct {
 
             .struct_decl => |decl| {
                 const struct_typeid = self.environment.lookup(decl.name.lexeme) catch {
-                    try self.diagnostics.add_diagnostic(.{ .file_path = self.module.filepath, .column = decl.name.column, .line = decl.name.line, .stage = .TypeChecker, .severity = .Error, .message = "Undefined symbol", .hint = "Symbol is not defined." });
+                    try self.fail("Undefined symbol", "Symbol is not defined.", decl.name.line, decl.name.column);
                     return TypeCheckerError.UndefinedSymbol;
                 };
 
@@ -327,13 +319,13 @@ pub const TypeChecker = struct {
             },
             .co_decl => |decl| {
                 const fn_id = self.environment.lookup(decl.name.lexeme) catch {
-                    try self.diagnostics.add_diagnostic(.{ .file_path = self.module.filepath, .column = decl.name.column, .line = decl.name.line, .stage = .TypeChecker, .severity = .Error, .message = "Undefined symbol", .hint = "Symbol is not defined." });
+                    try self.fail("Undefined symbol", "Symbol is not defined.", decl.name.line, decl.name.column);
                     return TypeCheckerError.UndefinedSymbol;
                 };
 
                 const type_info = self.registry.get_type_info(fn_id);
                 if (type_info != .coroutine) {
-                    try self.diagnostics.add_diagnostic(.{ .file_path = self.module.filepath, .column = decl.name.column, .line = decl.name.line, .stage = .TypeChecker, .severity = .Error, .message = "Not callable", .hint = "Symbol is not a coroutine." });
+                    try self.fail("Not callable", "Symbol is not a coroutine. Coroutines are defined with the `co` keyword.", decl.name.line, decl.name.column);
                     return TypeCheckerError.NotCallable;
                 }
 
@@ -368,9 +360,14 @@ pub const TypeChecker = struct {
 
                 const body_term = try self.check(decl.body);
                 const needs_return = type_info.coroutine.ret != @intFromEnum(PrimitiveType.Nil) and type_info.coroutine.ret != @intFromEnum(PrimitiveType.Never);
+                const needs_yield = type_info.coroutine.yield != @intFromEnum(PrimitiveType.Nil);
                 if (needs_return and !body_term.return_ and !body_term.panics) {
-                    try self.diagnostics.add_diagnostic(.{ .file_path = self.module.filepath, .column = decl.name.column, .line = decl.name.line, .stage = .TypeChecker, .severity = .Error, .message = "Missing return", .hint = "Coroutine is missing a return statement." });
+                    try self.fail("Missing return", "Coroutine is missing a return statement.", decl.name.line, decl.name.column);
                     return TypeCheckerError.MissingReturn;
+                }
+                if (needs_yield and !body_term.yield_) {
+                    try self.fail("Missing yield", "Coroutine is missing a yield statement.", decl.line, decl.column);
+                    return TypeCheckerError.MissingYield;
                 }
                 return .{};
             },
@@ -553,11 +550,11 @@ pub const TypeChecker = struct {
             .assign_expr => |expr| {
                 if (expr.left.* == .identifier_expr) {
                     const info = self.environment.lookup_binding(expr.left.identifier_expr.name.lexeme) catch {
-                        try self.diagnostics.add_diagnostic(.{ .file_path = self.module.filepath, .column = expr.column, .line = expr.line, .stage = .TypeChecker, .severity = .Error, .message = "Undefined symbol", .hint = "Symbol is not defined. Use `var` or `const` to define the symbol." });
+                        try self.fail("Undefined symbol", "Symbol is not defined. Use `var` or `const` to define the symbol.", expr.line, expr.column);
                         return TypeCheckerError.UndefinedSymbol;
                     };
                     if (info.is_const) {
-                        try self.diagnostics.add_diagnostic(.{ .file_path = self.module.filepath, .column = expr.column, .line = expr.line, .stage = .TypeChecker, .severity = .Error, .message = "Constant Redefinition Attempt", .hint = "Symbols defined with `const` cannot be reassigned. Use `var` instead." });
+                        try self.fail("Constant Reassignment Attempt", "Symbols defined with `const` cannot be reassigned. Use `var` instead.", expr.line, expr.column);
                         return TypeCheckerError.ConstantReassignmentAttempt;
                     }
                 }
@@ -568,7 +565,7 @@ pub const TypeChecker = struct {
                 if (expr.left.* == .identifier_expr or expr.left.* == .dot_expr) {
                     const left_type = try self.check_expression(expr.left);
                     if (!try self.is_compatible(left_type, right_type)) {
-                        try self.diagnostics.add_diagnostic(.{ .column = expr.column, .line = expr.line, .file_path = self.module.filepath, .message = "Type Mismatch", .severity = .Error, .stage = .TypeChecker });
+                        try self.fail("Type Mismatch", "Ensure that the assigned value type matches the variable's declared type.", expr.line, expr.column);
                         return TypeCheckerError.TypeMismatch;
                     }
 
@@ -601,7 +598,7 @@ pub const TypeChecker = struct {
             },
             .identifier_expr => |expr| {
                 const info = self.environment.lookup_binding(expr.name.lexeme) catch {
-                    try self.diagnostics.add_diagnostic(.{ .file_path = self.module.filepath, .column = expr.column, .line = expr.line, .stage = .TypeChecker, .severity = .Error, .message = "Undefined symbol", .hint = "Symbol is not defined." });
+                    try self.fail("Undefined symbol", "Symbol is not defined.", expr.line, expr.column);
                     return TypeCheckerError.UndefinedSymbol;
                 };
                 expr.resolved_type = info.type_id;
@@ -1070,7 +1067,7 @@ pub const TypeChecker = struct {
                 const body_term = try self.check(expr.body);
                 const needs_return = ret_typeid != @intFromEnum(PrimitiveType.Nil) and ret_typeid != @intFromEnum(PrimitiveType.Never);
                 if (needs_return and !body_term.return_ and !body_term.panics) {
-                    try self.diagnostics.add_diagnostic(.{ .file_path = self.module.filepath, .column = expr.column, .line = expr.line, .stage = .TypeChecker, .severity = .Error, .message = "Missing return", .hint = "Anonymous function is missing a return statement." });
+                    try self.fail("Missing return", "Anonymous function is missing a return statement.", expr.line, expr.column);
                     return TypeCheckerError.MissingReturn;
                 }
                 expr.resolved_type = function_typeid;
@@ -1112,11 +1109,11 @@ pub const TypeChecker = struct {
                 const needs_return = ret_typeid != @intFromEnum(PrimitiveType.Nil) and ret_typeid != @intFromEnum(PrimitiveType.Never);
                 const needs_yield = yield_typeid != @intFromEnum(PrimitiveType.Nil);
                 if (needs_return and !body_term.return_ and !body_term.panics) {
-                    try self.diagnostics.add_diagnostic(.{ .file_path = self.module.filepath, .column = expr.column, .line = expr.line, .stage = .TypeChecker, .severity = .Error, .message = "Missing return", .hint = "Coroutine is missing a return statement." });
+                    try self.fail("Missing return", "Coroutine is missing a return statement.", expr.line, expr.column);
                     return TypeCheckerError.MissingReturn;
                 }
                 if (needs_yield and !body_term.yield_) {
-                    try self.diagnostics.add_diagnostic(.{ .file_path = self.module.filepath, .column = expr.column, .line = expr.line, .stage = .TypeChecker, .severity = .Error, .message = "Missing yield", .hint = "Coroutine is missing a yield statement." });
+                    try self.fail("Missing yield", "Coroutine is missing a yield statement.", expr.line, expr.column);
                     return TypeCheckerError.MissingYield;
                 }
                 expr.resolved_type = coroutine_typeid;
@@ -1215,5 +1212,9 @@ pub const TypeChecker = struct {
             },
             else => false,
         };
+    }
+
+    fn fail(self: *TypeChecker, message: []const u8, hint: ?[]const u8, line: usize, column: usize) !void {
+        try self.diagnostics.add_diagnostic(.{ .file_path = self.module.filepath, .column = column, .line = line, .stage = .TypeChecker, .severity = .Error, .message = message, .hint = hint });
     }
 };

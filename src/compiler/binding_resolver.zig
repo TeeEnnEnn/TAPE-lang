@@ -177,7 +177,8 @@ pub const BindingResolver = struct {
     }
 
     fn resolveProgram(self: *BindingResolver, node: *AST.ASTNode) BindingResolverError!void {
-        if (node.* != .program) return self.fail(node, "Binding resolver expected a program root.", "This is an internal error. Please make a bug report.", BindingResolverError.MissingBinding);
+        const pos: NodePosition = node_position(node);
+        if (node.* != .program) return self.fail("Binding resolver expected a program root.", "This is an internal error. Please make a bug report.", pos.line, pos.column);
 
         try self.pre_hoist_declarations(node);
         try self.begin_function(node, 0);
@@ -297,7 +298,8 @@ pub const BindingResolver = struct {
             if (field.default_value) |value| try self.resolveNode(value, false);
         }
 
-        _ = self.result.declaration_bindings.get(.{ .node = node }) orelse return self.fail(node, "Missing struct binding.", null, BindingResolverError.MissingBinding);
+        const pos: NodePosition = node_position(node);
+        _ = self.result.declaration_bindings.get(.{ .node = node }) orelse return self.fail("Missing struct binding.", null, pos.line, pos.column);
         for (decl.methods, 0..) |method, index| {
             const ref: AST.DeclRef = .{ .node = method.method };
             try self.putDeclBinding(ref, .{
@@ -310,10 +312,14 @@ pub const BindingResolver = struct {
             });
         }
         for (decl.methods) |method| {
+            const method_pos: NodePosition = node_position(method.method);
             switch (method.method.*) {
                 .fn_decl => |fn_decl| try self.resolveFnDecl(method.method, fn_decl, false, true),
                 .co_decl => |co_decl| try self.resolveCoDecl(method.method, co_decl, false, true),
-                else => try self.fail(method.method, "Struct method is not callable.", null, BindingResolverError.MissingBinding),
+                else => try {
+                    try self.fail("Struct method is not callable.", null, method_pos.line, method_pos.column);
+                    return BindingResolverError.MissingBinding;
+                },
             }
         }
     }
@@ -405,28 +411,12 @@ pub const BindingResolver = struct {
     fn resolveIdentifier(self: *BindingResolver, node: *AST.ASTNode) !void {
         const expr = node.identifier_expr;
         const ref = expr.resolved_decl orelse {
-            try self.diagnostics.add_diagnostic(.{
-                .file_path = self.module.filepath,
-                .line = expr.line,
-                .column = expr.column,
-                .stage = .CodeGenerator,
-                .severity = .Error,
-                .message = "Identifier is missing declaration identity.",
-                .hint = "Run type checking before binding resolution.",
-            });
+            try self.fail("Identifier is missing declaration identity.", "Run type checking before binding resolution.", expr.line, expr.column);
             return BindingResolverError.MissingDeclRef;
         };
 
         const binding = self.result.declaration_bindings.get(ref) orelse {
-            try self.diagnostics.add_diagnostic(.{
-                .file_path = self.module.filepath,
-                .line = expr.line,
-                .column = expr.column,
-                .stage = .CodeGenerator,
-                .severity = .Error,
-                .message = "Identifier declaration has no runtime binding.",
-                .hint = "The resolver and type checker disagree about this symbol.",
-            });
+            try self.fail("Identifier declaration has no runtime binding.", "The resolver and type checker disagree about this symbol.", expr.line, expr.column);
             return BindingResolverError.MissingBinding;
         };
 
@@ -561,7 +551,10 @@ pub const BindingResolver = struct {
     fn registerLocal(self: *BindingResolver, ref: AST.DeclRef, name: []const u8, type_id: AST.TypeId) !void {
         const current = self.current_function();
         const slot = current.local_count;
-        if (slot == std.math.maxInt(u16)) return self.fail(null, "Too many local bindings in function.", null, BindingResolverError.TooManyLocals);
+        if (slot == std.math.maxInt(u16)) {
+            try self.fail("Too many local bindings in function.", null, 0, 0);
+            return BindingResolverError.TooManyLocals;
+        }
         current.local_count += 1;
         current.max_local_count = @max(current.max_local_count, current.local_count);
 
@@ -703,7 +696,8 @@ pub const BindingResolver = struct {
         if (self.registry.get_named_type(name, self.module.filepath)) |type_id| {
             return type_id;
         }
-        try self.fail(node, "Named type has no registry entry.", null, BindingResolverError.MissingBinding);
+        const pos: NodePosition = node_position(node);
+        try self.fail("Named type has no registry entry.", null, pos.line, pos.column);
         return BindingResolverError.MissingBinding;
     }
 
@@ -718,18 +712,16 @@ pub const BindingResolver = struct {
         };
     }
 
-    fn fail(self: *BindingResolver, node: ?*AST.ASTNode, message: []const u8, hint: ?[]const u8, err: BindingResolverError) BindingResolverError!void {
-        const pos: NodePosition = if (node) |n| node_position(n) else .{ .line = 0, .column = 0 };
+    fn fail(self: *BindingResolver, message: []const u8, hint: ?[]const u8, line: usize, col: usize) BindingResolverError!void {
         self.diagnostics.add_diagnostic(.{
             .file_path = self.module.filepath,
-            .line = pos.line,
-            .column = pos.column,
-            .stage = .CodeGenerator,
+            .line = line,
+            .column = col,
+            .stage = .BindingResolver,
             .severity = .Error,
             .message = message,
             .hint = hint,
         }) catch {};
-        return err;
     }
 };
 

@@ -10,6 +10,8 @@ const AST = @import("ast.zig");
 const TypeRegistry = @import("type_registry.zig");
 const Chunk = @import("../runtime/chunk.zig").Chunk;
 const Opcode = @import("../runtime/chunk.zig").Opcode;
+const DiagnosticReporter = @import("../diagnostics/diagnostics.zig").DiagnosticsReporter;
+const Module = @import("workspace.zig").Module;
 
 pub const CodeGeneratorError = error{ MissingBinding, UnsupportedNode, UnsupportedOperator, UnsupportedOperandType, LoopSizeTooLarge } || std.mem.Allocator.Error;
 
@@ -46,23 +48,40 @@ pub const CodeGenerator = struct {
     node: *AST.ASTNode,
     /// The top of the function compiler stack
     current: *FunctionCompiler,
+    /// Diagnostics reporter for error reporting
+    diagnostics: *DiagnosticReporter,
+    /// The module being compiled
+    module: *Module,
 
-    pub fn init(allocator: std.mem.Allocator, isolate: *Runtime.Isolate, binding_resolution: *const BindingResolver.BindingResolution, node: *AST.ASTNode) !CodeGenerator {
+    pub fn init(allocator: std.mem.Allocator, isolate: *Runtime.Isolate, binding_resolution: *const BindingResolver.BindingResolution, node: *AST.ASTNode, diagnostics: *DiagnosticReporter, module: *Module) !CodeGenerator {
         return .{
             .allocator = allocator,
             .isolate = isolate,
             .binding_resolution = binding_resolution,
             .node = node,
             .current = try FunctionCompiler.init(allocator, try Entities.new_function_object(isolate), null),
+            .diagnostics = diagnostics,
+            .module = module,
         };
     }
 
     pub fn generate(self: *CodeGenerator) ?*Entities.ObjectFunction {
         self.generate_node(self.node) catch {
-            // TODO: add diagnostic
             return null;
         };
         return self.current.function;
+    }
+
+    fn fail(self: *CodeGenerator, message: []const u8, hint: ?[]const u8, line: usize, column: usize) void {
+        self.diagnostics.add_diagnostic(.{
+            .file_path = self.module.filepath,
+            .line = line,
+            .column = column,
+            .stage = .CodeGenerator,
+            .severity = .Error,
+            .message = message,
+            .hint = hint,
+        }) catch {};
     }
 
     /// Extracts the resolved type from an AST node
@@ -119,7 +138,10 @@ pub const CodeGenerator = struct {
                     try self.generate_node(blk_stmt);
                 }
 
-                const pop_count = self.binding_resolution.scope_pop_counts.get(node) orelse return CodeGeneratorError.MissingBinding;
+                const pop_count = self.binding_resolution.scope_pop_counts.get(node) orelse {
+                    self.fail("Block scope has no pop count in binding resolution.", null, stmt.line, stmt.column);
+                    return CodeGeneratorError.MissingBinding;
+                };
                 try self.current.chunk().write_opcode(.OP_POP_N, stmt.line);
                 try self.current.chunk().write_u16(pop_count, stmt.line);
             },
@@ -153,8 +175,10 @@ pub const CodeGenerator = struct {
                 try self.patch_jump(exit_jump);
                 try self.current.chunk().write_opcode(.OP_POP, stmt.line);
             },
-            // TODO: complete
-            else => return CodeGeneratorError.UnsupportedNode,
+            else => {
+                self.fail("Unsupported node type in code generation.", "This node type is not yet implemented for bytecode emission.", 0, 0);
+                return CodeGeneratorError.UnsupportedNode;
+            },
         }
     }
 
@@ -162,7 +186,10 @@ pub const CodeGenerator = struct {
         try self.generate_expression(decl.initializer);
 
         const ref: AST.DeclRef = .{ .node = node };
-        const binding = self.binding_resolution.declaration_bindings.get(ref) orelse return CodeGeneratorError.MissingBinding;
+        const binding = self.binding_resolution.declaration_bindings.get(ref) orelse {
+            self.fail("Variable declaration has no binding in binding resolution.", null, decl.line, decl.column);
+            return CodeGeneratorError.MissingBinding;
+        };
 
         switch (binding.kind) {
             .local => {
@@ -175,7 +202,10 @@ pub const CodeGenerator = struct {
                 try self.current.chunk().write_u16(binding.slot, decl.line);
                 try self.current.chunk().write_opcode(.OP_POP, decl.line);
             },
-            else => return CodeGeneratorError.UnsupportedNode,
+            else => {
+                self.fail("Unsupported variable binding kind for code generation.", null, decl.line, decl.column);
+                return CodeGeneratorError.UnsupportedNode;
+            },
         }
     }
 
@@ -183,6 +213,7 @@ pub const CodeGenerator = struct {
         try self.current.chunk().write_opcode(.OP_LOOP, line);
         const offset = self.current.chunk().code.items.len - loop_start + 2; // +2 accounts for size of OP_LOOP
         if (offset > std.math.maxInt(u16)) {
+            self.fail("Loop size exceeds maximum supported offset.", "Try reducing the size of the loop body.", line, 0);
             return CodeGeneratorError.LoopSizeTooLarge;
         }
         try self.current.chunk().write_u8(@as(u8, @truncate(offset >> 8)), line);
@@ -206,6 +237,7 @@ pub const CodeGenerator = struct {
     fn patch_jump(self: *CodeGenerator, offset: usize) CodeGeneratorError!void {
         const jump = self.current.chunk().code.items.len - offset - 2;
         if (jump > std.math.maxInt(u16)) {
+            self.fail("Jump offset exceeds maximum supported size.", null, 0, 0);
             return CodeGeneratorError.LoopSizeTooLarge;
         }
         self.current.chunk().code.items[offset] = @intCast(jump >> 8);
@@ -224,18 +256,24 @@ pub const CodeGenerator = struct {
             .resume_expr => |expr| try self.generate_resume_expression(expr),
             .identifier_expr => |expr| try self.generate_identifier_expr(node, expr),
             .assign_expr => |expr| try self.generate_assignment_expression(node, expr),
-            else => return CodeGeneratorError.UnsupportedNode,
+            else => {
+                self.fail("Unsupported expression type in code generation.", "This expression type is not yet implemented.", 0, 0);
+                return CodeGeneratorError.UnsupportedNode;
+            },
         }
     }
 
     fn generate_assignment_expression(self: *CodeGenerator, node: *AST.ASTNode, expr: *AST.AssignExpr) CodeGeneratorError!void {
-        _ = self;
         _ = node;
-        _ = expr;
+        self.fail("Assignment expression code generation is not yet implemented.", null, expr.line, expr.column);
+        return CodeGeneratorError.UnsupportedNode;
     }
 
     fn generate_identifier_expr(self: *CodeGenerator, node: *AST.ASTNode, expr: *AST.IdentifierExpr) CodeGeneratorError!void {
-        const binding = self.binding_resolution.identifier_bindings.get(node) orelse return CodeGeneratorError.MissingBinding;
+        const binding = self.binding_resolution.identifier_bindings.get(node) orelse {
+            self.fail("Identifier expression has no binding in binding resolution.", null, expr.line, expr.column);
+            return CodeGeneratorError.MissingBinding;
+        };
         switch (binding.kind) {
             .global => {
                 try self.current.chunk().write_opcode(.OP_LOAD_GLOBAL, expr.line);
@@ -245,13 +283,15 @@ pub const CodeGenerator = struct {
                 try self.current.chunk().write_opcode(.OP_LOAD_LOCAL, expr.line);
                 try self.current.chunk().write_u16(binding.slot, expr.line);
             },
-            else => return CodeGeneratorError.UnsupportedNode, // method, comptime_type, imported_global
+            else => {
+                self.fail("Unsupported identifier binding kind for code generation.", null, expr.line, expr.column);
+                return CodeGeneratorError.UnsupportedNode;
+            }, // method, comptime_type, imported_global
         }
     }
 
     fn generate_resume_expression(self: *CodeGenerator, node: *AST.ResumeExpr) CodeGeneratorError!void {
-        _ = self;
-        _ = node;
+        self.fail("Resume expression code generation is not yet implemented.", null, node.line, node.column);
         return CodeGeneratorError.UnsupportedNode;
     }
 
@@ -280,7 +320,10 @@ pub const CodeGenerator = struct {
             else => unreachable,
         }
 
-        if (opcode) |code| try self.current.chunk().write_opcode(code, expr.line) else return CodeGeneratorError.UnsupportedOperandType;
+        if (opcode) |code| try self.current.chunk().write_opcode(code, expr.line) else {
+            self.fail("Unsupported operand type for unary operator.", null, expr.line, expr.column);
+            return CodeGeneratorError.UnsupportedOperandType;
+        }
     }
 
     fn and_(self: *CodeGenerator, line: usize, right: *AST.ASTNode) CodeGeneratorError!void {
@@ -327,7 +370,10 @@ pub const CodeGenerator = struct {
         const left_kind = resolve_typeof(expr.left);
         const right_kind = resolve_typeof(expr.right);
 
-        const opcode = try CodeGenerator.select_opcode(op, left_kind, right_kind);
+        const opcode = CodeGenerator.select_opcode(op, left_kind, right_kind) catch {
+            self.fail("Unsupported operator in code generation.", null, expr.line, expr.column);
+            return CodeGeneratorError.UnsupportedOperator;
+        };
         try self.current.chunk().write_opcode(opcode, expr.line);
     }
 

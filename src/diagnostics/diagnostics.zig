@@ -18,6 +18,7 @@ pub const Stage = enum {
     Scanner,
     Parser,
     TypeChecker,
+    BindingResolver,
     CodeGenerator,
     Execution,
 };
