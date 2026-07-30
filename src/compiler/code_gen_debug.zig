@@ -12,6 +12,8 @@ fn print_value_for_disassembly(value: Value) void {
         .float => |float| std.debug.print("{}", .{float}),
         .boolean => |b| std.debug.print("{}", .{b}),
         .nil => std.debug.print("nil", .{}),
+        .enum_ => |variant| std.debug.print("enum variant {}", .{variant.index}),
+        .error_ => |variant| std.debug.print("error variant {}", .{variant.index}),
         .object => |obj| std.debug.print("{s}", .{@tagName(obj.object_type)}),
     }
 }
@@ -71,6 +73,13 @@ pub const ChunkDisassembler = struct {
         const opcode: Opcode = @enumFromInt(chunk.code.items[offset]);
         const index = read_u16(chunk, offset + 1);
         std.debug.print("{s}  {}\n", .{ @tagName(opcode), index });
+        return offset + 3;
+    }
+
+    fn disassemble_object_inline_arg_instruction(chunk: *Chunk, offset: usize) usize {
+        const opcode: Opcode = @enumFromInt(chunk.code.items[offset]);
+        const arg_count = read_u16(chunk, offset + 1);
+        std.debug.print("{s}  {} args\n", .{ @tagName(opcode), arg_count });
         return offset + 3;
     }
 
@@ -142,6 +151,7 @@ pub const ChunkDisassembler = struct {
             .OP_MOD_FLOAT,
             .OP_MOD_INT_FLOAT,
             .OP_MOD_FLOAT_INT,
+            .OP_STRING_CONCAT,
             => {
                 return disassemble_simple_instruction(chunk, offset);
             },
@@ -161,6 +171,7 @@ pub const ChunkDisassembler = struct {
             .OP_JUMP,
             .OP_JUMP_IF_FALSE,
             .OP_JUMP_IF_NIL,
+            .OP_JUMP_IF_ERROR,
             => return disassemble_jump_instruction(chunk, offset, .FORWARD),
             .OP_LOOP,
             => return disassemble_jump_instruction(chunk, offset, .BACKWARD),
@@ -171,6 +182,10 @@ pub const ChunkDisassembler = struct {
 
             .OP_CLOSURE => {
                 return disassemble_closure_instruction(chunk, offset);
+            },
+
+            .OP_ARRAY, .OP_TABLE, .OP_TUPLE => {
+                return disassemble_object_inline_arg_instruction(chunk, offset);
             },
         }
     }

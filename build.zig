@@ -71,8 +71,8 @@ pub fn build(b: *std.Build) void {
     // don't need and to put everything under a single module.
     const exe = b.addExecutable(.{
         .name = "TAPE_lang",
-        // .use_llvm = true, // enable this when debugging with codelldb
-        // .use_lld = true, // enable this when debugging with codelldb
+        // .use_llvm = true, //TODO: enable this when debugging with codelldb
+        // .use_lld = true, //TODO: enable this when debugging with codelldb
         .root_module = b.createModule(.{
             // b.createModule defines a new module just like b.addModule but,
             // unlike b.addModule, it does not expose the module to consumers of

@@ -73,6 +73,12 @@ test "Scanner Operators and Punctuation" {
     try checkTokens(source, &expected);
 }
 
+test "Scanner Star Operators" {
+    const source = "* ** *= **=";
+    const expected = [_]TokenType{ .STAR, .STAR_STAR, .STAR_EQUAL, .STAR_STAR_EQUAL };
+    try checkTokens(source, &expected);
+}
+
 test "Scanner Numbers" {
     const source = "123 123.456 0b1010 0xABC";
     const expected = [_]TokenType{

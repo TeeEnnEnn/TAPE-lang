@@ -20,7 +20,7 @@ pub const InterpretResult = enum {
     Error,
 };
 
-pub const RuntimePanic = error{ StackOverflow, StackUnderflow, DivisionByZero, ArgumentCountMismatch, CorruptedState, NegativeDenominator };
+pub const RuntimePanic = error{ StackOverflow, StackUnderflow, DivisionByZero, ArgumentCountMismatch, CorruptedState, NegativeDenominator, OutOfMemory };
 
 /// Represents the virtual machine - the orchestrator of execution.
 pub const VM = struct {
@@ -79,8 +79,9 @@ pub const Isolate = struct {
         isolate.base_allocator = base_allocator;
         isolate.builtin_functions = builtin_functions;
         isolate.isolate_closure = undefined;
+        isolate.string_intern = std.StringHashMap(*Entities.ObjectString).init(base_allocator);
 
-        isolate.gc = try BasicGarbageCollector.BasicGarbageCollector.init(base_allocator, isolate, mark_roots);
+        isolate.gc = try BasicGarbageCollector.BasicGarbageCollector.init(base_allocator, isolate, mark_roots, clean_string_intern);
 
         isolate.stack = @ptrCast(@alignCast(try base_allocator.alloc(TapeValue, vm.config.stack_size)));
         isolate.stack_top_index = 0;
@@ -93,8 +94,12 @@ pub const Isolate = struct {
     }
 
     pub fn deinit(self: *Isolate) void {
-        _ = self;
-        // TODO:
+        self.string_intern.deinit();
+        self.gc.deinit();
+        self.base_allocator.free(self.stack[0..self.vm.config.stack_size]);
+        self.base_allocator.free(self.frames[0..self.vm.config.max_frame_count]);
+        self.base_allocator.free(self.globals[0..self.vm.config.globals_size]);
+        self.base_allocator.destroy(self);
     }
 
     fn mark_roots(ptr: *anyopaque, gc: *BasicGarbageCollector.BasicGarbageCollector) void {
@@ -110,6 +115,24 @@ pub const Isolate = struct {
             Entities.mark_value(gc, isolate.globals[index]) catch {
                 isolate.vm.workspace.diagnostics.add_diagnostic(.{ .column = 0, .line = 0, .severity = .Error, .message = "Failed to mark value", .stage = .Execution, .file_path = "", .hint = "This is an internal error. Please report it to the TAPE-lang team." }) catch {};
             };
+        }
+    }
+
+    fn clean_string_intern(ptr: *anyopaque, gc: *BasicGarbageCollector.BasicGarbageCollector) void {
+        _ = gc;
+        const isolate: *Isolate = @ptrCast(@alignCast(ptr));
+        var keys_to_remove = std.ArrayList([]const u8).empty;
+        defer keys_to_remove.deinit(isolate.base_allocator);
+
+        var it = isolate.string_intern.iterator();
+        while (it.next()) |entry| {
+            if (!entry.value_ptr.*.header.marked) {
+                keys_to_remove.append(isolate.base_allocator, entry.key_ptr.*) catch {};
+            }
+        }
+
+        for (keys_to_remove.items) |key| {
+            _ = isolate.string_intern.remove(key);
         }
     }
 
@@ -244,13 +267,13 @@ pub const Isolate = struct {
                 .OP_EQUAL => {
                     const b = try self.pop_value();
                     const a = try self.pop_value();
-                    try self.push_value(.{ .boolean = Entities.equals(a, b) });
+                    try self.push_value(.{ .boolean = Entities.values_equal(a, b) });
                 },
 
                 .OP_NOT_EQUAL => {
                     const b = try self.pop_value();
                     const a = try self.pop_value();
-                    try self.push_value(.{ .boolean = !Entities.equals(a, b) });
+                    try self.push_value(.{ .boolean = !Entities.values_equal(a, b) });
                 },
 
                 .OP_GREATER_INT => {
@@ -489,6 +512,24 @@ pub const Isolate = struct {
                     try self.push_value(.{ .float = try std.math.mod(f64, a.float, @floatFromInt(b.int)) });
                 },
 
+                .OP_STRING_CONCAT => {
+                    const b = try self.pop_value();
+                    const a = try self.pop_value();
+
+                    const string_b: *Entities.ObjectString = @ptrCast(b.object);
+                    const string_a: *Entities.ObjectString = @ptrCast(a.object);
+
+                    const new_length = string_b.byte_length + string_a.byte_length;
+                    const new_chars = try self.base_allocator.alloc(u8, new_length);
+                    @memcpy(new_chars[0..string_a.byte_length], string_a.chars);
+                    @memcpy(new_chars[string_a.byte_length..], string_b.chars);
+
+                    const new_string = Entities.take_string(self, self.base_allocator, new_chars) catch {
+                        return InterpretResult.Error;
+                    };
+                    try self.push_value(.{ .object = @ptrCast(new_string) });
+                },
+
                 .OP_POP => {
                     const v = try self.pop_value();
                     // for debugging
@@ -521,12 +562,14 @@ pub const Isolate = struct {
                     const offset = frame.read_u16();
                     frame.ip += offset;
                 },
+
                 .OP_JUMP_IF_FALSE => {
                     const offset = frame.read_u16();
                     if (Entities.is_falsy(try self.peek_value(0))) {
                         frame.ip += offset;
                     }
                 },
+
                 .OP_JUMP_IF_NIL => {
                     const offset = frame.read_u16();
                     const value = try self.peek_value(0);
@@ -537,9 +580,63 @@ pub const Isolate = struct {
                         else => {},
                     }
                 },
+
+                .OP_JUMP_IF_ERROR => {
+                    const offset = frame.read_u16();
+                    const value = try self.peek_value(0);
+                    switch (value) {
+                        .error_ => {
+                            frame.ip += offset;
+                        },
+                        else => {},
+                    }
+                },
+
                 .OP_LOOP => {
                     const offset = frame.read_u16();
                     frame.ip -= offset;
+                },
+
+                .OP_ARRAY => {
+                    const array_length = frame.read_u16();
+                    const array_object = try Entities.new_array_object(self, array_length);
+
+                    var i: usize = array_length;
+                    while (i > 0) {
+                        i -= 1;
+                        array_object.elements[i] = try self.pop_value();
+                    }
+
+                    try self.push_value(.{ .object = &array_object.header });
+                },
+                .OP_TUPLE => {
+                    const tuple_length = frame.read_u16();
+                    const tuple_object = try Entities.new_tuple_object(self, tuple_length);
+
+                    var i: usize = tuple_length;
+                    while (i > 0) {
+                        i -= 1;
+                        tuple_object.elements[i] = try self.pop_value();
+                    }
+
+                    try self.push_value(.{ .object = &tuple_object.header });
+                },
+                .OP_TABLE => {
+                    const count = frame.read_u16();
+                    const table_object = try Entities.new_table_object(self, count);
+
+                    var i: usize = count;
+                    while (i > 0) {
+                        i -= 1;
+                        table_object.values[i] = try self.pop_value();
+                    }
+                    i = count;
+                    while (i > 0) {
+                        i -= 1;
+                        table_object.keys[i] = try self.pop_value();
+                    }
+
+                    try self.push_value(.{ .object = &table_object.header });
                 },
                 .OP_CALL => {},
                 .OP_CLOSURE => {},

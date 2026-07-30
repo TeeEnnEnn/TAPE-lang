@@ -79,7 +79,7 @@ pub const Parser = struct {
     fn parse_assignment(self: *Parser) ParserError!*AST.ASTNode {
         const left = try self.parse_range();
 
-        if (self.check(.EQUAL) or self.check(.PLUS_EQUAL) or self.check(.MINUS_EQUAL) or self.check(.STAR_EQUAL) or self.check(.SLASH_EQUAL) or self.check(.PERCENT_EQUAL)) {
+        if (self.check(.EQUAL) or self.check(.PLUS_EQUAL) or self.check(.MINUS_EQUAL) or self.check(.STAR_EQUAL) or self.check(.SLASH_EQUAL) or self.check(.PERCENT_EQUAL) or self.check(.STAR_STAR_EQUAL) or self.check(.PLUS_PLUS_EQUAL)) {
             const operator = self.current;
             try self.advance();
 

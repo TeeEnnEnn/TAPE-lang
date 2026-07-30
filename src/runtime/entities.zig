@@ -4,6 +4,7 @@
 const std = @import("std");
 const Chunk = @import("chunk.zig").Chunk;
 const Isolate = @import("vm.zig").Isolate;
+const AST = @import("../compiler/ast.zig");
 const BasicGarbageCollector = @import("../memory/basic_garbage_collector.zig");
 const basic_gc = BasicGarbageCollector.BasicGarbageCollector;
 const mark_object = basic_gc.mark_object;
@@ -107,6 +108,14 @@ pub const ObjectCoroutine = struct {
     header: ObjectHeader,
     function: *ObjectFunction,
     upvalues: []*ObjectUpvalue,
+    suspended: bool,
+    running: bool,
+    finished: bool,
+};
+
+pub const Variant = struct {
+    type_id: AST.TypeId,
+    index: u32,
 };
 
 pub const Value = union(enum) {
@@ -115,7 +124,22 @@ pub const Value = union(enum) {
     boolean: bool,
     nil: void,
     object: *ObjectHeader,
+    enum_: Variant,
+    error_: Variant,
 };
+
+pub fn hash_value(value: Value) error{NonHashableElement}!u64 {
+    return switch (value) {
+        .boolean => |b| @as(u64, @intFromBool(b)),
+        .float => |f| @bitCast(f),
+        .int => |i| @as(u64, @bitCast(i)),
+        .nil => std.math.maxInt(u64),
+        .object => |obj| switch (obj.object_type) {
+            .ObjectString => @as(*ObjectString, @ptrCast(obj)).hash,
+            else => error.NonHashableElement,
+        },
+    };
+}
 
 pub fn is_truthy(value: Value) bool {
     return switch (value) {
@@ -126,42 +150,6 @@ pub fn is_truthy(value: Value) bool {
 
 pub fn is_falsy(value: Value) bool {
     return !is_truthy(value);
-}
-
-pub fn equals(a: Value, b: Value) bool {
-    return switch (a) {
-        .int => |a_int| switch (b) {
-            .int => |b_int| a_int == b_int,
-            else => false,
-        },
-        .float => |a_float| switch (b) {
-            .float => |b_float| a_float == b_float,
-            else => false,
-        },
-        .boolean => |a_bool| switch (b) {
-            .boolean => |b_bool| a_bool == b_bool,
-            else => false,
-        },
-        .nil => switch (b) {
-            .nil => true,
-            else => false,
-        },
-        .object => |a_obj| switch (b) {
-            .object => |b_obj| a_obj == b_obj,
-            else => false,
-        },
-    };
-}
-
-pub fn object_from_value(value: Value) !*ObjectHeader {
-    return switch (value) {
-        .object => |obj| obj,
-        else => error.InvalidValue,
-    };
-}
-
-pub fn value_from_object(obj: *ObjectHeader) Value {
-    return Value{ .object = obj };
 }
 
 pub fn values_equal(a: Value, b: Value) bool {
@@ -182,11 +170,36 @@ pub fn values_equal(a: Value, b: Value) bool {
             .nil => true,
             else => false,
         },
+        .enum_ => |a_variant| switch (b) {
+            .enum_ => |b_variant| a_variant.type_id == b_variant.type_id and a_variant.index == b_variant.index,
+            else => false,
+        },
+        .error_ => |a_variant| switch (b) {
+            .error_ => |b_variant| a_variant.type_id == b_variant.type_id and a_variant.index == b_variant.index,
+            else => false,
+        },
         .object => |a_obj| switch (b) {
-            .object => |b_obj| a_obj == b_obj,
+            .object => |b_obj| switch (a_obj.object_type) {
+                .ObjectString => switch (b_obj.object_type) {
+                    .ObjectString => compare_strings(@ptrCast(a_obj), @ptrCast(b_obj)),
+                    else => false,
+                },
+                else => a_obj == b_obj,
+            },
             else => false,
         },
     };
+}
+
+pub fn object_from_value(value: Value) !*ObjectHeader {
+    return switch (value) {
+        .object => |obj| obj,
+        else => error.InvalidValue,
+    };
+}
+
+pub fn value_from_object(obj: *ObjectHeader) Value {
+    return Value{ .object = obj };
 }
 
 pub fn print_value(value: Value) void {
@@ -195,6 +208,8 @@ pub fn print_value(value: Value) void {
         .float => |float| std.debug.print("{}", .{float}),
         .boolean => |b| std.debug.print("{}", .{b}),
         .nil => std.debug.print("nil", .{}),
+        .enum_ => |variant| std.debug.print("enum variant {}", .{variant.index}),
+        .error_ => |variant| std.debug.print("error variant {}", .{variant.index}),
         .object => |obj| print_object(obj),
     }
 }
@@ -207,14 +222,45 @@ pub fn print_object(obj: *ObjectHeader) void {
     std.debug.print("{s}@{*}\n", .{ @tagName(obj.object_type), obj });
 }
 
+pub fn copy_string(isolate: *Isolate, chars: []const u8) !*ObjectString {
+    const entry = isolate.string_intern.getEntry(chars);
+    if (entry) |e| {
+        return e.value_ptr.*;
+    }
+
+    return try new_string_object(isolate, chars);
+}
+
+/// Takes a string owned by allocator, and makes it a GC owned string
+/// Will free `chars`
+pub fn take_string(isolate: *Isolate, allocator: std.mem.Allocator, chars: []const u8) !*ObjectString {
+    const entry = isolate.string_intern.getEntry(chars);
+    if (entry) |e| {
+        allocator.free(chars);
+        return e.value_ptr.*;
+    }
+    defer allocator.free(chars);
+    return try new_string_object(isolate, chars);
+}
+
 pub fn new_string_object(isolate: *Isolate, chars: []const u8) !*ObjectString {
     const string: *ObjectString = try isolate.gc.allocate_object(ObjectString, .ObjectString);
+
+    string.chars = try isolate.gc.managed_allocator.allocator().dupe(u8, chars);
     string.hash = std.hash.Fnv1a_64.hash(chars);
-    string.chars = chars;
-    // TODO: fix byte_length and code_point_length calculations for UTF-8
     string.byte_length = chars.len;
-    string.code_point_length = chars.len;
+    string.code_point_length = try std.unicode.utf8CountCodepoints(chars);
+
+    try isolate.string_intern.put(string.chars, string);
+
     return string;
+}
+
+pub fn compare_strings(a: *ObjectString, b: *ObjectString) bool {
+    if (a.byte_length != b.byte_length) {
+        return false;
+    }
+    return std.mem.eql(u8, a.chars, b.chars);
 }
 
 pub fn new_array_object(isolate: *Isolate, element_count: usize) !*ObjectArray {
@@ -228,12 +274,14 @@ pub fn new_array_object(isolate: *Isolate, element_count: usize) !*ObjectArray {
     return array;
 }
 
-pub fn new_table_object(isolate: *Isolate) !*ObjectTable {
+pub fn new_table_object(isolate: *Isolate, count: usize) !*ObjectTable {
     const table: *ObjectTable = try isolate.gc.allocate_object(ObjectTable, .ObjectTable);
-    table.capacity = 0;
-    table.length = 0;
-    table.keys = try isolate.gc.managed_allocator.allocator().alloc(Value, 0);
-    table.values = try isolate.gc.managed_allocator.allocator().alloc(Value, 0);
+    table.capacity = count;
+    table.length = count;
+    table.keys = try isolate.gc.managed_allocator.allocator().alloc(Value, count);
+    table.values = try isolate.gc.managed_allocator.allocator().alloc(Value, count);
+    for (table.keys) |*key| key.* = .nil;
+    for (table.values) |*value| value.* = .nil;
     return table;
 }
 
@@ -279,6 +327,9 @@ pub fn new_coroutine_object(isolate: *Isolate, function: *ObjectFunction) !*Obje
     for (coroutine.upvalues) |*upvalue| {
         upvalue.* = undefined;
     }
+    coroutine.suspended = true;
+    coroutine.running = false;
+    coroutine.finished = false;
     return coroutine;
 }
 
@@ -297,6 +348,9 @@ pub fn blacken_object(garbage_collector: *basic_gc, obj: *ObjectHeader) !void {
             const func: *ObjectFunction = @ptrCast(obj);
             if (func.name) |name| {
                 try mark_object(garbage_collector, @ptrCast(name));
+            }
+            for (func.chunk.constants.items) |constant| {
+                try mark_value(garbage_collector, constant);
             }
         },
         .ObjectClosure => {

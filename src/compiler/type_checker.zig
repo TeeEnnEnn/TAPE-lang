@@ -46,6 +46,10 @@ pub const TypeCheckerError = error{
     ConstantReassignmentAttempt,
     /// An exported constant was initialized with a non constant value
     NonConstantExport,
+    /// A try statement used outside of a function
+    TryOutsideFunction,
+    /// Invalid function return type
+    InvalidReturnType,
 } || EnvironmentError || TypeRegistryError || std.mem.Allocator.Error;
 
 pub const StatementTermination = struct {
@@ -639,15 +643,40 @@ pub const TypeChecker = struct {
                 return union_type;
             },
             .try_expr => |expr| {
+                if (self.expected_return_type) |expected| {
+                    const expected_type_info = self.registry.get_type_info(expected);
+                    if (expected_type_info != ._union) {
+                        try self.fail("Invalid Return Type", "A function that contains a `try` expression must have a union as its return type", expr.line, expr.column);
+                        return TypeCheckerError.InvalidReturnType;
+                    }
+                    const left_err = self.registry.get_type_info(expected_type_info._union.left) == ._error;
+                    const right_err = self.registry.get_type_info(expected_type_info._union.right) == ._error;
+
+                    if (!left_err and !right_err) {
+                        try self.fail("Invalid Return Type", "A function that contains a `try` expression must have a union as its return type with an Error on one side.", expr.line, expr.column);
+                        return TypeCheckerError.InvalidReturnType;
+                    }
+                } else {
+                    try self.fail("`try` used outside function or coroutine", "`try` returns an error and so must be within a function or coroutine.", expr.line, expr.column);
+                    return TypeCheckerError.TryOutsideFunction;
+                }
+
                 const expr_typeid = try self.check_expression(expr.expr);
                 const type_info = self.registry.get_type_info(expr_typeid);
                 if (type_info != ._union) return TypeCheckerError.InvalidOperation;
                 const left_err = self.registry.get_type_info(type_info._union.left) == ._error;
                 const right_err = self.registry.get_type_info(type_info._union.right) == ._error;
-                if (!left_err and !right_err) return TypeCheckerError.InvalidOperation;
-                const union_type = try self.registry.add_union_type(type_info._union.left, type_info._union.right);
-                expr.resolved_type = union_type;
-                return union_type;
+
+                // NOTE: we look on the left for the error in a case where both sides are an error
+                const error_type = if (left_err) type_info._union.left else if (right_err) type_info._union.right else type_info._union.left;
+
+                if (!try self.is_compatible(self.expected_return_type.?, error_type)) {
+                    try self.fail("Invalid Return Type", "The possibly returned error's type does not match the function return type.", expr.line, expr.column);
+                    return TypeCheckerError.InvalidReturnType;
+                }
+
+                expr.resolved_type = if (left_err) type_info._union.right else if (right_err) type_info._union.left else type_info._union.right;
+                return expr.resolved_type;
             },
             .binary_expr => |expr| {
                 const left_type: AST.TypeId = try self.check_expression(expr.left);
@@ -875,6 +904,8 @@ pub const TypeChecker = struct {
                                 return field.type;
                             }
                         }
+                        try self.fail("Struct has no static member with this name.", null, expr.line, expr.column);
+                        return TypeCheckerError.InvalidMemberAccess;
                     },
                     ._error => |existing_error| {
                         for (existing_error.variants) |variant| {
@@ -883,6 +914,8 @@ pub const TypeChecker = struct {
                                 return obj_type;
                             }
                         }
+                        try self.fail("Error type has no variant with this name.", null, expr.line, expr.column);
+                        return TypeCheckerError.InvalidMemberAccess;
                     },
                     ._enum => |existing_enum| {
                         for (existing_enum.variants) |variant| {
@@ -891,10 +924,14 @@ pub const TypeChecker = struct {
                                 return obj_type;
                             }
                         }
+                        try self.fail("Enum has no variant with this name.", null, expr.line, expr.column);
+                        return TypeCheckerError.InvalidMemberAccess;
                     },
-                    else => {},
+                    else => {
+                        try self.fail("Type does not support static member access.", null, expr.line, expr.column);
+                        return TypeCheckerError.InvalidMemberAccess;
+                    },
                 }
-                return TypeCheckerError.InvalidMemberAccess;
             },
             .array_expr => |expr| {
                 var current_id: ?AST.TypeId = null;

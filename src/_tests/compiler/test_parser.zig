@@ -38,7 +38,7 @@ test "Parser can parse variable declaration with type annotation" {
     defer arena.deinit();
     const allocator = arena.allocator();
 
-    const source = "pub var name: String = \"Tape\";";
+    const source = "pub const name: String = \"Tape\";";
     const node = try parseFirstDecl(allocator, source);
 
     try std.testing.expect(node.* == .var_decl);

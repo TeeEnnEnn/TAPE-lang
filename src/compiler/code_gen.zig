@@ -13,7 +13,20 @@ const Opcode = @import("../runtime/chunk.zig").Opcode;
 const DiagnosticReporter = @import("../diagnostics/diagnostics.zig").DiagnosticsReporter;
 const Module = @import("workspace.zig").Module;
 
-pub const CodeGeneratorError = error{ MissingBinding, UnsupportedNode, UnsupportedOperator, UnsupportedOperandType, LoopSizeTooLarge } || std.mem.Allocator.Error;
+pub const CodeGeneratorError = error{
+    MissingBinding,
+    UnsupportedNode,
+    UnsupportedOperator,
+    UnsupportedOperandType,
+    LoopSizeTooLarge,
+} || std.mem.Allocator.Error || error{
+    Utf8InvalidStartByte,
+    TruncatedInput,
+    Utf8ExpectedContinuation,
+    Utf8OverlongEncoding,
+    Utf8EncodesSurrogateHalf,
+    Utf8CodepointTooLarge,
+};
 
 pub const FunctionCompiler = struct {
     allocator: std.mem.Allocator,
@@ -127,6 +140,12 @@ pub const CodeGenerator = struct {
             },
             .var_decl => |decl| {
                 try self.generate_var_decl(node, decl);
+            },
+            .enum_decl => {
+                // nothing to do - fully comptime
+            },
+            .error_decl => {
+                // nothing to do - fully comptime
             },
             .expr_stmt => |stmt| {
                 try self.generate_expression(stmt.expr);
@@ -246,16 +265,74 @@ pub const CodeGenerator = struct {
 
     fn generate_expression(self: *CodeGenerator, node: *AST.ASTNode) CodeGeneratorError!void {
         switch (node.*) {
-            .int_lit => |lit| try self.current.chunk().emit_constant(.{ .int = lit.value }, lit.line),
+            .int_lit => |lit| {
+                try self.current.chunk().emit_constant(.{ .int = lit.value }, lit.line);
+            },
             .float_lit => |lit| try self.current.chunk().emit_constant(.{ .float = lit.value }, lit.line),
             .bool_lit => |lit| try self.current.chunk().write_opcode(if (lit.value) .OP_TRUE else .OP_FALSE, lit.line),
             .nil_lit => |lit| try self.current.chunk().write_opcode(.OP_NIL, lit.line),
+            .str_lit => |lit| {
+                const string_object = try Entities.copy_string(self.isolate, lit.value);
+                try self.current.chunk().emit_constant(.{ .object = @ptrCast(string_object) }, lit.line);
+            },
+            .array_expr => |arr| {
+                for (arr.elements) |element| {
+                    try self.generate_expression(element);
+                }
+                try self.current.chunk().write_opcode(.OP_ARRAY, arr.line);
+                try self.current.chunk().write_u16(@intCast(arr.elements.len), arr.line);
+            },
+            .tuple_expr => |tup| {
+                for (tup.exprs) |element| {
+                    try self.generate_expression(element);
+                }
+                try self.current.chunk().write_opcode(.OP_TUPLE, tup.line);
+                try self.current.chunk().write_u16(@intCast(tup.exprs.len), tup.line);
+            },
+            .table_expr => |expr| {
+                for (expr.keys) |key| {
+                    try self.generate_expression(key);
+                }
+                for (expr.values) |value| {
+                    try self.generate_expression(value);
+                }
+                try self.current.chunk().write_opcode(.OP_TABLE, expr.line);
+                try self.current.chunk().write_u16(@intCast(expr.keys.len), expr.line);
+            },
             .group_expr => |expr| try self.generate_expression(expr.expr),
             .unary_expr => |expr| try self.generate_unary_expression(expr),
             .binary_expr => |expr| try self.generate_binary_expr(expr),
             .resume_expr => |expr| try self.generate_resume_expression(expr),
             .identifier_expr => |expr| try self.generate_identifier_expr(node, expr),
-            .assign_expr => |expr| try self.generate_assignment_expression(node, expr),
+            .assign_expr => |expr| try self.generate_assignment_expression(expr),
+            .index_expr => |expr| {
+                _ = expr;
+                return CodeGeneratorError.UnsupportedNode;
+            },
+            .static_member_expr => |expr| {
+                // Enum::Variant
+                // Error::Variant
+                // Struct::Function
+
+                const member_info = self.binding_resolution.member_infos.get(node) orelse return self.fail("Missing binding for static member.", "This is an internal error, please leave a bug report.", expr.line, expr.column);
+                switch (member_info) {
+                    .static_field => |field| {
+                        _ = field;
+                        self.fail("Unsupported expression type in code generation.", "This expression type is not yet implemented.", expr.line, expr.column);
+                    },
+                    .static_method => |method| {
+                        _ = method;
+                        self.fail("Unsupported expression type in code generation.", "This expression type is not yet implemented.", expr.line, expr.column);
+                    },
+                    .enum_variant => |variant| {
+                        try self.current.chunk().emit_constant(.{ .enum_ = .{ .type_id = variant.type_id, .index = @intCast(variant.index) } }, expr.line);
+                    },
+                    .error_variant => |variant| {
+                        try self.current.chunk().emit_constant(.{ .error_ = .{ .type_id = variant.type_id, .index = @intCast(variant.index) } }, expr.line);
+                    },
+                    else => return CodeGeneratorError.UnsupportedOperandType,
+                }
+            },
             else => {
                 self.fail("Unsupported expression type in code generation.", "This expression type is not yet implemented.", 0, 0);
                 return CodeGeneratorError.UnsupportedNode;
@@ -263,10 +340,40 @@ pub const CodeGenerator = struct {
         }
     }
 
-    fn generate_assignment_expression(self: *CodeGenerator, node: *AST.ASTNode, expr: *AST.AssignExpr) CodeGeneratorError!void {
-        _ = node;
-        self.fail("Assignment expression code generation is not yet implemented.", null, expr.line, expr.column);
-        return CodeGeneratorError.UnsupportedNode;
+    fn generate_assignment_expression(self: *CodeGenerator, expr: *AST.AssignExpr) CodeGeneratorError!void {
+        const identifier = switch (expr.left.*) {
+            .identifier_expr => |ie| ie,
+            else => return CodeGeneratorError.UnsupportedNode, // dot_expr targets: no runtime struct support yet
+        };
+
+        const binding = self.binding_resolution.identifier_bindings.get(expr.left) orelse return CodeGeneratorError.MissingBinding;
+        const op = expr.operator.lexeme;
+
+        if (std.mem.eql(u8, op, "=")) {
+            try self.generate_expression(expr.right);
+        } else {
+            // compound assignment becomes: x = x <op> right
+            try self.generate_identifier_expr(expr.left, identifier); // pushes current value
+            try self.generate_expression(expr.right);
+
+            const base_op = op[0 .. op.len - 1]; // "+=" -> "+" ...
+            const left_kind = resolve_typeof(expr.left);
+            const right_kind = resolve_typeof(expr.right);
+            const opcode = try CodeGenerator.select_opcode(base_op, left_kind, right_kind);
+            try self.current.chunk().write_opcode(opcode, expr.line);
+        }
+
+        switch (binding.kind) {
+            .global => {
+                try self.current.chunk().write_opcode(.OP_STORE_GLOBAL, expr.line);
+                try self.current.chunk().write_u16(binding.slot, expr.line);
+            },
+            .local, .param => {
+                try self.current.chunk().write_opcode(.OP_STORE_LOCAL, expr.line);
+                try self.current.chunk().write_u16(binding.slot, expr.line);
+            },
+            else => return CodeGeneratorError.UnsupportedNode,
+        }
     }
 
     fn generate_identifier_expr(self: *CodeGenerator, node: *AST.ASTNode, expr: *AST.IdentifierExpr) CodeGeneratorError!void {
@@ -353,6 +460,16 @@ pub const CodeGenerator = struct {
         try self.patch_jump(end_jump);
     }
 
+    fn catch_(self: *CodeGenerator, line: usize, right: *AST.ASTNode) CodeGeneratorError!void {
+        const else_jump = try self.emit_jump(.OP_JUMP_IF_ERROR, line);
+        const end_jump = try self.emit_jump(.OP_JUMP, line);
+
+        try self.patch_jump(else_jump);
+        try self.current.chunk().write_opcode(.OP_POP, line);
+        try self.generate_expression(right);
+        try self.patch_jump(end_jump);
+    }
+
     fn generate_binary_expr(self: *CodeGenerator, expr: *AST.BinaryExpr) CodeGeneratorError!void {
         const op = expr.operator.lexeme;
 
@@ -364,7 +481,10 @@ pub const CodeGenerator = struct {
             return try self.or_(expr.line, expr.right);
         } else if (std.mem.eql(u8, op, "orelse")) {
             return try self.orelse_(expr.line, expr.right);
+        } else if (std.mem.eql(u8, op, "catch")) {
+            return try self.catch_(expr.line, expr.right);
         }
+
         try self.generate_expression(expr.right);
 
         const left_kind = resolve_typeof(expr.left);
@@ -399,6 +519,10 @@ pub const CodeGenerator = struct {
             if (std.mem.eql(u8, op, "|")) return .OP_BITWISE_OR;
             if (std.mem.eql(u8, op, "&")) return .OP_BITWISE_AND;
             if (std.mem.eql(u8, op, "^")) return .OP_BITWISE_XOR;
+        }
+
+        if (left == @intFromEnum(TypeRegistry.PrimitiveType.String) and right == @intFromEnum(TypeRegistry.PrimitiveType.String)) {
+            if (std.mem.eql(u8, op, "++")) return .OP_STRING_CONCAT;
         }
 
         return CodeGeneratorError.UnsupportedOperator;

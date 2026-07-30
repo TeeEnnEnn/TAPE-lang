@@ -342,7 +342,7 @@ test "Type Checker - block termination" {
     _ = try checkSource(allocator, "fn f() -> Int { { { return 1; } } }");
 }
 
-test "Type Checker - pub var is exported" {
+test "Type Checker - pub const is exported" {
     var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
     defer arena.deinit();
     const allocator = arena.allocator();
@@ -351,7 +351,7 @@ test "Type Checker - pub var is exported" {
     var workspace = Workspace.init(allocator, io);
     defer workspace.deinit();
 
-    const mod = try Module.init("test_pub_var", "pub var x: Int = 42;", allocator);
+    const mod = try Module.init("test_pub_const", "pub const x: Int = 42;", allocator);
     var parser = try Parser.init(allocator, &workspace, mod, io, &group);
     mod.ast = try parser.parse();
 
@@ -465,7 +465,7 @@ test "Type Checker - use_decl errors on non-exported symbol" {
     }));
 }
 
-test "Type Checker - pub var import via use_decl hoist looks up from exports map" {
+test "Type Checker - pub const import via use_decl hoist looks up from exports map" {
     // Verify that use_decl hoist looks up symbols from the imported module's exports map,
     // not from registry.get_named_type (which only finds structs/enums/errors).
     // This test simulates the multi-module scenario using the TypeChecker directly.
@@ -478,7 +478,7 @@ test "Type Checker - pub var import via use_decl hoist looks up from exports map
     defer workspace.deinit();
 
     // Create and process the "lib" module with a pub var
-    const lib_mod = try Module.init("lib", "pub var x: Int = 42;", allocator);
+    const lib_mod = try Module.init("lib", "pub const x: Int = 42;", allocator);
     var group = std.Io.Group.init;
     var parser = try Parser.init(allocator, &workspace, lib_mod, io, &group);
     lib_mod.ast = try parser.parse();

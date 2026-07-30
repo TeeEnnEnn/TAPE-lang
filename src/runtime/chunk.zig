@@ -70,6 +70,8 @@ pub const Opcode = enum(u8) {
     OP_MOD_INT_FLOAT,
     OP_MOD_FLOAT_INT,
 
+    OP_STRING_CONCAT,
+
     OP_POP,
     OP_POP_N,
     OP_LOAD_GLOBAL,
@@ -79,8 +81,13 @@ pub const Opcode = enum(u8) {
     OP_JUMP,
     OP_JUMP_IF_FALSE,
     OP_JUMP_IF_NIL,
+    OP_JUMP_IF_ERROR,
     OP_LOOP,
     OP_CALL,
+
+    OP_ARRAY,
+    OP_TABLE,
+    OP_TUPLE,
 
     OP_CLOSURE,
 };

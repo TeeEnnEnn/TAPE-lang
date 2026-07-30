@@ -3,6 +3,7 @@ const Entities = @import("../runtime/entities.zig");
 const ManagedAllocator = @import("managed_allocator.zig");
 
 pub const RootMarker = *const fn (isolate_ptr: *anyopaque, gc: *BasicGarbageCollector) void;
+pub const CleanStringIntern = *const fn (isolate_ptr: *anyopaque, gc: *BasicGarbageCollector) void;
 
 pub const BasicGarbageCollector = struct {
     /// Used for the gray stack
@@ -13,10 +14,11 @@ pub const BasicGarbageCollector = struct {
     next_gc: usize = 1024 * 1024,
     isolate_ptr: *anyopaque,
     mark_roots_fn: RootMarker,
+    clean_string_intern: CleanStringIntern,
 
     const slab_capacity: usize = 1024;
 
-    pub fn init(allocator: std.mem.Allocator, isolate_ptr: *anyopaque, mark_roots_fn: RootMarker) !*BasicGarbageCollector {
+    pub fn init(allocator: std.mem.Allocator, isolate_ptr: *anyopaque, mark_roots_fn: RootMarker, clean_string_intern: CleanStringIntern) !*BasicGarbageCollector {
         const gc = try allocator.create(BasicGarbageCollector);
         gc.* = .{
             .allocator = allocator,
@@ -24,6 +26,7 @@ pub const BasicGarbageCollector = struct {
             .gray_stack = .empty,
             .isolate_ptr = isolate_ptr,
             .mark_roots_fn = mark_roots_fn,
+            .clean_string_intern = clean_string_intern,
         };
 
         return gc;
@@ -56,6 +59,8 @@ pub const BasicGarbageCollector = struct {
         self.mark_roots_fn(self.isolate_ptr, self);
 
         try self.trace_references();
+
+        self.clean_string_intern(self.isolate_ptr, self);
 
         self.sweep();
 

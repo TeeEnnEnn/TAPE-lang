@@ -219,8 +219,7 @@ pub const Workspace = struct {
         // resolve bindings
         std.debug.print("Resolving bindings...\n", .{});
         for (sorted_modules) |module| {
-            module.binding_resolution.deinit();
-            module.binding_resolution = BindingResolver.resolve(module.allocator, &type_registry, &self.diagnostics, module, self, module.ast) catch {
+            const new_resolution = BindingResolver.resolve(module.allocator, &type_registry, &self.diagnostics, module, self, module.ast) catch {
                 if (self.diagnostics.has_content()) {
                     const had_errors = self.diagnostics.has_errors;
                     self.diagnostics.report_all(self.io) catch {};
@@ -228,6 +227,8 @@ pub const Workspace = struct {
                 }
                 return;
             };
+            module.binding_resolution.deinit();
+            module.binding_resolution = new_resolution;
 
             if (self.diagnostics.has_content()) {
                 const had_errors = self.diagnostics.has_errors;
@@ -273,7 +274,7 @@ pub const Workspace = struct {
 
         const result = try first_isolate.execute();
         _ = result;
-        std.debug.print("Done.\n", .{});
+        std.debug.print("\x1b[32m Done. \x1b[0m\n", .{});
     }
 
     /// submits an imported file to the group for parsing
