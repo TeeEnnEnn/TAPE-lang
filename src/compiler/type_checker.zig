@@ -643,39 +643,27 @@ pub const TypeChecker = struct {
                 return union_type;
             },
             .try_expr => |expr| {
-                if (self.expected_return_type) |expected| {
-                    const expected_type_info = self.registry.get_type_info(expected);
-                    if (expected_type_info != ._union) {
-                        try self.fail("Invalid Return Type", "A function that contains a `try` expression must have a union as its return type", expr.line, expr.column);
-                        return TypeCheckerError.InvalidReturnType;
-                    }
-                    const left_err = self.registry.get_type_info(expected_type_info._union.left) == ._error;
-                    const right_err = self.registry.get_type_info(expected_type_info._union.right) == ._error;
-
-                    if (!left_err and !right_err) {
-                        try self.fail("Invalid Return Type", "A function that contains a `try` expression must have a union as its return type with an Error on one side.", expr.line, expr.column);
-                        return TypeCheckerError.InvalidReturnType;
-                    }
-                } else {
+                const expected = self.expected_return_type orelse {
                     try self.fail("`try` used outside function or coroutine", "`try` returns an error and so must be within a function or coroutine.", expr.line, expr.column);
                     return TypeCheckerError.TryOutsideFunction;
+                };
+                if (self.split_error_union(expected) == null) {
+                    try self.fail("Invalid Return Type", "A function that contains a `try` expression must have a union as its return type with an Error on one side.", expr.line, expr.column);
+                    return TypeCheckerError.InvalidReturnType;
                 }
 
                 const expr_typeid = try self.check_expression(expr.expr);
-                const type_info = self.registry.get_type_info(expr_typeid);
-                if (type_info != ._union) return TypeCheckerError.InvalidOperation;
-                const left_err = self.registry.get_type_info(type_info._union.left) == ._error;
-                const right_err = self.registry.get_type_info(type_info._union.right) == ._error;
+                const parts = self.split_error_union(expr_typeid) orelse {
+                    try self.fail("Invalid Operation", "`try` can only be used on a union which contains an Error.", expr.line, expr.column);
+                    return TypeCheckerError.InvalidOperation;
+                };
 
-                // NOTE: we look on the left for the error in a case where both sides are an error
-                const error_type = if (left_err) type_info._union.left else if (right_err) type_info._union.right else type_info._union.left;
-
-                if (!try self.is_compatible(self.expected_return_type.?, error_type)) {
+                if (!try self.is_compatible(expected, parts.err)) {
                     try self.fail("Invalid Return Type", "The possibly returned error's type does not match the function return type.", expr.line, expr.column);
                     return TypeCheckerError.InvalidReturnType;
                 }
 
-                expr.resolved_type = if (left_err) type_info._union.right else if (right_err) type_info._union.left else type_info._union.right;
+                expr.resolved_type = parts.success;
                 return expr.resolved_type;
             },
             .binary_expr => |expr| {
@@ -1253,5 +1241,18 @@ pub const TypeChecker = struct {
 
     fn fail(self: *TypeChecker, message: []const u8, hint: ?[]const u8, line: usize, column: usize) !void {
         try self.diagnostics.add_diagnostic(.{ .file_path = self.module.filepath, .column = column, .line = line, .stage = .TypeChecker, .severity = .Error, .message = message, .hint = hint });
+    }
+
+    fn split_error_union(self: *TypeChecker, id: AST.TypeId) ?struct { success: AST.TypeId, err: AST.TypeId } {
+        const info = self.registry.get_type_info(id);
+        if (info != ._union) return null;
+        const left_err = self.registry.get_type_info(info._union.left) == ._error;
+        const right_err = self.registry.get_type_info(info._union.right) == ._error;
+        if (!left_err and !right_err) return null;
+        // NOTE: if both sides are errors - take the left hand side.
+        return .{
+            .err = if (left_err) info._union.left else info._union.right,
+            .success = if (left_err) info._union.right else info._union.left,
+        };
     }
 };
