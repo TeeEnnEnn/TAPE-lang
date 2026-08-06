@@ -65,6 +65,8 @@ pub const Isolate = struct {
     string_intern: std.StringHashMap(*Entities.ObjectString),
     isolate_closure: *Entities.ObjectClosure,
 
+    function_constants: std.ArrayList(TapeValue),
+
     stack: [*]TapeValue,
     stack_top_index: usize,
     frames: [*]Entities.CallFrame,
@@ -89,6 +91,7 @@ pub const Isolate = struct {
         isolate.frame_count = 0;
         isolate.globals = @ptrCast(@alignCast(try base_allocator.alloc(TapeValue, vm.config.globals_size)));
         isolate.globals_count = 0;
+        isolate.function_constants = .empty;
 
         return isolate;
     }
@@ -99,6 +102,7 @@ pub const Isolate = struct {
         self.base_allocator.free(self.stack[0..self.vm.config.stack_size]);
         self.base_allocator.free(self.frames[0..self.vm.config.max_frame_count]);
         self.base_allocator.free(self.globals[0..self.vm.config.globals_size]);
+        self.function_constants.deinit(self.base_allocator);
         self.base_allocator.destroy(self);
     }
 
@@ -753,6 +757,10 @@ pub const Isolate = struct {
                     frame = &self.frames[self.frame_count - 1]; // re-point at the new frame, same pattern OP_RETURN already uses
                 },
                 .OP_CLOSURE => {},
+                .OP_LOAD_FUNCTION_CONSTANT => {
+                    const index = frame.read_u16();
+                    try self.push_value(self.function_constants.items[index]);
+                },
             }
         }
     }

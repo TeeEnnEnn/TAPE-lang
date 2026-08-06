@@ -71,10 +71,21 @@ pub const ObjectArray = struct {
     length: usize,
 };
 
+pub const TableEntryState = enum {
+    empty,
+    tombstone,
+    occupied,
+};
+
+pub const TableEntry = struct {
+    key: Value = .nil,
+    value: Value = .nil,
+    state: TableEntryState = .empty,
+};
+
 pub const ObjectTable = struct {
     header: ObjectHeader,
-    keys: []Value,
-    values: []Value,
+    entries: []TableEntry,
     capacity: usize,
     length: usize,
 };
@@ -128,17 +139,27 @@ pub const Value = union(enum) {
     error_: Variant,
 };
 
+/// hash of a TAPE Value
 pub fn hash_value(value: Value) error{NonHashableElement}!u64 {
     return switch (value) {
         .boolean => |b| @as(u64, @intFromBool(b)),
-        .float => |f| @bitCast(f),
+        .float => |f| if (f == 0) 0 else @bitCast(f),
         .int => |i| @as(u64, @bitCast(i)),
         .nil => std.math.maxInt(u64),
+        .enum_ => |variant| hash_variant(0x9e3779b97f4a7c15, variant), // magic number mixing constant
+        .error_ => |variant| hash_variant(0xbf58476d1ce4e5b9, variant), // magic number mixing constant
         .object => |obj| switch (obj.object_type) {
             .ObjectString => @as(*ObjectString, @ptrCast(obj)).hash,
             else => error.NonHashableElement,
         },
     };
+}
+
+fn hash_variant(seed: u64, variant: Variant) u64 {
+    var hash = seed;
+    hash ^= @as(u64, variant.type_id) +% 0x9e3779b97f4a7c15 +% (hash << 6) +% (hash >> 2);
+    hash ^= @as(u64, variant.index) +% 0x9e3779b97f4a7c15 +% (hash << 6) +% (hash >> 2);
+    return hash;
 }
 
 pub fn is_truthy(value: Value) bool {
@@ -214,12 +235,64 @@ pub fn print_value(value: Value) void {
     }
 }
 
-pub fn as(comptime T: type, obj: *ObjectHeader) *T {
-    return @ptrCast(obj);
+pub fn object_as(comptime T: type, obj: *ObjectHeader) *T {
+    return switch (obj.object_type) {
+        .ObjectArray => @ptrCast(obj),
+        .ObjectClosure => @ptrCast(obj),
+        .ObjectCoroutine => @ptrCast(obj),
+        .ObjectFunction => @ptrCast(obj),
+        .ObjectString => @ptrCast(obj),
+        .ObjectTable => @ptrCast(obj),
+        .ObjectTuple => @ptrCast(obj),
+        .ObjectUpvalue => @ptrCast(obj),
+    };
 }
 
 pub fn print_object(obj: *ObjectHeader) void {
-    std.debug.print("{s}@{*}\n", .{ @tagName(obj.object_type), obj });
+    switch (obj.object_type) {
+        .ObjectString => {
+            const object = object_as(ObjectString, obj);
+            std.debug.print("{s}", .{object.chars});
+        },
+        .ObjectArray => {
+            const object = object_as(ObjectArray, obj);
+            std.debug.print("[", .{});
+            for (object.elements) |element| {
+                print_value(element);
+                std.debug.print(", ", .{});
+            }
+            std.debug.print("]", .{});
+        },
+        .ObjectTuple => {
+            const object = object_as(ObjectTuple, obj);
+            std.debug.print("(", .{});
+            for (object.elements) |element| {
+                print_value(element);
+                std.debug.print(", ", .{});
+            }
+            std.debug.print(")", .{});
+        },
+        .ObjectTable => {
+            const object = object_as(ObjectTable, obj);
+            std.debug.print("{{", .{});
+            var first = true;
+            for (object.entries) |entry| {
+                if (entry.state != .occupied) continue;
+                if (!first) std.debug.print(", ", .{});
+                first = false;
+                print_value(entry.key);
+                std.debug.print(": ", .{});
+                print_value(entry.value);
+            }
+            std.debug.print("}}", .{});
+        },
+        .ObjectUpvalue => {
+            const object = object_as(ObjectUpvalue, obj);
+            std.debug.print("ObjectUpvalue: ", .{});
+            print_value(object.closed_value);
+        },
+        else => std.debug.print("{s}@{*}\n", .{ @tagName(obj.object_type), obj }),
+    }
 }
 
 pub fn copy_string(isolate: *Isolate, chars: []const u8) !*ObjectString {
@@ -274,15 +347,121 @@ pub fn new_array_object(isolate: *Isolate, element_count: usize) !*ObjectArray {
     return array;
 }
 
-pub fn new_table_object(isolate: *Isolate, count: usize) !*ObjectTable {
+pub fn new_table_object(isolate: *Isolate) !*ObjectTable {
     const table: *ObjectTable = try isolate.gc.allocate_object(ObjectTable, .ObjectTable);
-    table.capacity = count;
-    table.length = count;
-    table.keys = try isolate.gc.managed_allocator.allocator().alloc(Value, count);
-    table.values = try isolate.gc.managed_allocator.allocator().alloc(Value, count);
-    for (table.keys) |*key| key.* = .nil;
-    for (table.values) |*value| value.* = .nil;
+    table.entries = &.{};
+    table.capacity = 0;
+    table.length = 0;
     return table;
+}
+
+const tableMaxLoad = 0.75;
+
+fn grow_table_capacity(capacity: usize) usize {
+    if (capacity < 8) return 8;
+    return capacity * 2;
+}
+
+fn init_table_entries(entries: []TableEntry) void {
+    for (entries) |*entry| {
+        entry.* = .{};
+    }
+}
+
+fn find_table_entry(entries: []TableEntry, key: Value) !*TableEntry {
+    const capacity = entries.len;
+    var index: usize = @intCast((try hash_value(key)) & @as(u64, @intCast(capacity - 1)));
+    var tombstone: ?*TableEntry = null;
+
+    while (true) {
+        const entry = &entries[index];
+
+        switch (entry.state) {
+            .empty => return tombstone orelse entry,
+            .tombstone => {
+                if (tombstone == null) tombstone = entry;
+            },
+            .occupied => {
+                if (values_equal(entry.key, key)) return entry;
+            },
+        }
+
+        index = (index + 1) & (capacity - 1);
+    }
+}
+
+/// Grows the size of the table and moves elements to their new positions
+fn adjustTableCapacity(isolate: *Isolate, table: *ObjectTable, capacity: usize) !void {
+    const allocator = isolate.gc.managed_allocator.allocator();
+    const entries = try allocator.alloc(TableEntry, capacity);
+    init_table_entries(entries);
+
+    table.length = 0;
+    for (table.entries) |entry| {
+        if (entry.state != .occupied) continue;
+
+        const dest = try find_table_entry(entries, entry.key);
+        dest.* = .{
+            .key = entry.key,
+            .value = entry.value,
+            .state = .occupied,
+        };
+        table.length += 1;
+    }
+
+    if (table.entries.len > 0) allocator.free(table.entries);
+    table.entries = entries;
+    table.capacity = capacity;
+}
+
+pub fn table_set(isolate: *Isolate, table: *ObjectTable, key: Value, value: Value) !bool {
+    if (@as(f64, @floatFromInt(table.length + 1)) > @as(f64, @floatFromInt(table.capacity)) * tableMaxLoad) {
+        try adjustTableCapacity(isolate, table, grow_table_capacity(table.capacity));
+    }
+
+    const entry = try find_table_entry(table.entries, key);
+    const is_new_key = entry.state != .occupied;
+
+    if (is_new_key) {
+        table.length += 1;
+    }
+
+    entry.* = .{
+        .key = key,
+        .value = value,
+        .state = .occupied,
+    };
+    return is_new_key;
+}
+
+pub fn table_get(table: *const ObjectTable, key: Value) !?Value {
+    if (table.length == 0) return null;
+
+    const entry = try find_table_entry(table.entries, key);
+    if (entry.state != .occupied) return null;
+    return entry.value;
+}
+
+pub fn table_delete(table: *ObjectTable, key: Value) !bool {
+    if (table.length == 0) return false;
+
+    const entry = try find_table_entry(table.entries, key);
+    if (entry.state != .occupied) return false;
+
+    entry.* = .{
+        .key = .nil,
+        .value = .{ .boolean = true },
+        .state = .tombstone,
+    };
+    return true;
+}
+
+pub fn table_add_all(isolate: *Isolate, from: *const ObjectTable, to: *ObjectTable) !void {
+    for (from.entries) |entry| {
+        if (entry.state == .occupied) {
+            _ = try table_set(isolate, to, entry.key, entry.value);
+        }
+    }
 }
 
 pub fn new_tuple_object(isolate: *Isolate, length: usize) !*ObjectTuple {
@@ -376,11 +555,10 @@ pub fn blacken_object(garbage_collector: *basic_gc, obj: *ObjectHeader) !void {
         },
         .ObjectTable => {
             const table: *ObjectTable = @ptrCast(obj);
-            for (table.keys) |key| {
-                try mark_value(garbage_collector, key);
-            }
-            for (table.values) |value| {
-                try mark_value(garbage_collector, value);
+            for (table.entries) |entry| {
+                if (entry.state != .occupied) continue;
+                try mark_value(garbage_collector, entry.key);
+                try mark_value(garbage_collector, entry.value);
             }
         },
         .ObjectArray => {
@@ -429,8 +607,7 @@ pub fn free_object(allocator: std.mem.Allocator, obj: *ObjectHeader) void {
         },
         .ObjectTable => {
             const table: *ObjectTable = @ptrCast(obj);
-            allocator.free(table.keys);
-            allocator.free(table.values);
+            if (table.entries.len > 0) allocator.free(table.entries);
             allocator.destroy(table);
         },
         .ObjectString => {
