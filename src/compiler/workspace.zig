@@ -251,7 +251,7 @@ pub const Workspace = struct {
 
         // emit Bytecode
         for (sorted_modules) |module| {
-            var code_gen = try CodeGenerator.init(self.allocator, first_isolate, &module.binding_resolution, module.ast, &self.diagnostics, module);
+            var code_gen = try CodeGenerator.init(self.allocator, first_isolate, &module.binding_resolution, &type_registry, module.ast, &self.diagnostics, module);
 
             const function = code_gen.generate();
             if (function) |f| {

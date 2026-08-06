@@ -57,6 +57,8 @@ pub const CodeGenerator = struct {
     isolate: *Runtime.Isolate,
     /// The binding resolution for the module currently being compiled
     binding_resolution: *const BindingResolver.BindingResolution,
+    /// Shared type registry from type checking.
+    registry: *TypeRegistry.TypeRegistry,
     /// AST node current being compiled
     node: *AST.ASTNode,
     /// The top of the function compiler stack
@@ -66,11 +68,12 @@ pub const CodeGenerator = struct {
     /// The module being compiled
     module: *Module,
 
-    pub fn init(allocator: std.mem.Allocator, isolate: *Runtime.Isolate, binding_resolution: *const BindingResolver.BindingResolution, node: *AST.ASTNode, diagnostics: *DiagnosticReporter, module: *Module) !CodeGenerator {
+    pub fn init(allocator: std.mem.Allocator, isolate: *Runtime.Isolate, binding_resolution: *const BindingResolver.BindingResolution, registry: *TypeRegistry.TypeRegistry, node: *AST.ASTNode, diagnostics: *DiagnosticReporter, module: *Module) !CodeGenerator {
         return .{
             .allocator = allocator,
             .isolate = isolate,
             .binding_resolution = binding_resolution,
+            .registry = registry,
             .node = node,
             .current = try FunctionCompiler.init(allocator, try Entities.new_function_object(isolate), null),
             .diagnostics = diagnostics,
@@ -305,9 +308,40 @@ pub const CodeGenerator = struct {
             .resume_expr => |expr| try self.generate_resume_expression(expr),
             .identifier_expr => |expr| try self.generate_identifier_expr(node, expr),
             .assign_expr => |expr| try self.generate_assignment_expression(expr),
+            .call_expr => |expr| {
+                try self.generate_expression(expr.expr); // the closure
+                for (expr.args) |arg| {
+                    try self.generate_expression(arg);
+                }
+                try self.current.chunk().write_opcode(.OP_CALL, expr.line);
+                try self.current.chunk().write_u16(@intCast(expr.args.len), expr.line);
+            },
             .index_expr => |expr| {
-                _ = expr;
-                return CodeGeneratorError.UnsupportedNode;
+                try self.generate_expression(expr.expr);
+                try self.generate_expression(expr.index);
+
+                const indexed_type = resolve_typeof(expr.expr);
+                const opcode: Opcode = switch (self.registry.get_type_info(indexed_type)) {
+                    .array => .OP_INDEX_ARRAY,
+                    .table => .OP_INDEX_TABLE,
+                    .primitive => |prim| switch (prim) {
+                        .String => .OP_INDEX_STRING,
+                        else => return CodeGeneratorError.UnsupportedOperandType,
+                    },
+                    else => return CodeGeneratorError.UnsupportedOperandType,
+                };
+                try self.current.chunk().write_opcode(opcode, expr.line);
+            },
+            .dot_expr => |expr| {
+                const member_info = self.binding_resolution.member_infos.get(node) orelse return CodeGeneratorError.MissingBinding;
+                switch (member_info) {
+                    .tuple_index => |tuple_index| {
+                        try self.generate_expression(expr.expr);
+                        try self.current.chunk().write_opcode(.OP_INDEX_TUPLE, expr.line);
+                        try self.current.chunk().write_u16(tuple_index.index, expr.line);
+                    },
+                    else => return CodeGeneratorError.UnsupportedNode,
+                }
             },
             .static_member_expr => |expr| {
                 // Enum::Variant

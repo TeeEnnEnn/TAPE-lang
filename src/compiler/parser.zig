@@ -430,7 +430,9 @@ pub const Parser = struct {
                 expr = node;
             } else if (try self.match(.DOT)) {
                 // dot member access
-                try self.consume(.IDENTIFIER, "Expected identifier after '.'"); // TODO: make this also allow for numbers for tuple indexing
+                if (!try self.match(.IDENTIFIER) and !try self.match(.INT)) {
+                    try self.fail("Unexpected Token", "Expected identifier or integer after '.'.");
+                }
                 const member = self.previous;
 
                 const inst_expr = try self.allocator.create(AST.DotExpr);

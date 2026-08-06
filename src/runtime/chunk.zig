@@ -88,6 +88,10 @@ pub const Opcode = enum(u8) {
     OP_ARRAY,
     OP_TABLE,
     OP_TUPLE,
+    OP_INDEX_ARRAY,
+    OP_INDEX_STRING,
+    OP_INDEX_TABLE,
+    OP_INDEX_TUPLE,
 
     OP_CLOSURE,
 };

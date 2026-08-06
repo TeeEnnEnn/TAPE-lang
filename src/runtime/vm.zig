@@ -20,7 +20,7 @@ pub const InterpretResult = enum {
     Error,
 };
 
-pub const RuntimePanic = error{ StackOverflow, StackUnderflow, DivisionByZero, ArgumentCountMismatch, CorruptedState, NegativeDenominator, OutOfMemory };
+pub const RuntimePanic = error{ StackOverflow, StackUnderflow, DivisionByZero, ArgumentCountMismatch, CorruptedState, NegativeDenominator, OutOfMemory, IndexOutOfBounds, KeyNotFound };
 
 /// Represents the virtual machine - the orchestrator of execution.
 pub const VM = struct {
@@ -144,6 +144,7 @@ pub const Isolate = struct {
         self.stack_top_index += 1;
     }
 
+    /// Returns the value at the top of the stack
     pub fn pop_value(self: *Isolate) !TapeValue {
         if (self.stack_top_index == 0) {
             return error.StackUnderflow;
@@ -152,11 +153,40 @@ pub const Isolate = struct {
         return self.stack[self.stack_top_index];
     }
 
+    /// Gets the value on the stack at the given offset
     pub fn peek_value(self: *Isolate, offset: usize) !TapeValue {
         if (offset >= self.stack_top_index) {
             return error.StackUnderflow;
         }
         return self.stack[self.stack_top_index - 1 - offset];
+    }
+
+    /// Checks if an index is within the given length
+    fn checked_index(index: TapeValue, length: usize) RuntimePanic!usize {
+        const raw_index = switch (index) {
+            .int => |i| i,
+            else => return RuntimePanic.CorruptedState,
+        };
+        if (raw_index < 0) return RuntimePanic.IndexOutOfBounds;
+
+        const idx: usize = @intCast(raw_index);
+        if (idx >= length) return RuntimePanic.IndexOutOfBounds;
+        return idx;
+    }
+
+    /// Gets the utf8 codepoint in string at the given index
+    fn stringCodePointSlice(string: *Entities.ObjectString, index: usize) RuntimePanic![]const u8 {
+        if (index >= string.code_point_length) return RuntimePanic.IndexOutOfBounds;
+
+        var byte_start: usize = 0;
+        var current: usize = 0;
+        while (current < index) : (current += 1) {
+            const len = std.unicode.utf8ByteSequenceLength(string.chars[byte_start]) catch return RuntimePanic.CorruptedState;
+            byte_start += len;
+        }
+
+        const len = std.unicode.utf8ByteSequenceLength(string.chars[byte_start]) catch return RuntimePanic.CorruptedState;
+        return string.chars[byte_start .. byte_start + len];
     }
 
     pub fn call(self: *Isolate, closure: *Entities.ObjectClosure, arg_count: usize) !void {
@@ -516,8 +546,8 @@ pub const Isolate = struct {
                     const b = try self.pop_value();
                     const a = try self.pop_value();
 
-                    const string_b: *Entities.ObjectString = @ptrCast(b.object);
-                    const string_a: *Entities.ObjectString = @ptrCast(a.object);
+                    const string_b: *Entities.ObjectString = Entities.object_as(Entities.ObjectString, b.object);
+                    const string_a: *Entities.ObjectString = Entities.object_as(Entities.ObjectString, a.object);
 
                     const new_length = string_b.byte_length + string_a.byte_length;
                     const new_chars = try self.base_allocator.alloc(u8, new_length);
@@ -606,6 +636,7 @@ pub const Isolate = struct {
                         i -= 1;
                         array_object.elements[i] = try self.pop_value();
                     }
+                    array_object.length = array_length;
 
                     try self.push_value(.{ .object = &array_object.header });
                 },
@@ -623,22 +654,104 @@ pub const Isolate = struct {
                 },
                 .OP_TABLE => {
                     const count = frame.read_u16();
-                    const table_object = try Entities.new_table_object(self, count);
+                    const table_object = try Entities.new_table_object(self);
+                    const table_value = TapeValue{ .object = &table_object.header };
+                    try self.push_value(table_value);
 
-                    var i: usize = count;
-                    while (i > 0) {
-                        i -= 1;
-                        table_object.values[i] = try self.pop_value();
-                    }
-                    i = count;
-                    while (i > 0) {
-                        i -= 1;
-                        table_object.keys[i] = try self.pop_value();
+                    const table_literal_start = self.stack_top_index - 1 - (@as(usize, count) * 2);
+                    for (0..count) |i| {
+                        const key = self.stack[table_literal_start + i];
+                        const value = self.stack[table_literal_start + count + i];
+                        _ = Entities.table_set(self, table_object, key, value) catch |err| switch (err) {
+                            error.OutOfMemory => return RuntimePanic.OutOfMemory,
+                            error.NonHashableElement => return RuntimePanic.CorruptedState,
+                        };
                     }
 
-                    try self.push_value(.{ .object = &table_object.header });
+                    self.stack[table_literal_start] = table_value;
+                    self.stack_top_index = table_literal_start + 1;
                 },
-                .OP_CALL => {},
+                .OP_INDEX_ARRAY => {
+                    const index = try self.peek_value(0);
+                    const collection = try self.peek_value(1);
+                    const array: *Entities.ObjectArray = switch (collection) {
+                        .object => |obj| switch (obj.object_type) {
+                            .ObjectArray => @ptrCast(obj),
+                            else => return RuntimePanic.CorruptedState,
+                        },
+                        else => return RuntimePanic.CorruptedState,
+                    };
+                    const idx = try checked_index(index, array.length);
+                    const value = array.elements[idx];
+                    _ = try self.pop_value();
+                    _ = try self.pop_value();
+                    try self.push_value(value);
+                },
+                .OP_INDEX_STRING => {
+                    const index = try self.peek_value(0);
+                    const collection = try self.peek_value(1);
+                    const string: *Entities.ObjectString = switch (collection) {
+                        .object => |obj| switch (obj.object_type) {
+                            .ObjectString => @ptrCast(obj),
+                            else => return RuntimePanic.CorruptedState,
+                        },
+                        else => return RuntimePanic.CorruptedState,
+                    };
+                    const idx = try checked_index(index, string.code_point_length);
+                    const chars = try stringCodePointSlice(string, idx);
+                    const result = Entities.copy_string(self, chars) catch |err| switch (err) {
+                        error.OutOfMemory => return RuntimePanic.OutOfMemory,
+                        else => return RuntimePanic.CorruptedState,
+                    };
+                    _ = try self.pop_value();
+                    _ = try self.pop_value();
+                    try self.push_value(.{ .object = @ptrCast(result) });
+                },
+                .OP_INDEX_TABLE => {
+                    const key = try self.peek_value(0);
+                    const collection = try self.peek_value(1);
+                    const table: *Entities.ObjectTable = switch (collection) {
+                        .object => |obj| switch (obj.object_type) {
+                            .ObjectTable => @ptrCast(obj),
+                            else => return RuntimePanic.CorruptedState,
+                        },
+                        else => return RuntimePanic.CorruptedState,
+                    };
+                    const value = (Entities.table_get(table, key) catch |err| switch (err) {
+                        error.NonHashableElement => return RuntimePanic.CorruptedState,
+                    }) orelse return RuntimePanic.KeyNotFound;
+                    _ = try self.pop_value();
+                    _ = try self.pop_value();
+                    try self.push_value(value);
+                },
+                .OP_INDEX_TUPLE => {
+                    const index = frame.read_u16();
+                    const collection = try self.peek_value(0);
+                    const tuple: *Entities.ObjectTuple = switch (collection) {
+                        .object => |obj| switch (obj.object_type) {
+                            .ObjectTuple => @ptrCast(obj),
+                            else => return RuntimePanic.CorruptedState,
+                        },
+                        else => return RuntimePanic.CorruptedState,
+                    };
+                    if (index >= tuple.elements.len) return RuntimePanic.IndexOutOfBounds;
+                    const value = tuple.elements[index];
+                    _ = try self.pop_value();
+                    try self.push_value(value);
+                },
+                .OP_CALL => {
+                    const arg_count = frame.read_u16();
+                    const callee = try self.peek_value(arg_count);
+                    const closure: *Entities.ObjectClosure = switch (callee) {
+                        .object => |obj| switch (obj.object_type) {
+                            .ObjectClosure => @ptrCast(obj),
+                            else => return RuntimePanic.CorruptedState, // not callable — type checker should have caught this
+                        },
+                        else => return RuntimePanic.CorruptedState,
+                    };
+                    try self.call(closure, arg_count);
+                    frame = &self.frames[self.frame_count - 1]; // re-point at the new frame, same pattern OP_RETURN already uses
+                },
                 .OP_CLOSURE => {},
             }
         }

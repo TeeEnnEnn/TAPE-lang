@@ -152,6 +152,9 @@ pub const ChunkDisassembler = struct {
             .OP_MOD_INT_FLOAT,
             .OP_MOD_FLOAT_INT,
             .OP_STRING_CONCAT,
+            .OP_INDEX_ARRAY,
+            .OP_INDEX_STRING,
+            .OP_INDEX_TABLE,
             => {
                 return disassemble_simple_instruction(chunk, offset);
             },
@@ -164,6 +167,7 @@ pub const ChunkDisassembler = struct {
             .OP_STORE_LOCAL,
             .OP_LOAD_LOCAL,
             .OP_POP_N,
+            .OP_INDEX_TUPLE,
             => {
                 return disassemble_load_store_instruction(chunk, offset);
             },
