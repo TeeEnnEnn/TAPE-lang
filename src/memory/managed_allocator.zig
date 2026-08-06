@@ -27,7 +27,6 @@ pub const ManagedAllocator = struct {
         self.slab_32.deinit();
         self.slab_48.deinit();
         self.slab_64.deinit();
-        self.backing_allocator.destroy(self);
     }
 
     pub fn allocator(self: *ManagedAllocator) std.mem.Allocator {

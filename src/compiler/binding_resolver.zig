@@ -13,16 +13,26 @@ pub const BindingResolverError = error{
     TooManyLocals,
     TooManyGlobals,
     TooManyUpvalues,
+    TooManyFunctions,
 } || std.mem.Allocator.Error || TypeRegistry.TypeRegistryError;
 
 pub const BindingKind = enum {
+    /// a global
     global,
+    /// A global imported from a different module
     imported_global,
+    /// A value used within a scope
     local,
+    /// A value passed to a function
     param,
+    /// A captured value
     upvalue,
+    /// a function attached to a struct object
     method,
+    /// no runtime value
     comptime_type,
+    /// a compiled function
+    function_constant,
 };
 
 pub const BindingInfo = struct {
@@ -135,6 +145,7 @@ pub const BindingResolver = struct {
     functions: std.ArrayList(FunctionContext),
     local_owners: std.AutoHashMap(AST.DeclRef, *AST.ASTNode),
     next_global_slot: u16 = 0,
+    next_function_constant_slot: u16 = 0,
 
     pub fn init(
         allocator: std.mem.Allocator,
@@ -207,8 +218,8 @@ pub const BindingResolver = struct {
                         });
                     }
                 },
-                .fn_decl => |decl| try self.registerGlobalNode(decl_node, decl.name.lexeme, try self.functionTypeId(decl_node)),
-                .co_decl => |decl| try self.registerGlobalNode(decl_node, decl.name.lexeme, try self.coroutineTypeId(decl_node)),
+                .fn_decl => |decl| try self.register_function_node(decl_node, decl.name.lexeme, try self.functionTypeId(decl_node)),
+                .co_decl => |decl| try self.register_function_node(decl_node, decl.name.lexeme, try self.coroutineTypeId(decl_node)),
                 .struct_decl => |decl| try self.registerComptimeNode(decl_node, decl.name.lexeme, try self.named_typeid(decl.name.lexeme, decl_node)),
                 .type_decl => |decl| try self.registerComptimeNode(decl_node, decl.name.lexeme, try self.named_typeid(decl.name.lexeme, decl_node)),
                 .enum_decl => |decl| try self.registerComptimeNode(decl_node, decl.name.lexeme, try self.named_typeid(decl.name.lexeme, decl_node)),
@@ -223,7 +234,7 @@ pub const BindingResolver = struct {
             .program => try self.resolveProgram(node),
             .use_decl, .type_decl, .enum_decl, .error_decl => {},
             .struct_decl => |decl| try self.resolveStructDecl(node, decl),
-            .var_decl => |decl| try self.resolveVarDecl(node, decl, direct_program_decl),
+            .var_decl => |decl| try self.resolve_var_decl(node, decl, direct_program_decl),
             .fn_decl => |decl| try self.resolveFnDecl(node, decl, direct_program_decl, false),
             .co_decl => |decl| try self.resolveCoDecl(node, decl, direct_program_decl, false),
             .block_stmt => try self.resolveBlock(node),
@@ -305,7 +316,7 @@ pub const BindingResolver = struct {
             try self.putDeclBinding(ref, .{
                 .kind = .method,
                 .slot = @intCast(index),
-                .type_id = try self.callableTypeId(method.method),
+                .type_id = try self.callable_type_id(method.method),
                 .decl = ref,
                 .name = method.name.lexeme,
                 .module_path = self.module.filepath,
@@ -324,7 +335,7 @@ pub const BindingResolver = struct {
         }
     }
 
-    fn resolveVarDecl(self: *BindingResolver, node: *AST.ASTNode, decl: *AST.VarDecl, direct_program_decl: bool) !void {
+    fn resolve_var_decl(self: *BindingResolver, node: *AST.ASTNode, decl: *AST.VarDecl, direct_program_decl: bool) !void {
         try self.resolveNode(decl.initializer, false);
         const type_id = if (decl.type_annotation) |annotated| try self.registry.resolve(annotated) else resolved_type_of(decl.initializer);
         const ref: AST.DeclRef = .{ .node = node };
@@ -347,7 +358,7 @@ pub const BindingResolver = struct {
             try self.registerLocal(.{ .node = node }, decl.name.lexeme, try self.functionTypeId(node));
         }
 
-        const type_id = try self.callableTypeId(node);
+        const type_id = try self.callable_type_id(node);
         const type_info = self.registry.get_type_info(type_id);
         const param_count: u16 = @intCast(type_info.function.args.len);
         try self.begin_function(node, param_count);
@@ -361,7 +372,7 @@ pub const BindingResolver = struct {
             try self.registerLocal(.{ .node = node }, decl.name.lexeme, try self.coroutineTypeId(node));
         }
 
-        const type_id = try self.callableTypeId(node);
+        const type_id = try self.callable_type_id(node);
         const type_info = self.registry.get_type_info(type_id);
         const param_count: u16 = @intCast(type_info.coroutine.args.len);
         try self.begin_function(node, param_count);
@@ -581,6 +592,18 @@ pub const BindingResolver = struct {
         });
     }
 
+    fn register_function_node(self: *BindingResolver, node: *AST.ASTNode, name: []const u8, type_id: AST.TypeId) !void {
+        const ref: AST.DeclRef = .{ .node = node };
+        try self.putDeclBinding(ref, .{
+            .kind = .function_constant,
+            .slot = try self.next_function_constant(),
+            .type_id = type_id,
+            .decl = ref,
+            .name = name,
+            .module_path = self.module.filepath,
+        });
+    }
+
     fn registerComptimeNode(self: *BindingResolver, node: *AST.ASTNode, name: []const u8, type_id: AST.TypeId) !void {
         const ref: AST.DeclRef = .{ .node = node };
         try self.putDeclBinding(ref, .{
@@ -662,7 +685,14 @@ pub const BindingResolver = struct {
         return slot;
     }
 
-    fn callableTypeId(self: *BindingResolver, node: *AST.ASTNode) !AST.TypeId {
+    fn next_function_constant(self: *BindingResolver) !u16 {
+        const slot = self.next_function_constant_slot;
+        if (slot == std.math.maxInt(u16)) return BindingResolverError.TooManyFunctions;
+        self.next_function_constant_slot += 1;
+        return slot;
+    }
+
+    fn callable_type_id(self: *BindingResolver, node: *AST.ASTNode) !AST.TypeId {
         if (self.result.declaration_bindings.get(.{ .node = node })) |binding| return binding.type_id;
         return switch (node.*) {
             .fn_decl => self.functionTypeId(node),

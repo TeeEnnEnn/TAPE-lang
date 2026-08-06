@@ -94,6 +94,7 @@ pub const Opcode = enum(u8) {
     OP_INDEX_TUPLE,
 
     OP_CLOSURE,
+    OP_LOAD_FUNCTION_CONSTANT,
 };
 
 /// A chunk of bytecode

@@ -52,8 +52,9 @@ pub const ChunkDisassembler = struct {
 
     fn disassemble_call_instruction(chunk: *Chunk, offset: usize) usize {
         const opcode: Opcode = @enumFromInt(chunk.code.items[offset]);
-        std.debug.print("{s}\n", .{@tagName(opcode)});
-        return offset + 1;
+        const param_count = read_u16(chunk, offset + 1);
+        std.debug.print("{s} - {d} params\n", .{ @tagName(opcode), param_count });
+        return offset + 1 + 2; // +1 for opcode +2 for u16 param_count
     }
 
     fn disassemble_jump_instruction(chunk: *Chunk, offset: usize, direction: JumpDirection) usize {
@@ -168,6 +169,7 @@ pub const ChunkDisassembler = struct {
             .OP_LOAD_LOCAL,
             .OP_POP_N,
             .OP_INDEX_TUPLE,
+            .OP_LOAD_FUNCTION_CONSTANT,
             => {
                 return disassemble_load_store_instruction(chunk, offset);
             },

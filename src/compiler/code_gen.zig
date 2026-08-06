@@ -13,6 +13,8 @@ const Opcode = @import("../runtime/chunk.zig").Opcode;
 const DiagnosticReporter = @import("../diagnostics/diagnostics.zig").DiagnosticsReporter;
 const Module = @import("workspace.zig").Module;
 
+const INTERNAL_ERROR_MESSAGE = "This is an internal error. Please write a bug report.";
+
 pub const CodeGeneratorError = error{
     MissingBinding,
     UnsupportedNode,
@@ -144,6 +146,9 @@ pub const CodeGenerator = struct {
             .var_decl => |decl| {
                 try self.generate_var_decl(node, decl);
             },
+            .fn_decl => |decl| {
+                try self.generate_fn_decl(node, decl);
+            },
             .enum_decl => {
                 // nothing to do - fully comptime
             },
@@ -197,6 +202,14 @@ pub const CodeGenerator = struct {
                 try self.patch_jump(exit_jump);
                 try self.current.chunk().write_opcode(.OP_POP, stmt.line);
             },
+            .return_stmt => |stmt| {
+                if (stmt.expr) |expr| {
+                    try self.generate_expression(expr);
+                } else {
+                    try self.current.chunk().write_opcode(.OP_NIL, stmt.line);
+                }
+                try self.current.chunk().write_opcode(.OP_RETURN, stmt.line);
+            },
             else => {
                 self.fail("Unsupported node type in code generation.", "This node type is not yet implemented for bytecode emission.", 0, 0);
                 return CodeGeneratorError.UnsupportedNode;
@@ -204,12 +217,40 @@ pub const CodeGenerator = struct {
         }
     }
 
+    fn generate_fn_decl(self: *CodeGenerator, node: *AST.ASTNode, decl: *AST.FnDecl) CodeGeneratorError!void {
+        const function_object = try Entities.new_function_object(self.isolate);
+        const new_function = try FunctionCompiler.init(self.allocator, function_object, self.current);
+        const enclosing = self.current;
+        self.current = new_function;
+        defer self.current = enclosing;
+
+        const binding = self.binding_resolution.function_infos.get(node) orelse {
+            self.fail("Function declaration has no binding in binding resolution." ++ INTERNAL_ERROR_MESSAGE, null, decl.line, decl.column);
+            return CodeGeneratorError.MissingBinding;
+        };
+
+        // params are already locals at this point
+
+        try self.generate_node(decl.body);
+
+        // TODO: use type checker statement termination to determine whether or not we need to add a return
+        try self.current.chunk().write_opcode(.OP_NIL, decl.line);
+        try self.current.chunk().write_opcode(.OP_RETURN, decl.line);
+
+        function_object.arity = binding.param_count;
+        function_object.name = try Entities.copy_string(self.isolate, decl.name.lexeme);
+        function_object.upvalue_count = binding.upvalues.len;
+
+        const closure_object = try Entities.new_closure_object(self.isolate, function_object);
+        try self.isolate.function_constants.append(self.isolate.base_allocator, .{ .object = &closure_object.header });
+    }
+
     fn generate_var_decl(self: *CodeGenerator, node: *AST.ASTNode, decl: *AST.VarDecl) CodeGeneratorError!void {
         try self.generate_expression(decl.initializer);
 
         const ref: AST.DeclRef = .{ .node = node };
         const binding = self.binding_resolution.declaration_bindings.get(ref) orelse {
-            self.fail("Variable declaration has no binding in binding resolution.", null, decl.line, decl.column);
+            self.fail("Variable declaration has no binding in binding resolution." ++ INTERNAL_ERROR_MESSAGE, null, decl.line, decl.column);
             return CodeGeneratorError.MissingBinding;
         };
 
@@ -422,6 +463,10 @@ pub const CodeGenerator = struct {
             },
             .local, .param => {
                 try self.current.chunk().write_opcode(.OP_LOAD_LOCAL, expr.line);
+                try self.current.chunk().write_u16(binding.slot, expr.line);
+            },
+            .function_constant => {
+                try self.current.chunk().write_opcode(.OP_LOAD_FUNCTION_CONSTANT, expr.line);
                 try self.current.chunk().write_u16(binding.slot, expr.line);
             },
             else => {

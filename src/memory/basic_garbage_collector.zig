@@ -34,9 +34,14 @@ pub const BasicGarbageCollector = struct {
 
     pub fn deinit(self: *BasicGarbageCollector) void {
         self.gray_stack.deinit(self.allocator);
-        // sweep everything
+        var current = self.objects;
+        const alloc = self.managed_allocator.allocator();
+        while (current) |obj| {
+            const next = obj.next;
+            Entities.free_object(alloc, obj);
+            current = next;
+        }
 
-        // deinit managed allocator
         self.managed_allocator.deinit();
         self.allocator.destroy(self);
     }
