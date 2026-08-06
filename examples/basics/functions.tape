@@ -27,6 +27,21 @@ fn with_locals() -> Nil {
 	b - 342;
 }
 
+fn make_counter() -> fn () -> Int {
+	var counter = 0;
+
+	fn test() -> Nil {
+	}
+	test();
+
+	fn increment() -> Int {
+		counter += 1;
+		return counter;
+	}
+
+	return increment;
+}
+
 basic_test();
 param_test(24);
 multiple_params(1, 2.3);

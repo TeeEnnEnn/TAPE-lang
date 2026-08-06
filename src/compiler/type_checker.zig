@@ -81,6 +81,37 @@ pub const TypeChecker = struct {
         return .{ .allocator = allocator, .registry = registry, .environment = global_environment, .diagnostics = diagnostics, .module = module, .workspace = workspace };
     }
 
+    fn fn_hoist(self: *TypeChecker, node: *AST.ASTNode, decl: *AST.FnDecl) !u32 {
+        var param_types: std.ArrayList(AST.TypeId) = .empty;
+        defer param_types.deinit(self.allocator);
+
+        for (decl.params) |param| {
+            const param_id = try self.registry.resolve(param.type_annotation);
+            try param_types.append(self.allocator, param_id);
+        }
+
+        const return_id = try self.registry.resolve(decl.return_type_annotation);
+        const fn_id = try self.registry.add_function_type(try param_types.toOwnedSlice(self.allocator), return_id);
+        try self.environment.define_binding(decl.name.lexeme, fn_id, .{ .node = node }, true);
+        return fn_id;
+    }
+
+    fn co_hoist(self: *TypeChecker, node: *AST.ASTNode, decl: *AST.CoDecl) !u32 {
+        var param_types: std.ArrayList(AST.TypeId) = .empty;
+        defer param_types.deinit(self.allocator);
+
+        for (decl.params) |param| {
+            const param_id = try self.registry.resolve(param.type_annotation);
+            try param_types.append(self.allocator, param_id);
+        }
+
+        const return_id = try self.registry.resolve(decl.return_type_annotation);
+        const yield_id = try self.registry.resolve(decl.yield_type_annotation);
+        const co_id = try self.registry.add_coroutine_type(try param_types.toOwnedSlice(self.allocator), return_id, yield_id);
+        try self.environment.define_binding(decl.name.lexeme, co_id, .{ .node = node }, true);
+        return co_id;
+    }
+
     fn hoist(self: *TypeChecker, node: *AST.ASTNode) TypeCheckerError!void {
         switch (node.*) {
             .program => |program| for (program.declarations) |decl| try self.hoist(decl),
@@ -100,34 +131,14 @@ pub const TypeChecker = struct {
                 }
             },
             .fn_decl => |decl| {
-                var param_types: std.ArrayList(AST.TypeId) = .empty;
-                defer param_types.deinit(self.allocator);
-
-                for (decl.params) |param| {
-                    const param_id = try self.registry.resolve(param.type_annotation);
-                    try param_types.append(self.allocator, param_id);
-                }
-
-                const return_id = try self.registry.resolve(decl.return_type_annotation);
-                const fn_id = try self.registry.add_function_type(try param_types.toOwnedSlice(self.allocator), return_id);
-                try self.environment.define_binding(decl.name.lexeme, fn_id, .{ .node = node }, true);
+                const fn_id = try self.fn_hoist(node, decl);
                 if (decl.modifier_pub) {
                     try self.module.exports.put(decl.name.lexeme, fn_id);
                 }
             },
             .co_decl => |decl| {
-                var param_types: std.ArrayList(AST.TypeId) = .empty;
-                defer param_types.deinit(self.allocator);
+                const co_id = try self.co_hoist(node, decl);
 
-                for (decl.params) |param| {
-                    const param_id = try self.registry.resolve(param.type_annotation);
-                    try param_types.append(self.allocator, param_id);
-                }
-
-                const return_id = try self.registry.resolve(decl.return_type_annotation);
-                const yield_id = try self.registry.resolve(decl.yield_type_annotation);
-                const co_id = try self.registry.add_coroutine_type(try param_types.toOwnedSlice(self.allocator), return_id, yield_id);
-                try self.environment.define_binding(decl.name.lexeme, co_id, .{ .node = node }, true);
                 if (decl.modifier_pub) {
                     try self.module.exports.put(decl.name.lexeme, co_id);
                 }
@@ -392,6 +403,19 @@ pub const TypeChecker = struct {
                 self.environment = &local_env;
                 defer self.environment = prev_env;
                 var last: StatementTermination = .{};
+
+                for (stmt.stmts) |statement| {
+                    switch (statement.*) {
+                        .fn_decl => |decl| {
+                            _ = try self.fn_hoist(statement, decl);
+                        },
+                        .co_decl => |decl| {
+                            _ = try self.co_hoist(statement, decl);
+                        },
+                        else => {}, // we don't hoist every node type
+                    }
+                }
+
                 for (stmt.stmts) |child| {
                     last = try self.check(child);
                 }
