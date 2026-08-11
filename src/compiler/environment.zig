@@ -56,10 +56,18 @@ pub const Environment = struct {
 
     /// Looks up a symbol's full info, including declaration identity if present.
     pub fn lookup_binding(self: *Environment, name: []const u8) EnvironmentError!SymbolInfo {
+        return (try self.lookup_binding_scope(name)).info;
+    }
+
+    /// Looks up a symbol's full info and the scope in which it was actually found.
+    pub fn lookup_binding_scope(self: *Environment, name: []const u8) EnvironmentError!struct {
+        info: SymbolInfo,
+        scope: *Environment,
+    } {
         var curr: ?*Environment = self;
         while (curr) |env| {
             if (env.symbols.get(name)) |info| {
-                return info;
+                return .{ .info = info, .scope = env };
             }
             curr = env.parent;
         }

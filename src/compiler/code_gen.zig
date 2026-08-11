@@ -241,8 +241,31 @@ pub const CodeGenerator = struct {
         function_object.name = try Entities.copy_string(self.isolate, decl.name.lexeme);
         function_object.upvalue_count = binding.upvalues.len;
 
-        const closure_object = try Entities.new_closure_object(self.isolate, function_object);
-        try self.isolate.function_constants.append(self.isolate.base_allocator, .{ .object = &closure_object.header });
+        const ref: AST.DeclRef = .{ .node = node };
+        const decl_binding = self.binding_resolution.declaration_bindings.get(ref) orelse {
+            self.fail("Function declaration has no runtime binding in binding resolution." ++ INTERNAL_ERROR_MESSAGE, null, decl.line, decl.column);
+            return CodeGeneratorError.MissingBinding;
+        };
+
+        switch (decl_binding.kind) {
+            .function_constant => {
+                const closure_object = try Entities.new_closure_object(self.isolate, function_object);
+                try self.isolate.function_constants.append(self.isolate.base_allocator, .{ .object = &closure_object.header });
+            },
+            .local => {
+                // Nested function: emit a closure instruction to create closure and capture upvalues
+                const const_index = try enclosing.chunk().write_constant(.{ .object = &function_object.header });
+                try enclosing.chunk().write_opcode(.OP_CLOSURE, decl.line);
+                try enclosing.chunk().write_u16(const_index, decl.line);
+                for (binding.upvalues) |upvalue| {
+                    try enclosing.chunk().write_u8(if (upvalue.captures_parent_local) 1 else 0, decl.line);
+                    try enclosing.chunk().write_u16(upvalue.parent_slot, decl.line);
+                }
+                try enclosing.chunk().write_opcode(.OP_STORE_LOCAL, decl.line);
+                try enclosing.chunk().write_u16(decl_binding.slot, decl.line);
+            },
+            else => return CodeGeneratorError.UnsupportedNode,
+        }
     }
 
     fn generate_var_decl(self: *CodeGenerator, node: *AST.ASTNode, decl: *AST.VarDecl) CodeGeneratorError!void {
@@ -447,6 +470,10 @@ pub const CodeGenerator = struct {
                 try self.current.chunk().write_opcode(.OP_STORE_LOCAL, expr.line);
                 try self.current.chunk().write_u16(binding.slot, expr.line);
             },
+            .upvalue => {
+                try self.current.chunk().write_opcode(.OP_STORE_UPVALUE, expr.line);
+                try self.current.chunk().write_u16(binding.slot, expr.line);
+            },
             else => return CodeGeneratorError.UnsupportedNode,
         }
     }
@@ -467,6 +494,10 @@ pub const CodeGenerator = struct {
             },
             .function_constant => {
                 try self.current.chunk().write_opcode(.OP_LOAD_FUNCTION_CONSTANT, expr.line);
+                try self.current.chunk().write_u16(binding.slot, expr.line);
+            },
+            .upvalue => {
+                try self.current.chunk().write_opcode(.OP_LOAD_UPVALUE, expr.line);
                 try self.current.chunk().write_u16(binding.slot, expr.line);
             },
             else => {

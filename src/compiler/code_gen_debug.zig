@@ -170,6 +170,8 @@ pub const ChunkDisassembler = struct {
             .OP_POP_N,
             .OP_INDEX_TUPLE,
             .OP_LOAD_FUNCTION_CONSTANT,
+            .OP_LOAD_UPVALUE,
+            .OP_STORE_UPVALUE,
             => {
                 return disassemble_load_store_instruction(chunk, offset);
             },

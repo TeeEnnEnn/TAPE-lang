@@ -111,8 +111,14 @@ pub const ObjectClosure = struct {
 
 pub const ObjectUpvalue = struct {
     header: ObjectHeader,
+    /// Next upvalue in the isolate's open-upvalue list.
+    next: ?*ObjectUpvalue = null,
+    /// Where the captured value lives on the VM stack while it is still open.
     location: *Value,
+    /// Once the upvalue is closed (its stack slot has gone out of scope), the value is moved here.
     closed_value: Value,
+    /// True once the upvalue no longer points into the VM stack.
+    closed: bool = false,
 };
 
 pub const ObjectCoroutine = struct {
@@ -496,6 +502,8 @@ pub fn new_upvalue_object(isolate: *Isolate, location: *Value) !*ObjectUpvalue {
     const upvalue: *ObjectUpvalue = try isolate.gc.allocate_object(ObjectUpvalue, .ObjectUpvalue);
     upvalue.location = location;
     upvalue.closed_value = .nil;
+    upvalue.closed = false;
+    upvalue.next = null;
     return upvalue;
 }
 
@@ -571,6 +579,9 @@ pub fn blacken_object(garbage_collector: *basic_gc, obj: *ObjectHeader) !void {
             const up: *ObjectUpvalue = @ptrCast(obj);
             try mark_value(garbage_collector, up.closed_value);
             try mark_value(garbage_collector, up.location.*);
+            if (up.next) |next| {
+                try mark_object(garbage_collector, @ptrCast(next));
+            }
         },
     }
 }

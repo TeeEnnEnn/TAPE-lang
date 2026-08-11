@@ -4,6 +4,7 @@ const TypeRegistry = @import("type_registry.zig");
 const PrimitiveType = TypeRegistry.PrimitiveType;
 const Environment = @import("environment.zig").Environment;
 const EnvironmentError = @import("environment.zig").EnvironmentError;
+const SymbolInfo = @import("environment.zig").SymbolInfo;
 const DiagnosticReporter = @import("../diagnostics/diagnostics.zig").DiagnosticsReporter;
 const TypeRegistryError = TypeRegistry.TypeRegistryError;
 const StructMethod = TypeRegistry.StructMethod;
@@ -50,6 +51,8 @@ pub const TypeCheckerError = error{
     TryOutsideFunction,
     /// Invalid function return type
     InvalidReturnType,
+    /// Attempting to mutable variable global scope
+    MutableGlobalStateCaptureAttempt,
 } || EnvironmentError || TypeRegistryError || std.mem.Allocator.Error;
 
 pub const StatementTermination = struct {
@@ -373,6 +376,9 @@ pub const TypeChecker = struct {
                     try self.environment.define_binding(param.name.lexeme, param_id, .{ .param = .{ .func = node, .index = @as(u32, @intCast(index + param_offset)) } }, false);
                 }
 
+                const prev_in_coroutine = self.in_coroutine;
+                self.in_coroutine = true;
+                defer self.in_coroutine = prev_in_coroutine;
                 const body_term = try self.check(decl.body);
                 const needs_return = type_info.coroutine.ret != @intFromEnum(PrimitiveType.Nil) and type_info.coroutine.ret != @intFromEnum(PrimitiveType.Never);
                 const needs_yield = type_info.coroutine.yield != @intFromEnum(PrimitiveType.Nil);
@@ -569,6 +575,17 @@ pub const TypeChecker = struct {
         }
     }
 
+    /// Rejects reads/writes of module-global mutable state from within a function or
+    /// coroutine body. Functions must be fully compile-time knowable.
+    fn reject_global_state_access(self: *TypeChecker, name: []const u8, info: SymbolInfo, scope: *Environment, line: usize, column: usize) TypeCheckerError!void {
+        if (!self.in_function and !self.in_coroutine) return;
+        if (scope.parent != null) return; // local / upvalue, allowed (closures)
+        if (info.is_const) return; // global const, fn, type, enum, error — all fine
+        _ = name;
+        try self.fail("Functions cannot access global state", "A function must be fully compile-time knowable, so it cannot read or write mutable module-level variables.", line, column);
+        return TypeCheckerError.MutableGlobalStateCaptureAttempt;
+    }
+
     fn check_expression(self: *TypeChecker, node: *AST.ASTNode) TypeCheckerError!AST.TypeId {
         return self.check_expression_term(node, null);
     }
@@ -625,13 +642,14 @@ pub const TypeChecker = struct {
                 return TypeCheckerError.InvalidOperation; //
             },
             .identifier_expr => |expr| {
-                const info = self.environment.lookup_binding(expr.name.lexeme) catch {
+                const resolved = self.environment.lookup_binding_scope(expr.name.lexeme) catch {
                     try self.fail("Undefined symbol", "Symbol is not defined.", expr.line, expr.column);
                     return TypeCheckerError.UndefinedSymbol;
                 };
-                expr.resolved_type = info.type_id;
-                expr.resolved_decl = info.decl;
-                return info.type_id;
+                try self.reject_global_state_access(expr.name.lexeme, resolved.info, resolved.scope, expr.line, expr.column);
+                expr.resolved_type = resolved.info.type_id;
+                expr.resolved_decl = resolved.info.decl;
+                return resolved.info.type_id;
             },
             .unary_expr => |expr| {
                 const token = expr.operator;

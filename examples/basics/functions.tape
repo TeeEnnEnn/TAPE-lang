@@ -50,10 +50,6 @@ variable_param_test(number);
 with_return(5);
 with_locals();
 
-// TODO: This needs to be fixed - functions should not be allowed to access global state
-var capture = 11;
-fn attempt_capture() -> Int{
-	return capture + 1;
-}
-
-attempt_capture();
+var inc = make_counter();
+inc();
+inc();

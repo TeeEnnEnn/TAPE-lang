@@ -517,3 +517,43 @@ test "Type Checker - pub const import via use_decl hoist looks up from exports m
     // Verify the imported symbol is usable (its type ID is correct)
     try std.testing.expectEqual(@intFromEnum(PrimitiveType.Int), try import_env.lookup("x"));
 }
+
+test "Functions cannot read global mutable state" {
+    const allocator = std.testing.allocator;
+    var result = checkSource(allocator, "var capture = 11; fn f() -> Int { return capture + 1; }") catch |err| {
+        switch (err) {
+            TypeCheckerError.MutableGlobalStateCaptureAttempt => return, // expected
+            else => return err,
+        }
+    };
+    result.env.deinit();
+    result.registry.deinit();
+    return error.TestExpectedError;
+}
+
+test "Functions cannot write global mutable state" {
+    const allocator = std.testing.allocator;
+    var result = checkSource(allocator, "var capture = 11; fn f() -> Nil { capture = 2; }") catch |err| {
+        switch (err) {
+            TypeCheckerError.MutableGlobalStateCaptureAttempt => return, // expected
+            else => return err,
+        }
+    };
+    result.env.deinit();
+    result.registry.deinit();
+    return error.TestExpectedError;
+}
+
+test "Functions may read global constants and call global functions" {
+    const allocator = std.testing.allocator;
+    var result = try checkSource(allocator, "const G = 5; fn helper(x: Int) -> Int { return x; } fn f() -> Int { return helper(G); }");
+    result.env.deinit();
+    result.registry.deinit();
+}
+
+test "Closures may capture function-local variables" {
+    const allocator = std.testing.allocator;
+    var result = try checkSource(allocator, "fn make() -> fn () -> Int { var counter = 0; fn inc() -> Int { counter += 1; return counter; } return inc; }");
+    result.env.deinit();
+    result.registry.deinit();
+}

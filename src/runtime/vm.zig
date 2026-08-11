@@ -71,6 +71,7 @@ pub const Isolate = struct {
     stack_top_index: usize,
     frames: [*]Entities.CallFrame,
     frame_count: usize,
+    open_upvalues: ?*Entities.ObjectUpvalue,
     // TODO: ideally this should come from the compiler so we don't waste memory
     globals: [*]TapeValue,
     globals_count: usize,
@@ -87,6 +88,7 @@ pub const Isolate = struct {
 
         isolate.stack = @ptrCast(@alignCast(try base_allocator.alloc(TapeValue, vm.config.stack_size)));
         isolate.stack_top_index = 0;
+        isolate.open_upvalues = null;
         isolate.frames = @ptrCast(@alignCast(try base_allocator.alloc(Entities.CallFrame, vm.config.max_frame_count)));
         isolate.frame_count = 0;
         isolate.globals = @ptrCast(@alignCast(try base_allocator.alloc(TapeValue, vm.config.globals_size)));
@@ -119,6 +121,12 @@ pub const Isolate = struct {
             Entities.mark_value(gc, isolate.globals[index]) catch {
                 isolate.vm.workspace.diagnostics.add_diagnostic(.{ .column = 0, .line = 0, .severity = .Error, .message = "Failed to mark value", .stage = .Execution, .file_path = "", .hint = "This is an internal error. Please report it to the TAPE-lang team." }) catch {};
             };
+        }
+        // mark open upvalues
+        var upvalue = isolate.open_upvalues;
+        while (upvalue) |uv| {
+            Entities.mark_value(gc, .{ .object = &uv.header }) catch {};
+            upvalue = uv.next;
         }
     }
 
@@ -163,6 +171,43 @@ pub const Isolate = struct {
             return error.StackUnderflow;
         }
         return self.stack[self.stack_top_index - 1 - offset];
+    }
+
+    /// Returns an upvalue pointing at the given stack slot, reusing an existing open
+    /// upvalue so multiple closures capturing the same local share it. The open-upvalue
+    /// list is kept sorted by descending stack address so that close_upvalues can stop
+    /// scanning as soon as it reaches an upvalue below the boundary.
+    pub fn capture_upvalue(self: *Isolate, local: *TapeValue) !*Entities.ObjectUpvalue {
+        var previous: ?*Entities.ObjectUpvalue = null;
+        var current = self.open_upvalues;
+        while (current) |upvalue| {
+            if (upvalue.location == local) return upvalue;
+            if (@intFromPtr(upvalue.location) < @intFromPtr(local)) break;
+            previous = current;
+            current = upvalue.next;
+        }
+
+        const created = try Entities.new_upvalue_object(self, local);
+        created.next = current;
+        if (previous) |prev| {
+            prev.next = created;
+        } else {
+            self.open_upvalues = created;
+        }
+        return created;
+    }
+
+    /// Closes every open upvalue whose stack location is at or above `last`, moving
+    /// the captured value out of the stack and into the upvalue itself.
+    pub fn close_upvalues(self: *Isolate, last: *TapeValue) void {
+        while (self.open_upvalues) |upvalue| {
+            if (@intFromPtr(upvalue.location) < @intFromPtr(last)) break;
+            upvalue.closed_value = upvalue.location.*;
+            upvalue.closed = true;
+            upvalue.location = &upvalue.closed_value;
+            self.open_upvalues = upvalue.next;
+            upvalue.next = null;
+        }
     }
 
     /// Checks if an index is within the given length
@@ -224,10 +269,14 @@ pub const Isolate = struct {
             switch (instruction) {
                 .OP_RETURN => {
                     const result = try self.pop_value();
+                    std.debug.print("RETURN: ", .{});
                     Entities.print_value(result);
-                    // close_upvalues
+                    std.debug.print("\n", .{});
+                    self.close_upvalues(&self.stack[frame.slot_start]);
+                    self.stack_top_index = frame.slot_start - 1;
                     self.frame_count -= 1;
                     if (self.frame_count == 0) {
+                        self.open_upvalues = null;
                         return InterpretResult.Ok;
                     }
 
@@ -566,13 +615,16 @@ pub const Isolate = struct {
 
                 .OP_POP => {
                     const v = try self.pop_value();
-                    // for debugging
+                    std.debug.print("POP: ", .{});
                     Entities.print_value(v);
                     std.debug.print("\n", .{});
                 },
 
                 .OP_POP_N => {
                     const pop_count = frame.read_u16();
+                    if (pop_count > 0) {
+                        self.close_upvalues(&self.stack[self.stack_top_index - pop_count]);
+                    }
                     self.stack_top_index -= pop_count;
                 },
 
@@ -756,10 +808,43 @@ pub const Isolate = struct {
                     try self.call(closure, arg_count);
                     frame = &self.frames[self.frame_count - 1]; // re-point at the new frame, same pattern OP_RETURN already uses
                 },
-                .OP_CLOSURE => {},
+                .OP_CLOSURE => {
+                    const function_value = frame.read_constant();
+                    const function: *Entities.ObjectFunction = switch (function_value) {
+                        .object => |obj| switch (obj.object_type) {
+                            .ObjectFunction => @ptrCast(obj),
+                            else => return RuntimePanic.CorruptedState,
+                        },
+                        else => return RuntimePanic.CorruptedState,
+                    };
+                    const closure = try Entities.new_closure_object(self, function);
+                    for (0..function.upvalue_count) |upvalue_slot| {
+                        const captures_parent_local = frame.read_u8() != 0;
+                        const parent_slot = frame.read_u16();
+                        closure.upvalues[upvalue_slot] = if (captures_parent_local)
+                            try self.capture_upvalue(&self.stack[frame.slot_start + parent_slot])
+                        else
+                            frame.closure.upvalues[parent_slot];
+                    }
+                    try self.push_value(.{ .object = &closure.header });
+                },
                 .OP_LOAD_FUNCTION_CONSTANT => {
                     const index = frame.read_u16();
                     try self.push_value(self.function_constants.items[index]);
+                },
+                .OP_LOAD_UPVALUE => {
+                    const index = frame.read_u16();
+                    const upvalue = frame.closure.upvalues[index];
+                    try self.push_value(if (upvalue.closed) upvalue.closed_value else upvalue.location.*);
+                },
+                .OP_STORE_UPVALUE => {
+                    const index = frame.read_u16();
+                    const upvalue = frame.closure.upvalues[index];
+                    if (upvalue.closed) {
+                        upvalue.closed_value = try self.peek_value(0);
+                    } else {
+                        upvalue.location.* = try self.peek_value(0);
+                    }
                 },
             }
         }
