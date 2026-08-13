@@ -156,6 +156,9 @@ pub const ChunkDisassembler = struct {
             .OP_INDEX_ARRAY,
             .OP_INDEX_STRING,
             .OP_INDEX_TABLE,
+            .OP_COROUTINE,
+            .OP_RESUME,
+            .OP_YIELD,
             => {
                 return disassemble_simple_instruction(chunk, offset);
             },

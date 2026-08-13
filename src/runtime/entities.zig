@@ -121,13 +121,37 @@ pub const ObjectUpvalue = struct {
     closed: bool = false,
 };
 
+pub const CoroutineState = enum {
+    SUSPENDED,
+    RUNNING,
+    FINISHED,
+};
+
+pub const ExecutionState = struct {
+    stack: [*]Value,
+    stack_top_index: usize,
+    stack_size: usize,
+    frames: [*]CallFrame,
+    frame_count: usize,
+    open_upvalues: ?*ObjectUpvalue,
+
+    pub fn init(allocator: std.mem.Allocator, max_frame_count: usize, stack_size: usize) !ExecutionState {
+        return .{
+            .frame_count = 0,
+            .frames = @ptrCast(@alignCast(try allocator.alloc(CallFrame, max_frame_count))),
+            .stack = @ptrCast(@alignCast(try allocator.alloc(Value, stack_size))),
+            .stack_top_index = 0,
+            .stack_size = stack_size,
+            .open_upvalues = null,
+        };
+    }
+};
+
 pub const ObjectCoroutine = struct {
     header: ObjectHeader,
-    function: *ObjectFunction,
-    upvalues: []*ObjectUpvalue,
-    suspended: bool,
-    running: bool,
-    finished: bool,
+    closure: *ObjectClosure,
+    execution_state: ExecutionState,
+    state: CoroutineState,
 };
 
 pub const Variant = struct {
@@ -507,16 +531,12 @@ pub fn new_upvalue_object(isolate: *Isolate, location: *Value) !*ObjectUpvalue {
     return upvalue;
 }
 
-pub fn new_coroutine_object(isolate: *Isolate, function: *ObjectFunction) !*ObjectCoroutine {
+pub fn new_coroutine_object(isolate: *Isolate, closure: *ObjectClosure, max_frame_count: usize, stack_size: usize) !*ObjectCoroutine {
     const coroutine: *ObjectCoroutine = try isolate.gc.allocate_object(ObjectCoroutine, .ObjectCoroutine);
-    coroutine.function = function;
-    coroutine.upvalues = try isolate.gc.managed_allocator.allocator().alloc(*ObjectUpvalue, function.upvalue_count);
-    for (coroutine.upvalues) |*upvalue| {
-        upvalue.* = undefined;
-    }
-    coroutine.suspended = true;
-    coroutine.running = false;
-    coroutine.finished = false;
+    coroutine.closure = closure;
+    coroutine.state = .SUSPENDED;
+    coroutine.execution_state = try ExecutionState.init(isolate.gc.allocator, max_frame_count, stack_size);
+
     return coroutine;
 }
 
@@ -549,9 +569,14 @@ pub fn blacken_object(garbage_collector: *basic_gc, obj: *ObjectHeader) !void {
         },
         .ObjectCoroutine => {
             const coroutine: *ObjectCoroutine = @ptrCast(obj);
-            try mark_object(garbage_collector, @ptrCast(coroutine.function));
-            for (coroutine.upvalues) |upvalue| {
+            try mark_object(garbage_collector, @ptrCast(coroutine.closure));
+            var current = coroutine.execution_state.open_upvalues;
+            while (current) |upvalue| {
                 try mark_object(garbage_collector, @ptrCast(upvalue));
+                current = upvalue.next;
+            }
+            for (coroutine.execution_state.stack[0..coroutine.execution_state.stack_top_index]) |value| {
+                try mark_value(garbage_collector, value);
             }
         },
         .ObjectString => {},
@@ -637,7 +662,7 @@ pub fn free_object(allocator: std.mem.Allocator, obj: *ObjectHeader) void {
         },
         .ObjectCoroutine => {
             const coroutine: *ObjectCoroutine = @ptrCast(obj);
-            allocator.free(coroutine.upvalues);
+            allocator.free(coroutine.execution_state.stack[0..coroutine.execution_state.stack_size]);
             allocator.destroy(coroutine);
         },
     }

@@ -20,7 +20,7 @@ pub const InterpretResult = enum {
     Error,
 };
 
-pub const RuntimePanic = error{ StackOverflow, StackUnderflow, DivisionByZero, ArgumentCountMismatch, CorruptedState, NegativeDenominator, OutOfMemory, IndexOutOfBounds, KeyNotFound };
+pub const RuntimePanic = error{ StackOverflow, StackUnderflow, DivisionByZero, ArgumentCountMismatch, CorruptedState, NegativeDenominator, OutOfMemory, IndexOutOfBounds, KeyNotFound, InvalidValue };
 
 /// Represents the virtual machine - the orchestrator of execution.
 pub const VM = struct {
@@ -67,14 +67,13 @@ pub const Isolate = struct {
 
     function_constants: std.ArrayList(TapeValue),
 
-    stack: [*]TapeValue,
-    stack_top_index: usize,
-    frames: [*]Entities.CallFrame,
-    frame_count: usize,
-    open_upvalues: ?*Entities.ObjectUpvalue,
     // TODO: ideally this should come from the compiler so we don't waste memory
     globals: [*]TapeValue,
     globals_count: usize,
+
+    execution_state: Entities.ExecutionState,
+
+    current: *Entities.ExecutionState,
 
     pub fn init(vm: *VM, base_allocator: std.mem.Allocator, builtin_functions: BuiltinFunctions) !*Isolate {
         const isolate = try base_allocator.create(Isolate);
@@ -86,14 +85,13 @@ pub const Isolate = struct {
 
         isolate.gc = try BasicGarbageCollector.BasicGarbageCollector.init(base_allocator, isolate, mark_roots, clean_string_intern);
 
-        isolate.stack = @ptrCast(@alignCast(try base_allocator.alloc(TapeValue, vm.config.stack_size)));
-        isolate.stack_top_index = 0;
-        isolate.open_upvalues = null;
-        isolate.frames = @ptrCast(@alignCast(try base_allocator.alloc(Entities.CallFrame, vm.config.max_frame_count)));
-        isolate.frame_count = 0;
+        isolate.execution_state = try Entities.ExecutionState.init(isolate.base_allocator, vm.config.max_frame_count, vm.config.stack_size);
+
         isolate.globals = @ptrCast(@alignCast(try base_allocator.alloc(TapeValue, vm.config.globals_size)));
         isolate.globals_count = 0;
         isolate.function_constants = .empty;
+
+        isolate.current = &isolate.execution_state;
 
         return isolate;
     }
@@ -101,8 +99,8 @@ pub const Isolate = struct {
     pub fn deinit(self: *Isolate) void {
         self.string_intern.deinit();
         self.gc.deinit();
-        self.base_allocator.free(self.stack[0..self.vm.config.stack_size]);
-        self.base_allocator.free(self.frames[0..self.vm.config.max_frame_count]);
+        self.base_allocator.free(self.execution_state.stack[0..self.vm.config.stack_size]);
+        self.base_allocator.free(self.execution_state.frames[0..self.vm.config.max_frame_count]);
         self.base_allocator.free(self.globals[0..self.vm.config.globals_size]);
         self.function_constants.deinit(self.base_allocator);
         self.base_allocator.destroy(self);
@@ -111,7 +109,7 @@ pub const Isolate = struct {
     fn mark_roots(ptr: *anyopaque, gc: *BasicGarbageCollector.BasicGarbageCollector) void {
         const isolate: *Isolate = @ptrCast(@alignCast(ptr));
 
-        for (isolate.stack[0..isolate.stack_top_index]) |value| {
+        for (isolate.execution_state.stack[0..isolate.execution_state.stack_top_index]) |value| {
             Entities.mark_value(gc, value) catch {
                 isolate.vm.workspace.diagnostics.add_diagnostic(.{ .column = 0, .line = 0, .severity = .Error, .message = "Failed to mark value", .stage = .Execution, .file_path = "", .hint = "This is an internal error. Please report it to the TAPE-lang team." }) catch {};
             };
@@ -123,7 +121,7 @@ pub const Isolate = struct {
             };
         }
         // mark open upvalues
-        var upvalue = isolate.open_upvalues;
+        var upvalue = isolate.execution_state.open_upvalues;
         while (upvalue) |uv| {
             Entities.mark_value(gc, .{ .object = &uv.header }) catch {};
             upvalue = uv.next;
@@ -149,28 +147,29 @@ pub const Isolate = struct {
     }
 
     pub fn push_value(self: *Isolate, value: TapeValue) !void {
-        if (self.stack_top_index >= self.vm.config.stack_size) {
+        if (self.current.stack_top_index >= self.current.stack_size) {
             return error.StackOverflow;
         }
-        self.stack[self.stack_top_index] = value;
-        self.stack_top_index += 1;
+        self.current.stack[self.current.stack_top_index] = value;
+        self.current.stack_top_index += 1;
     }
 
     /// Returns the value at the top of the stack
     pub fn pop_value(self: *Isolate) !TapeValue {
-        if (self.stack_top_index == 0) {
+        if (self.current.stack_top_index == 0) {
             return error.StackUnderflow;
         }
-        self.stack_top_index -= 1;
-        return self.stack[self.stack_top_index];
+
+        self.current.stack_top_index -= 1;
+        return self.current.stack[self.current.stack_top_index];
     }
 
     /// Gets the value on the stack at the given offset
     pub fn peek_value(self: *Isolate, offset: usize) !TapeValue {
-        if (offset >= self.stack_top_index) {
+        if (offset >= self.current.stack_top_index) {
             return error.StackUnderflow;
         }
-        return self.stack[self.stack_top_index - 1 - offset];
+        return self.current.stack[self.current.stack_top_index - 1 - offset];
     }
 
     /// Returns an upvalue pointing at the given stack slot, reusing an existing open
@@ -179,7 +178,7 @@ pub const Isolate = struct {
     /// scanning as soon as it reaches an upvalue below the boundary.
     pub fn capture_upvalue(self: *Isolate, local: *TapeValue) !*Entities.ObjectUpvalue {
         var previous: ?*Entities.ObjectUpvalue = null;
-        var current = self.open_upvalues;
+        var current = self.current.open_upvalues;
         while (current) |upvalue| {
             if (upvalue.location == local) return upvalue;
             if (@intFromPtr(upvalue.location) < @intFromPtr(local)) break;
@@ -192,7 +191,7 @@ pub const Isolate = struct {
         if (previous) |prev| {
             prev.next = created;
         } else {
-            self.open_upvalues = created;
+            self.current.open_upvalues = created;
         }
         return created;
     }
@@ -200,12 +199,12 @@ pub const Isolate = struct {
     /// Closes every open upvalue whose stack location is at or above `last`, moving
     /// the captured value out of the stack and into the upvalue itself.
     pub fn close_upvalues(self: *Isolate, last: *TapeValue) void {
-        while (self.open_upvalues) |upvalue| {
+        while (self.current.open_upvalues) |upvalue| {
             if (@intFromPtr(upvalue.location) < @intFromPtr(last)) break;
             upvalue.closed_value = upvalue.location.*;
             upvalue.closed = true;
             upvalue.location = &upvalue.closed_value;
-            self.open_upvalues = upvalue.next;
+            self.current.open_upvalues = upvalue.next;
             upvalue.next = null;
         }
     }
@@ -242,15 +241,15 @@ pub const Isolate = struct {
         if (arg_count != closure.function.arity) {
             return RuntimePanic.ArgumentCountMismatch;
         }
-        if (self.frame_count + 1 >= self.vm.config.max_frame_count) {
+        if (self.current.frame_count + 1 >= self.vm.config.max_frame_count) {
             return RuntimePanic.StackOverflow;
         }
-        self.frame_count += 1;
-        const frame = &self.frames[self.frame_count - 1];
+        self.current.frame_count += 1;
+        const frame = &self.current.frames[self.current.frame_count - 1];
         frame.closure = closure;
         frame.ip = 0;
-        // the closure is at self.stack_top_index
-        frame.slot_start = self.stack_top_index - arg_count;
+        // the closure is at self.current.stack_top_index
+        frame.slot_start = self.current.stack_top_index - arg_count;
     }
 
     pub fn execute(self: *Isolate) RuntimePanic!InterpretResult {
@@ -260,7 +259,7 @@ pub const Isolate = struct {
     }
 
     pub fn execution_loop(self: *Isolate) RuntimePanic!InterpretResult {
-        var frame = &self.frames[self.frame_count - 1];
+        var frame = &self.current.frames[self.current.frame_count - 1];
 
         while (true) {
             const instruction: Opcode = @enumFromInt(frame.closure.function.chunk.code.items[frame.ip]);
@@ -272,16 +271,16 @@ pub const Isolate = struct {
                     std.debug.print("RETURN: ", .{});
                     Entities.print_value(result);
                     std.debug.print("\n", .{});
-                    self.close_upvalues(&self.stack[frame.slot_start]);
-                    self.stack_top_index = frame.slot_start - 1;
-                    self.frame_count -= 1;
-                    if (self.frame_count == 0) {
-                        self.open_upvalues = null;
+                    self.close_upvalues(&self.current.stack[frame.slot_start]);
+                    self.current.stack_top_index = frame.slot_start - 1;
+                    self.current.frame_count -= 1;
+                    if (self.current.frame_count == 0) {
+                        self.current.open_upvalues = null;
                         return InterpretResult.Ok;
                     }
 
                     try self.push_value(result);
-                    frame = &self.frames[self.frame_count - 1];
+                    frame = &self.current.frames[self.current.frame_count - 1];
                 },
 
                 .OP_CONSTANT => {
@@ -623,9 +622,9 @@ pub const Isolate = struct {
                 .OP_POP_N => {
                     const pop_count = frame.read_u16();
                     if (pop_count > 0) {
-                        self.close_upvalues(&self.stack[self.stack_top_index - pop_count]);
+                        self.close_upvalues(&self.current.stack[self.current.stack_top_index - pop_count]);
                     }
-                    self.stack_top_index -= pop_count;
+                    self.current.stack_top_index -= pop_count;
                 },
 
                 .OP_LOAD_GLOBAL => {
@@ -638,11 +637,11 @@ pub const Isolate = struct {
                 },
                 .OP_STORE_LOCAL => {
                     const index = frame.read_u16();
-                    self.stack[frame.slot_start + index] = try self.peek_value(0);
+                    self.current.stack[frame.slot_start + index] = try self.peek_value(0);
                 },
                 .OP_LOAD_LOCAL => {
                     const index = frame.read_u16();
-                    try self.push_value(self.stack[frame.slot_start + index]);
+                    try self.push_value(self.current.stack[frame.slot_start + index]);
                 },
                 .OP_JUMP => {
                     const offset = frame.read_u16();
@@ -714,18 +713,18 @@ pub const Isolate = struct {
                     const table_value = TapeValue{ .object = &table_object.header };
                     try self.push_value(table_value);
 
-                    const table_literal_start = self.stack_top_index - 1 - (@as(usize, count) * 2);
+                    const table_literal_start = self.current.stack_top_index - 1 - (@as(usize, count) * 2);
                     for (0..count) |i| {
-                        const key = self.stack[table_literal_start + i];
-                        const value = self.stack[table_literal_start + count + i];
+                        const key = self.current.stack[table_literal_start + i];
+                        const value = self.current.stack[table_literal_start + count + i];
                         _ = Entities.table_set(self, table_object, key, value) catch |err| switch (err) {
                             error.OutOfMemory => return RuntimePanic.OutOfMemory,
                             error.NonHashableElement => return RuntimePanic.CorruptedState,
                         };
                     }
 
-                    self.stack[table_literal_start] = table_value;
-                    self.stack_top_index = table_literal_start + 1;
+                    self.current.stack[table_literal_start] = table_value;
+                    self.current.stack_top_index = table_literal_start + 1;
                 },
                 .OP_INDEX_ARRAY => {
                     const index = try self.peek_value(0);
@@ -806,7 +805,7 @@ pub const Isolate = struct {
                         else => return RuntimePanic.CorruptedState,
                     };
                     try self.call(closure, arg_count);
-                    frame = &self.frames[self.frame_count - 1]; // re-point at the new frame, same pattern OP_RETURN already uses
+                    frame = &self.current.frames[self.current.frame_count - 1]; // re-point at the new frame, same pattern OP_RETURN already uses
                 },
                 .OP_CLOSURE => {
                     const function_value = frame.read_constant();
@@ -822,12 +821,21 @@ pub const Isolate = struct {
                         const captures_parent_local = frame.read_u8() != 0;
                         const parent_slot = frame.read_u16();
                         closure.upvalues[upvalue_slot] = if (captures_parent_local)
-                            try self.capture_upvalue(&self.stack[frame.slot_start + parent_slot])
+                            try self.capture_upvalue(&self.current.stack[frame.slot_start + parent_slot])
                         else
                             frame.closure.upvalues[parent_slot];
                     }
                     try self.push_value(.{ .object = &closure.header });
                 },
+                .OP_COROUTINE => {
+                    const closure_value = try self.pop_value();
+                    const closure_object: *Entities.ObjectClosure = Entities.object_as(Entities.ObjectClosure, try Entities.object_from_value(closure_value));
+                    const coroutine = try Entities.new_coroutine_object(self, closure_object, self.vm.config.max_frame_count, self.vm.config.stack_size);
+                    try self.push_value(.{ .object = @ptrCast(coroutine) });
+                },
+                .OP_RESUME => {},
+                .OP_YIELD => {},
+
                 .OP_LOAD_FUNCTION_CONSTANT => {
                     const index = frame.read_u16();
                     try self.push_value(self.function_constants.items[index]);
