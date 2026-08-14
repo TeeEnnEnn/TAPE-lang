@@ -343,20 +343,14 @@ pub fn run_check(io: std.Io, parsed_args: [][]const u8, allocator: std.mem.Alloc
     };
     defer allocator.free(file_path);
 
-    workspace.compile_workspace(file_path) catch {
+    const succeeded = workspace.compile_workspace(file_path) catch {
         workspace.diagnostics.report_all(io) catch {
             return 1;
         };
         return 1;
     };
-    const has_errors = workspace.diagnostics.has_errors;
 
-    if (has_errors or workspace.diagnostics.has_infos or workspace.diagnostics.has_warnings) {
-        workspace.diagnostics.report_all(io) catch {
-            return 1;
-        };
-    }
-    if (has_errors) {
+    if (!succeeded) {
         return 1;
     }
 

@@ -15,12 +15,25 @@ pub const VMConfig = struct {
 
 pub const BuiltinFunctions = struct {};
 
-pub const InterpretResult = enum {
-    Ok,
-    Error,
+pub const InterpretResult = union(enum) {
+    Ok: TapeValue,
+    Yielded: TapeValue,
 };
 
-pub const RuntimePanic = error{ StackOverflow, StackUnderflow, DivisionByZero, ArgumentCountMismatch, CorruptedState, NegativeDenominator, OutOfMemory, IndexOutOfBounds, KeyNotFound, InvalidValue };
+pub const RuntimePanic = error{
+    StackOverflow,
+    StackUnderflow,
+    DivisionByZero,
+    ArgumentCountMismatch,
+    CorruptedState,
+    NegativeDenominator,
+    OutOfMemory,
+    IndexOutOfBounds,
+    KeyNotFound,
+    InvalidValue,
+    FinishedCoroutineResumption,
+    CoroutineAlreadyRunning,
+};
 
 /// Represents the virtual machine - the orchestrator of execution.
 pub const VM = struct {
@@ -276,7 +289,7 @@ pub const Isolate = struct {
                     self.current.frame_count -= 1;
                     if (self.current.frame_count == 0) {
                         self.current.open_upvalues = null;
-                        return InterpretResult.Ok;
+                        return .{ .Ok = result };
                     }
 
                     try self.push_value(result);
@@ -607,7 +620,7 @@ pub const Isolate = struct {
                     @memcpy(new_chars[string_a.byte_length..], string_b.chars);
 
                     const new_string = Entities.take_string(self, self.base_allocator, new_chars) catch {
-                        return InterpretResult.Error;
+                        return RuntimePanic.OutOfMemory;
                     };
                     try self.push_value(.{ .object = @ptrCast(new_string) });
                 },
@@ -800,12 +813,12 @@ pub const Isolate = struct {
                     const closure: *Entities.ObjectClosure = switch (callee) {
                         .object => |obj| switch (obj.object_type) {
                             .ObjectClosure => @ptrCast(obj),
-                            else => return RuntimePanic.CorruptedState, // not callable — type checker should have caught this
+                            else => return RuntimePanic.CorruptedState,
                         },
                         else => return RuntimePanic.CorruptedState,
                     };
                     try self.call(closure, arg_count);
-                    frame = &self.current.frames[self.current.frame_count - 1]; // re-point at the new frame, same pattern OP_RETURN already uses
+                    frame = &self.current.frames[self.current.frame_count - 1]; // re-point at the new frame
                 },
                 .OP_CLOSURE => {
                     const function_value = frame.read_constant();
@@ -828,13 +841,76 @@ pub const Isolate = struct {
                     try self.push_value(.{ .object = &closure.header });
                 },
                 .OP_COROUTINE => {
-                    const closure_value = try self.pop_value();
-                    const closure_object: *Entities.ObjectClosure = Entities.object_as(Entities.ObjectClosure, try Entities.object_from_value(closure_value));
+                    const arg_count = frame.read_u16();
+                    const callee = try self.peek_value(arg_count);
+                    const closure_object: *Entities.ObjectClosure = switch (callee) {
+                        .object => |obj| switch (obj.object_type) {
+                            .ObjectClosure => @ptrCast(obj),
+                            else => return RuntimePanic.CorruptedState,
+                        },
+                        else => return RuntimePanic.CorruptedState,
+                    };
+
+                    // Copy args off the caller's stack - these will be copied to the coroutines stack.
+                    var args = try std.ArrayList(TapeValue).initCapacity(self.base_allocator, arg_count);
+                    defer args.deinit(self.base_allocator);
+                    for (0..arg_count) |i| {
+                        args.appendAssumeCapacity(try self.peek_value(arg_count - 1 - i));
+                    }
+
                     const coroutine = try Entities.new_coroutine_object(self, closure_object, self.vm.config.max_frame_count, self.vm.config.stack_size);
-                    try self.push_value(.{ .object = @ptrCast(coroutine) });
+
+                    const prev_execution_state = self.current;
+                    self.current = &coroutine.execution_state;
+
+                    try self.push_value(.{ .object = &coroutine.closure.header });
+                    for (args.items) |arg| try self.push_value(arg);
+                    try self.call(coroutine.closure, arg_count);
+
+                    self.current = prev_execution_state;
+
+                    // discard callee + args from the caller's stack
+                    self.current.stack_top_index -= (arg_count + 1);
+                    try self.push_value(.{ .object = &coroutine.header });
                 },
-                .OP_RESUME => {},
-                .OP_YIELD => {},
+
+                .OP_RESUME => {
+                    const coroutine_value = try self.pop_value();
+                    const coroutine_object: *Entities.ObjectCoroutine = switch (coroutine_value) {
+                        .object => |obj| switch (obj.object_type) {
+                            .ObjectCoroutine => @ptrCast(obj),
+                            else => return RuntimePanic.CorruptedState,
+                        },
+                        else => return RuntimePanic.CorruptedState,
+                    };
+
+                    if (coroutine_object.state == .FINISHED) return RuntimePanic.FinishedCoroutineResumption;
+                    if (coroutine_object.state == .RUNNING) return RuntimePanic.CoroutineAlreadyRunning;
+
+                    const prev_execution_state = self.current;
+                    self.current = &coroutine_object.execution_state;
+                    coroutine_object.state = .RUNNING;
+
+                    const result = self.execution_loop(); // resume execution where you left off
+                    self.current = prev_execution_state;
+
+                    switch (try result) {
+                        .Ok => |value| {
+                            coroutine_object.state = .FINISHED;
+                            try self.push_value(value);
+                        },
+                        .Yielded => |value| {
+                            coroutine_object.state = .SUSPENDED;
+                            try self.push_value(value);
+                        },
+                    }
+                },
+
+                // Give execution back to your caller
+                .OP_YIELD => {
+                    const value = try self.pop_value();
+                    return .{ .Yielded = value }; // return from the nested execution scope with the yielded value
+                },
 
                 .OP_LOAD_FUNCTION_CONSTANT => {
                     const index = frame.read_u16();

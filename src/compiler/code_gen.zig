@@ -147,7 +147,10 @@ pub const CodeGenerator = struct {
                 try self.generate_var_decl(node, decl);
             },
             .fn_decl => |decl| {
-                try self.generate_fn_decl(node, decl);
+                try self.generate_callable_decl(node, @ptrCast(decl), AST.FnDecl);
+            },
+            .co_decl => |decl| {
+                try self.generate_callable_decl(node, @ptrCast(decl), AST.CoDecl);
             },
             .enum_decl => {
                 // nothing to do - fully comptime
@@ -202,6 +205,7 @@ pub const CodeGenerator = struct {
                 try self.patch_jump(exit_jump);
                 try self.current.chunk().write_opcode(.OP_POP, stmt.line);
             },
+
             .return_stmt => |stmt| {
                 if (stmt.expr) |expr| {
                     try self.generate_expression(expr);
@@ -210,6 +214,50 @@ pub const CodeGenerator = struct {
                 }
                 try self.current.chunk().write_opcode(.OP_RETURN, stmt.line);
             },
+
+            .for_stmt => |stmt| {
+                _ = stmt;
+                // TODO: for statements
+                self.fail("Unsupported node type in code generation.", "This node type is not yet implemented for bytecode emission.", 0, 0);
+                return CodeGeneratorError.UnsupportedNode;
+            },
+
+            .yield_stmt => |stmt| {
+                if (stmt.expr) |expression| {
+                    try self.generate_expression(expression);
+                } else {
+                    try self.current.chunk().write_opcode(.OP_NIL, stmt.line);
+                }
+                try self.current.chunk().write_opcode(.OP_YIELD, stmt.line);
+            },
+
+            .give_stmt => |stmt| {
+                _ = stmt;
+                // TODO: give statement
+                self.fail("Unsupported node type in code generation.", "This node type is not yet implemented for bytecode emission.", 0, 0);
+                return CodeGeneratorError.UnsupportedNode;
+            },
+
+            .break_stmt => |stmt| {
+                _ = stmt;
+                // TODO: break statement
+
+                self.fail("Unsupported node type in code generation.", "This node type is not yet implemented for bytecode emission.", 0, 0);
+                return CodeGeneratorError.UnsupportedNode;
+            },
+            .continue_stmt => |stmt| {
+                _ = stmt;
+                // TODO: continue statement
+                self.fail("Unsupported node type in code generation.", "This node type is not yet implemented for bytecode emission.", 0, 0);
+                return CodeGeneratorError.UnsupportedNode;
+            },
+            .panic_stmt => |stmt| {
+                _ = stmt;
+                // TODO: panic statement
+                self.fail("Unsupported node type in code generation.", "This node type is not yet implemented for bytecode emission.", 0, 0);
+                return CodeGeneratorError.UnsupportedNode;
+            },
+
             else => {
                 self.fail("Unsupported node type in code generation.", "This node type is not yet implemented for bytecode emission.", 0, 0);
                 return CodeGeneratorError.UnsupportedNode;
@@ -217,33 +265,35 @@ pub const CodeGenerator = struct {
         }
     }
 
-    fn generate_fn_decl(self: *CodeGenerator, node: *AST.ASTNode, decl: *AST.FnDecl) CodeGeneratorError!void {
+    fn generate_callable_decl(self: *CodeGenerator, node: *AST.ASTNode, decl: *AST.ASTNode, decl_type: anytype) CodeGeneratorError!void {
         const function_object = try Entities.new_function_object(self.isolate);
         const new_function = try FunctionCompiler.init(self.allocator, function_object, self.current);
         const enclosing = self.current;
         self.current = new_function;
         defer self.current = enclosing;
 
+        const callable_decl: *decl_type = @ptrCast(decl);
+
         const binding = self.binding_resolution.function_infos.get(node) orelse {
-            self.fail("Function declaration has no binding in binding resolution." ++ INTERNAL_ERROR_MESSAGE, null, decl.line, decl.column);
+            self.fail("Function declaration has no binding in binding resolution." ++ INTERNAL_ERROR_MESSAGE, null, callable_decl.line, callable_decl.column);
             return CodeGeneratorError.MissingBinding;
         };
 
         // params are already locals at this point
 
-        try self.generate_node(decl.body);
+        try self.generate_node(callable_decl.body);
 
         // TODO: use type checker statement termination to determine whether or not we need to add a return
-        try self.current.chunk().write_opcode(.OP_NIL, decl.line);
-        try self.current.chunk().write_opcode(.OP_RETURN, decl.line);
+        try self.current.chunk().write_opcode(.OP_NIL, callable_decl.line);
+        try self.current.chunk().write_opcode(.OP_RETURN, callable_decl.line);
 
         function_object.arity = binding.param_count;
-        function_object.name = try Entities.copy_string(self.isolate, decl.name.lexeme);
+        function_object.name = try Entities.copy_string(self.isolate, callable_decl.name.lexeme);
         function_object.upvalue_count = binding.upvalues.len;
 
         const ref: AST.DeclRef = .{ .node = node };
         const decl_binding = self.binding_resolution.declaration_bindings.get(ref) orelse {
-            self.fail("Function declaration has no runtime binding in binding resolution." ++ INTERNAL_ERROR_MESSAGE, null, decl.line, decl.column);
+            self.fail("Function declaration has no runtime binding in binding resolution." ++ INTERNAL_ERROR_MESSAGE, null, callable_decl.line, callable_decl.column);
             return CodeGeneratorError.MissingBinding;
         };
 
@@ -255,14 +305,14 @@ pub const CodeGenerator = struct {
             .local => {
                 // Nested function: emit a closure instruction to create closure and capture upvalues
                 const const_index = try enclosing.chunk().write_constant(.{ .object = &function_object.header });
-                try enclosing.chunk().write_opcode(.OP_CLOSURE, decl.line);
-                try enclosing.chunk().write_u16(const_index, decl.line);
+                try enclosing.chunk().write_opcode(.OP_CLOSURE, callable_decl.line);
+                try enclosing.chunk().write_u16(const_index, callable_decl.line);
                 for (binding.upvalues) |upvalue| {
-                    try enclosing.chunk().write_u8(if (upvalue.captures_parent_local) 1 else 0, decl.line);
-                    try enclosing.chunk().write_u16(upvalue.parent_slot, decl.line);
+                    try enclosing.chunk().write_u8(if (upvalue.captures_parent_local) 1 else 0, callable_decl.line);
+                    try enclosing.chunk().write_u16(upvalue.parent_slot, callable_decl.line);
                 }
-                try enclosing.chunk().write_opcode(.OP_STORE_LOCAL, decl.line);
-                try enclosing.chunk().write_u16(decl_binding.slot, decl.line);
+                try enclosing.chunk().write_opcode(.OP_STORE_LOCAL, callable_decl.line);
+                try enclosing.chunk().write_u16(decl_binding.slot, callable_decl.line);
             },
             else => return CodeGeneratorError.UnsupportedNode,
         }
@@ -377,7 +427,15 @@ pub const CodeGenerator = struct {
                 for (expr.args) |arg| {
                     try self.generate_expression(arg);
                 }
-                try self.current.chunk().write_opcode(.OP_CALL, expr.line);
+
+                const indexed_type = resolve_typeof(expr.expr);
+                const opcode: Opcode = switch (self.registry.get_type_info(indexed_type)) {
+                    .function => .OP_CALL,
+                    .coroutine => .OP_COROUTINE,
+                    else => return CodeGeneratorError.UnsupportedOperandType,
+                };
+
+                try self.current.chunk().write_opcode(opcode, expr.line);
                 try self.current.chunk().write_u16(@intCast(expr.args.len), expr.line);
             },
             .index_expr => |expr| {
@@ -507,9 +565,9 @@ pub const CodeGenerator = struct {
         }
     }
 
-    fn generate_resume_expression(self: *CodeGenerator, node: *AST.ResumeExpr) CodeGeneratorError!void {
-        self.fail("Resume expression code generation is not yet implemented.", null, node.line, node.column);
-        return CodeGeneratorError.UnsupportedNode;
+    fn generate_resume_expression(self: *CodeGenerator, expr: *AST.ResumeExpr) CodeGeneratorError!void {
+        try self.generate_expression(expr.expr); // should be a call expression
+        try self.current.chunk().write_opcode(.OP_RESUME, expr.line);
     }
 
     fn generate_unary_expression(self: *CodeGenerator, expr: *AST.UnaryExpr) CodeGeneratorError!void {

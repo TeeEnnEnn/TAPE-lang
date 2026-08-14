@@ -557,3 +557,190 @@ test "Closures may capture function-local variables" {
     result.env.deinit();
     result.registry.deinit();
 }
+
+test "Type Checker - coroutine declaration creates coroutine type" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const allocator = arena.allocator();
+
+    var result = try checkSource(allocator, "co add(a: Int, b: Int) -> (Int, Int) { yield a + b; return a + b; }");
+    defer result.env.deinit();
+    defer result.registry.deinit();
+
+    const co_type = result.registry.get_type_info(try result.env.lookup("add"));
+    try std.testing.expect(co_type == .coroutine);
+    try std.testing.expectEqual(@as(usize, 2), co_type.coroutine.args.len);
+    try std.testing.expectEqual(@intFromEnum(PrimitiveType.Int), co_type.coroutine.args[0]);
+    try std.testing.expectEqual(@intFromEnum(PrimitiveType.Int), co_type.coroutine.args[1]);
+    try std.testing.expectEqual(@intFromEnum(PrimitiveType.Int), co_type.coroutine.yield);
+    try std.testing.expectEqual(@intFromEnum(PrimitiveType.Int), co_type.coroutine.ret);
+}
+
+test "Type Checker - coroutine yield and return combinations" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const allocator = arena.allocator();
+
+    // yield + explicit return
+    _ = try checkSource(allocator, "co f() -> (Int, Nil) { yield 1; return nil; }");
+    // yield + bare return
+    _ = try checkSource(allocator, "co f() -> (Int, Nil) { yield 1; return; }");
+    // yield only, Nil return type
+    _ = try checkSource(allocator, "co f() -> (Int, Nil) { yield 1; }");
+    // empty coroutine with Nil yield and Nil return
+    _ = try checkSource(allocator, "co f() -> (Nil, Nil) { }");
+    // yield in both branches of an if
+    _ = try checkSource(allocator, "co g(x: Bool) -> (Int, Nil) { if (x) { yield 1; } else { yield 2; } }");
+    // yield after a conditional
+    _ = try checkSource(allocator, "co h(x: Bool) -> (Int, Nil) { if (x) { yield 1; } yield 2; }");
+    // yield followed by return in a nested block (regression: yield flag must survive the return)
+    _ = try checkSource(allocator, "co f() -> (Int, Int) { { yield 1; return 2; } }");
+    // generator: yield inside a loop body is recognized (existential check)
+    _ = try checkSource(allocator, "co gen(limit: Int) -> (Int, Nil) { var i = 0; while (i < limit) { yield i; i += 1; } return nil; }");
+    // yield only in one branch of an if is enough
+    _ = try checkSource(allocator, "co f(x: Bool) -> (Int, Nil) { if (x) { yield 1; } return nil; }");
+}
+
+test "Type Checker - coroutine missing yield and return" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const allocator = arena.allocator();
+
+    // missing yield when yield type is set
+    try std.testing.expectError(TypeCheckerError.MissingYield, checkSource(allocator, "co f() -> (Int, Int) { return 5; }"));
+    // missing return when return type is set
+    try std.testing.expectError(TypeCheckerError.MissingReturn, checkSource(allocator, "co f() -> (Int, Int) { yield 5; }"));
+    // neither yield nor return
+    try std.testing.expectError(TypeCheckerError.MissingReturn, checkSource(allocator, "co f() -> (Int, Int) { var x = 1; }"));
+}
+
+test "Type Checker - yield and return outside coroutine" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const allocator = arena.allocator();
+
+    try std.testing.expectError(TypeCheckerError.InvalidOperation, checkSource(allocator, "yield 1;"));
+    try std.testing.expectError(TypeCheckerError.InvalidOperation, checkSource(allocator, "return 1;"));
+}
+
+test "Type Checker - coroutine yield and return type mismatch" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const allocator = arena.allocator();
+
+    try std.testing.expectError(TypeCheckerError.TypeMismatch, checkSource(allocator, "co f() -> (Int, Nil) { yield \"s\"; }"));
+    try std.testing.expectError(TypeCheckerError.TypeMismatch, checkSource(allocator, "co f() -> (Int, Int) { yield 1; return nil; }"));
+}
+
+test "Type Checker - coroutine call argument checks" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const allocator = arena.allocator();
+
+    // too few arguments
+    try std.testing.expectError(TypeCheckerError.InvalidArgumentCount, checkSource(allocator, "co f(x: Int) -> (Int, Nil) { yield x; } var c = f();"));
+    // too many arguments
+    try std.testing.expectError(TypeCheckerError.InvalidArgumentCount, checkSource(allocator, "co f(x: Int) -> (Int, Nil) { yield x; } var c = f(1, 2);"));
+    // argument type mismatch
+    try std.testing.expectError(TypeCheckerError.TypeMismatch, checkSource(allocator, "co f(x: Int) -> (Int, Nil) { yield x; } var c = f(\"s\");"));
+    // calling a coroutine produces a coroutine value
+    var result = try checkSource(allocator, "co f(x: Int) -> (Int, Nil) { yield x; } var c = f(5);");
+    defer result.env.deinit();
+    defer result.registry.deinit();
+    const c_type = result.registry.get_type_info(try result.env.lookup("c"));
+    try std.testing.expect(c_type == .coroutine);
+}
+
+test "Type Checker - resume on non-coroutine" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const allocator = arena.allocator();
+
+    try std.testing.expectError(TypeCheckerError.InvalidOperation, checkSource(allocator, "fn f() -> Int { return 1; } var x = resume f;"));
+    try std.testing.expectError(TypeCheckerError.InvalidOperation, checkSource(allocator, "var x = 5; var y = resume x;"));
+}
+
+test "Type Checker - resume result is union of yield and return" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const allocator = arena.allocator();
+
+    var result = try checkSource(allocator,
+        \\co gen() -> (Int, String) { yield 1; return "done"; }
+        \\var c = gen();
+        \\var v = resume c;
+    );
+    defer result.env.deinit();
+    defer result.registry.deinit();
+
+    const v_type = try result.env.lookup("v");
+    const info = result.registry.get_type_info(v_type);
+    try std.testing.expect(info == ._union);
+    try std.testing.expectEqual(@intFromEnum(PrimitiveType.Int), info._union.left);
+    try std.testing.expectEqual(@intFromEnum(PrimitiveType.String), info._union.right);
+}
+
+test "Type Checker - coroutine member access" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const allocator = arena.allocator();
+
+    var result = try checkSource(allocator,
+        \\co f() -> (Int, Nil) { yield 1; }
+        \\var c = f();
+        \\var a: Bool = c.suspended;
+        \\var b: Bool = c.finished;
+        \\var d: Bool = c.running;
+    );
+    defer result.env.deinit();
+    defer result.registry.deinit();
+    try std.testing.expectEqual(@intFromEnum(PrimitiveType.Bool), try result.env.lookup("a"));
+    try std.testing.expectEqual(@intFromEnum(PrimitiveType.Bool), try result.env.lookup("b"));
+    try std.testing.expectEqual(@intFromEnum(PrimitiveType.Bool), try result.env.lookup("d"));
+
+    // unknown member
+    try std.testing.expectError(TypeCheckerError.InvalidMemberAccess, checkSource(allocator, "co f() -> (Int, Nil) { yield 1; } var c = f(); var x = c.nope;"));
+}
+
+test "Type Checker - anonymous coroutine" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const allocator = arena.allocator();
+
+    _ = try checkSource(allocator, "var c = co () -> (Int, Nil) { yield 1; };");
+    try std.testing.expectError(TypeCheckerError.MissingYield, checkSource(allocator, "var c = co () -> (Int, Int) { return 5; };"));
+    try std.testing.expectError(TypeCheckerError.MissingReturn, checkSource(allocator, "var c = co () -> (Int, Int) { yield 5; };"));
+}
+
+test "Type Checker - nested coroutines" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const allocator = arena.allocator();
+
+    // coroutine calling another coroutine
+    _ = try checkSource(allocator, "co inner() -> (Int, Nil) { yield 1; } co outer() -> (Int, Nil) { yield 1; var c = inner(); resume c; }");
+    // coroutine declared inside a block within a coroutine
+    _ = try checkSource(allocator, "co outer() -> (Int, Nil) { yield 1; { co inner() -> (Int, Nil) { yield 2; } var c = inner(); resume c; } }");
+}
+
+test "Type Checker - function call argument checks" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const allocator = arena.allocator();
+
+    // too few arguments
+    try std.testing.expectError(TypeCheckerError.InvalidArgumentCount, checkSource(allocator, "fn f(x: Int) -> Int { return x; } var c = f();"));
+    // too many arguments
+    try std.testing.expectError(TypeCheckerError.InvalidArgumentCount, checkSource(allocator, "fn f(x: Int) -> Int { return x; } var c = f(1, 2);"));
+    // argument type mismatch
+    try std.testing.expectError(TypeCheckerError.TypeMismatch, checkSource(allocator, "fn f(x: Int) -> Int { return x; } var c = f(\"s\");"));
+}
+
+test "Type Checker - non-boolean conditions" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const allocator = arena.allocator();
+
+    try std.testing.expectError(TypeCheckerError.NonBooleanCondition, checkSource(allocator, "if (1) { var x = 0; }"));
+    try std.testing.expectError(TypeCheckerError.TypeMismatch, checkSource(allocator, "while (1) { break; }"));
+}

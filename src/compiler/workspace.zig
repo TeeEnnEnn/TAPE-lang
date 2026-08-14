@@ -132,7 +132,8 @@ pub const Workspace = struct {
     }
 
     /// Compiles the workspace starting from the entrypoint module.
-    pub fn compile_workspace(self: *Workspace, entrypoint: []const u8) !void {
+    /// Returns whether the compilation completed without reporting errors.
+    pub fn compile_workspace(self: *Workspace, entrypoint: []const u8) !bool {
         var group = std.Io.Group.init;
 
         const entrypoint_absolute = try self.allocator.dupe(u8, entrypoint);
@@ -180,7 +181,7 @@ pub const Workspace = struct {
 
         if (self.diagnostics.has_errors) {
             self.diagnostics.report_all(self.io) catch {};
-            return;
+            return false;
         }
 
         // detect cycles
@@ -205,13 +206,27 @@ pub const Workspace = struct {
             var global_environment = Environment.init(self.allocator, null);
             defer global_environment.deinit();
             var type_checker = TypeChecker.init(self.allocator, &type_registry, &global_environment, &self.diagnostics, module, self);
-            _ = type_checker.check(module.ast) catch {};
+            _ = type_checker.check(module.ast) catch |err| {
+                if (!self.diagnostics.has_errors) {
+                    // The type checker failed without reporting a diagnostic.
+                    // Surface the error so compilation stops before code generation.
+                    try self.diagnostics.add_diagnostic(.{
+                        .column = 0,
+                        .line = 0,
+                        .stage = .TypeChecker,
+                        .severity = .Error,
+                        .message = "Type checking failed",
+                        .hint = @errorName(err),
+                        .file_path = module.filepath,
+                    });
+                }
+            };
 
             if (self.diagnostics.has_content()) {
                 const had_errors = self.diagnostics.has_errors;
                 self.diagnostics.report_all(self.io) catch {};
                 if (had_errors) {
-                    return;
+                    return false;
                 }
             }
             std.debug.print("Type checked {s}\n", .{module.filepath});
@@ -223,9 +238,9 @@ pub const Workspace = struct {
                 if (self.diagnostics.has_content()) {
                     const had_errors = self.diagnostics.has_errors;
                     self.diagnostics.report_all(self.io) catch {};
-                    if (had_errors) return;
+                    if (had_errors) return false;
                 }
-                return;
+                return false;
             };
             module.binding_resolution.deinit();
             module.binding_resolution = new_resolution;
@@ -234,7 +249,7 @@ pub const Workspace = struct {
                 const had_errors = self.diagnostics.has_errors;
                 self.diagnostics.report_all(self.io) catch {};
                 if (had_errors) {
-                    return;
+                    return false;
                 }
             }
             std.debug.print("Type checked {s}\n", .{module.filepath});
@@ -275,6 +290,7 @@ pub const Workspace = struct {
         const result = try first_isolate.execute();
         _ = result;
         std.debug.print("\x1b[32m Done. \x1b[0m\n", .{});
+        return true;
     }
 
     /// submits an imported file to the group for parsing
