@@ -54,7 +54,6 @@ enum_variants   ::= IDENTIFIER (',' IDENTIFIER)* ','?
 statement       ::= expression ';'
                   | block
                   | 'return' expression? ';'
-                  | 'yield' expression? ';'
                   | 'give' expression ';'
                   | 'panic' expression ';'
                   | 'break' ';'
@@ -84,7 +83,7 @@ bit_shift       ::= term (('<<' | '>>') term)*
 term            ::= factor (('-' | '+' | '++') factor)*
 factor          ::= unary (('/' | '*' | '%' | '**') unary)*
 
-unary           ::= ('not' | '-' | '~' | 'resume' | 'try') unary
+unary           ::= ('not' | '-' | '~' | 'resume' | 'try' | 'yield') unary
                   | cast
 
 postfix         ::= primary (

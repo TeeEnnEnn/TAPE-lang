@@ -239,7 +239,7 @@ pub const BindingResolver = struct {
             .co_decl => |decl| try self.resolveCoDecl(node, decl, direct_program_decl, false),
             .block_stmt => try self.resolveBlock(node),
             .return_stmt => |stmt| if (stmt.expr) |expr| try self.resolveNode(expr, false),
-            .yield_stmt => |stmt| if (stmt.expr) |expr| try self.resolveNode(expr, false),
+            .yield_expr => |expr| try self.resolveNode(expr.expr, false),
             .give_stmt => |stmt| try self.resolveNode(stmt.expr, false),
             .break_stmt, .continue_stmt => {},
             .while_stmt => |stmt| {
@@ -282,7 +282,10 @@ pub const BindingResolver = struct {
                 try self.resolve_static_member_expression(node, expr);
             },
             .try_expr => |expr| try self.resolveNode(expr.expr, false),
-            .resume_expr => |expr| try self.resolveNode(expr.expr, false),
+            .resume_expr => |expr| {
+                try self.resolveNode(expr.expr, false);
+                if (expr.arg) |arg| try self.resolveNode(arg, false);
+            },
             .group_expr => |expr| try self.resolveNode(expr.expr, false),
             .tuple_expr => |expr| for (expr.exprs) |child| try self.resolveNode(child, false),
             .table_expr => |expr| {
@@ -714,7 +717,7 @@ pub const BindingResolver = struct {
         var param_types: std.ArrayList(AST.TypeId) = .empty;
         defer param_types.deinit(self.allocator);
         for (decl.params) |param| try param_types.append(self.allocator, try self.registry.resolve(param.type_annotation));
-        return self.registry.add_coroutine_type(try param_types.toOwnedSlice(self.allocator), try self.registry.resolve(decl.return_type_annotation), try self.registry.resolve(decl.yield_type_annotation));
+        return self.registry.add_coroutine_type(try param_types.toOwnedSlice(self.allocator), try self.registry.resolve(decl.yield_type_annotation), try self.registry.resolve(decl.resume_with_type_annotation), try self.registry.resolve(decl.return_type_annotation));
     }
 
     fn import_typeid(self: *BindingResolver, decl: *AST.UseDecl, item: AST.ImportItem) !AST.TypeId {
@@ -798,7 +801,7 @@ fn node_position(node: *AST.ASTNode) NodePosition {
         .use_decl => |v| .{ .line = v.line, .column = v.column },
         .block_stmt => |v| .{ .line = v.line, .column = v.column },
         .return_stmt => |v| .{ .line = v.line, .column = v.column },
-        .yield_stmt => |v| .{ .line = v.line, .column = v.column },
+        .yield_expr => |v| .{ .line = v.line, .column = v.column },
         .give_stmt => |v| .{ .line = v.line, .column = v.column },
         .break_stmt => |v| .{ .line = v.line, .column = v.column },
         .continue_stmt => |v| .{ .line = v.line, .column = v.column },

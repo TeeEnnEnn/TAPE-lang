@@ -152,6 +152,9 @@ pub const ObjectCoroutine = struct {
     closure: *ObjectClosure,
     execution_state: ExecutionState,
     state: CoroutineState,
+    /// Whether the coroutine has been resumed at least once. Until it suspends
+    /// at a yield, resume values have nowhere to go and are discarded.
+    started: bool,
 };
 
 pub const Variant = struct {
@@ -535,6 +538,7 @@ pub fn new_coroutine_object(isolate: *Isolate, closure: *ObjectClosure, max_fram
     const coroutine: *ObjectCoroutine = try isolate.gc.allocate_object(ObjectCoroutine, .ObjectCoroutine);
     coroutine.closure = closure;
     coroutine.state = .SUSPENDED;
+    coroutine.started = false;
     coroutine.execution_state = try ExecutionState.init(isolate.gc.allocator, max_frame_count, stack_size);
 
     return coroutine;

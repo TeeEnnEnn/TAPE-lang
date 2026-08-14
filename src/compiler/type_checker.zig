@@ -75,10 +75,15 @@ pub const TypeChecker = struct {
     expected_return_type: ?AST.TypeId = null,
     expected_give_type: ?AST.TypeId = null,
     expected_yield_type: ?AST.TypeId = null,
+    expected_resume_with_type: ?AST.TypeId = null,
 
     in_loop: bool = false,
     in_coroutine: bool = false,
     in_function: bool = false,
+
+    /// Set whenever a `yield` expression is type-checked so the enclosing
+    /// statement/block can propagate the (existential) yield signal.
+    saw_yield: bool = false,
 
     pub fn init(allocator: std.mem.Allocator, registry: *TypeRegistry.TypeRegistry, global_environment: *Environment, diagnostics: *DiagnosticReporter, module: *Module, workspace: *Workspace) TypeChecker {
         return .{ .allocator = allocator, .registry = registry, .environment = global_environment, .diagnostics = diagnostics, .module = module, .workspace = workspace };
@@ -110,7 +115,8 @@ pub const TypeChecker = struct {
 
         const return_id = try self.registry.resolve(decl.return_type_annotation);
         const yield_id = try self.registry.resolve(decl.yield_type_annotation);
-        const co_id = try self.registry.add_coroutine_type(try param_types.toOwnedSlice(self.allocator), return_id, yield_id);
+        const resume_with_id = try self.registry.resolve(decl.resume_with_type_annotation);
+        const co_id = try self.registry.add_coroutine_type(try param_types.toOwnedSlice(self.allocator), yield_id, resume_with_id, return_id);
         try self.environment.define_binding(decl.name.lexeme, co_id, .{ .node = node }, true);
         return co_id;
     }
@@ -357,6 +363,11 @@ pub const TypeChecker = struct {
                 self.expected_yield_type = type_info.coroutine.yield;
                 defer self.expected_yield_type = prev_yield;
 
+                // track expected resume_with type (the type of the yield expression)
+                const prev_resume_with = self.expected_resume_with_type;
+                self.expected_resume_with_type = type_info.coroutine.resume_with;
+                defer self.expected_resume_with_type = prev_resume_with;
+
                 // Push function scope
                 var local_env = Environment.init(self.allocator, self.environment);
                 defer local_env.deinit();
@@ -424,13 +435,17 @@ pub const TypeChecker = struct {
 
                 var terminated = false;
                 for (stmt.stmts) |child| {
+                    // `yield` is now an expression, so yields nested anywhere in a
+                    // statement (var initializer, condition, call arg, ...) are
+                    // tracked via the saw_yield flag rather than a statement flag.
+                    self.saw_yield = false;
                     const term = try self.check(child);
                     if (terminated) continue; // unreachable code doesn't contribute to termination
                     last.return_ = last.return_ or term.return_;
                     last.panics = last.panics or term.panics;
                     last.break_ = last.break_ or term.break_;
                     last.continue_ = last.continue_ or term.continue_;
-                    last.yield_ = last.yield_ or term.yield_;
+                    last.yield_ = last.yield_ or term.yield_ or self.saw_yield;
                     last.give_ = last.give_ or term.give_;
                     if (term.return_ or term.panics or term.break_ or term.continue_) {
                         terminated = true;
@@ -454,23 +469,6 @@ pub const TypeChecker = struct {
                     return TypeCheckerError.InvalidOperation; // Return outside of function
                 }
                 return .{ .return_ = true };
-            },
-            .yield_stmt => |stmt| {
-                var provided_type = @intFromEnum(PrimitiveType.Nil);
-                if (stmt.expr) |v| {
-                    provided_type = try self.check_expression(v);
-                }
-
-                if (self.expected_yield_type) |expected_type| {
-                    if (!try self.is_compatible(expected_type, provided_type)) {
-                        try self.fail("Type Mismatch", "Yielded value does not match the declared yield type.", stmt.line, stmt.column);
-                        return TypeCheckerError.TypeMismatch;
-                    }
-                } else {
-                    try self.fail("Invalid Operation", "Yield statement used outside of a coroutine.", stmt.line, stmt.column);
-                    return TypeCheckerError.InvalidOperation; // Yield outside of coroutine
-                }
-                return .{ .yield_ = true };
             },
             .give_stmt => |stmt| {
                 const provided_type = try self.check_expression(stmt.expr);
@@ -599,7 +597,8 @@ pub const TypeChecker = struct {
                 }
                 const return_type = try self.registry.resolve(decl.return_type_annotation);
                 const yield_type = try self.registry.resolve(decl.yield_type_annotation);
-                const co_type = try self.registry.add_coroutine_type(try param_types.toOwnedSlice(self.allocator), return_type, yield_type);
+                const resume_with_type = try self.registry.resolve(decl.resume_with_type_annotation);
+                const co_type = try self.registry.add_coroutine_type(try param_types.toOwnedSlice(self.allocator), yield_type, resume_with_type, return_type);
                 return co_type;
             },
             else => {
@@ -722,6 +721,19 @@ pub const TypeChecker = struct {
                     try self.fail("Invalid Operation", "`resume` can only be applied to a coroutine.", expr.line, expr.column);
                     return TypeCheckerError.InvalidOperation;
                 }
+
+                // The value passed in (`resume co with V`) becomes the yield
+                // expression's value, so it must match the resume_with type.
+                // Omitting `with V` passes nil.
+                var resume_value_type = @intFromEnum(PrimitiveType.Nil);
+                if (expr.arg) |arg| {
+                    resume_value_type = try self.check_expression(arg);
+                }
+                if (!try self.is_compatible(type_info.coroutine.resume_with, resume_value_type)) {
+                    try self.fail("Type Mismatch", "Resumed value does not match the coroutine's resume_with type.", expr.line, expr.column);
+                    return TypeCheckerError.TypeMismatch;
+                }
+
                 const union_type = try self.registry.add_union_type(type_info.coroutine.yield, type_info.coroutine.ret);
                 expr.resolved_type = union_type;
                 return union_type;
@@ -940,6 +952,26 @@ pub const TypeChecker = struct {
                     },
                 }
             },
+            .yield_expr => |expr| {
+                const provided_type = try self.check_expression(expr.expr);
+
+                if (self.expected_yield_type) |expected_type| {
+                    if (!try self.is_compatible(expected_type, provided_type)) {
+                        try self.fail("Type Mismatch", "Yielded value does not match the declared yield type.", expr.line, expr.column);
+                        return TypeCheckerError.TypeMismatch;
+                    }
+                } else {
+                    try self.fail("Invalid Operation", "Yield expression used outside of a coroutine.", expr.line, expr.column);
+                    return TypeCheckerError.InvalidOperation; // Yield outside of coroutine
+                }
+
+                // The yield expression's value is whatever the next `resume co with V`
+                // passes in, so its type is the coroutine's resume_with type.
+                expr.resolved_type = self.expected_resume_with_type.?;
+                self.saw_yield = true;
+                if (out_term) |term| term.yield_ = true;
+                return expr.resolved_type;
+            },
             .dot_expr => |expr| {
                 const obj_type = try self.check_expression(expr.expr);
                 const type_info = self.registry.get_type_info(obj_type);
@@ -980,11 +1012,11 @@ pub const TypeChecker = struct {
                     },
                     .coroutine => {
                         // corotines have suspended, finished, and running members - which are boolean values
-                        if (std.mem.eql(u8, expr.member.lexeme, "suspended") or std.mem.eql(u8, expr.member.lexeme, "finished") or std.mem.eql(u8, expr.member.lexeme, "running")) {
+                        if (std.mem.eql(u8, expr.member.lexeme, "suspended") or std.mem.eql(u8, expr.member.lexeme, "finished") or std.mem.eql(u8, expr.member.lexeme, "running") or std.mem.eql(u8, expr.member.lexeme, "started")) {
                             expr.resolved_type = @intFromEnum(PrimitiveType.Bool);
                             return @intFromEnum(PrimitiveType.Bool);
                         } else {
-                            try self.fail("Invalid Member Access", "Coroutines only expose `suspended`, `finished`, and `running` members.", expr.line, expr.column);
+                            try self.fail("Invalid Member Access", "Coroutines only expose `started`, `suspended`, `finished`, and `running` members.", expr.line, expr.column);
                             return TypeCheckerError.InvalidMemberAccess;
                         }
                     },
@@ -1249,6 +1281,7 @@ pub const TypeChecker = struct {
 
                 const ret_typeid = try self.registry.resolve(expr.return_type_annotation);
                 const yield_typeid = try self.registry.resolve(expr.yield_type_annotation);
+                const resume_with_typeid = try self.registry.resolve(expr.resume_with_type_annotation);
 
                 const prev_ret = self.expected_return_type;
                 self.expected_return_type = ret_typeid;
@@ -1258,7 +1291,11 @@ pub const TypeChecker = struct {
                 self.expected_yield_type = yield_typeid;
                 defer self.expected_yield_type = prev_yield;
 
-                const coroutine_typeid = try self.registry.add_coroutine_type(try arg_types.toOwnedSlice(self.allocator), ret_typeid, yield_typeid);
+                const prev_resume_with = self.expected_resume_with_type;
+                self.expected_resume_with_type = resume_with_typeid;
+                defer self.expected_resume_with_type = prev_resume_with;
+
+                const coroutine_typeid = try self.registry.add_coroutine_type(try arg_types.toOwnedSlice(self.allocator), yield_typeid, resume_with_typeid, ret_typeid);
 
                 var local_env = Environment.init(self.allocator, self.environment);
                 defer local_env.deinit();

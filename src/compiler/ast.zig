@@ -37,7 +37,7 @@ pub const ASTNode = union(enum) {
     /// `return value`
     return_stmt: *ReturnStmt,
     /// `yield value`
-    yield_stmt: *YieldStmt,
+    yield_expr: *YieldExpr,
 
     /// `give value`
     give_stmt: *GiveStmt,
@@ -171,6 +171,7 @@ pub const CoDecl = struct {
     params: []*TypedNamedField,
     return_type_annotation: *ASTNode,
     yield_type_annotation: *ASTNode,
+    resume_with_type_annotation: *ASTNode,
     body: *ASTNode,
     line: usize,
     column: usize,
@@ -265,6 +266,7 @@ pub const ReturnStmt = struct {
 /// ```
 pub const ResumeExpr = struct {
     expr: *ASTNode,
+    arg: ?*ASTNode = null,
     resolved_type: TypeId = 0,
     line: usize,
     column: usize,
@@ -287,10 +289,11 @@ pub const TryExpr = struct {
 /// ```
 /// yield ?'expr'
 /// ```
-pub const YieldStmt = struct {
-    expr: ?*ASTNode,
+pub const YieldExpr = struct {
+    expr: *ASTNode,
     line: usize,
     column: usize,
+    resolved_type: TypeId = 0,
 };
 
 /// Give statement node.
@@ -610,6 +613,7 @@ pub const AnonCoExpr = struct {
     params: []*TypedNamedField,
     return_type_annotation: *ASTNode,
     yield_type_annotation: *ASTNode,
+    resume_with_type_annotation: *ASTNode,
     body: *ASTNode,
     resolved_type: TypeId = 0,
     line: usize,
@@ -731,6 +735,7 @@ pub const CoType = struct {
     params: []*ASTNode,
     return_type: *ASTNode,
     yield_type: *ASTNode,
+    resume_with_type: *ASTNode,
 };
 
 pub const IdentifierType = struct {

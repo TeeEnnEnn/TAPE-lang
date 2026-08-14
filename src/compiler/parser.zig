@@ -358,23 +358,40 @@ pub const Parser = struct {
     }
 
     fn parse_unary(self: *Parser) ParserError!*AST.ASTNode {
-        if (self.check(.TILDE) or self.check(.MINUS) or self.check(.NOT) or self.check(.RESUME) or self.check(.TRY)) {
+        if (self.check(.TILDE) or self.check(.MINUS) or self.check(.NOT) or self.check(.RESUME) or self.check(.TRY) or self.check(.YIELD)) {
             const operator = self.current;
             try self.advance();
 
-            // Unaries chain right-to-left
-            const right = try self.parse_unary();
-
             switch (operator.token_type) {
                 .RESUME => {
+                    // Unaries chain right-to-left
+                    const right = try self.parse_unary();
+
                     const resume_node = try self.allocator.create(AST.ResumeExpr);
                     resume_node.* = .{ .expr = right, .line = operator.line, .column = operator.column };
+
+                    if (try self.match(.WITH)) {
+                        resume_node.arg = try self.parse_expression();
+                    }
 
                     const node = try self.allocator.create(AST.ASTNode);
                     node.* = .{ .resume_expr = resume_node };
                     return node;
                 },
+                .YIELD => {
+                    const yield_node = try self.allocator.create(AST.YieldExpr);
+
+                    const yielded_expression = try self.parse_expression();
+                    yield_node.* = .{ .expr = yielded_expression, .line = operator.line, .column = operator.column };
+
+                    const node = try self.allocator.create(AST.ASTNode);
+                    node.* = .{ .yield_expr = yield_node };
+                    return node;
+                },
                 .TRY => {
+                    // Unaries chain right-to-left
+                    const right = try self.parse_unary();
+
                     const try_node = try self.allocator.create(AST.TryExpr);
                     try_node.* = .{ .expr = right, .line = operator.line, .column = operator.column };
 
@@ -384,6 +401,7 @@ pub const Parser = struct {
                 },
                 else => {
                     // standard mathematical/logical unaries (~, -, not)
+                    const right = try self.parse_unary();
                     const unary = try self.allocator.create(AST.UnaryExpr);
                     unary.* = .{ .operator = operator, .expr = right, .line = operator.line, .column = operator.column };
 
@@ -651,11 +669,13 @@ pub const Parser = struct {
         try self.consume(.RIGHT_PAREN, "Expected ')' to end anonymous coroutine parameter list.");
 
         try self.consume(.ARROW, "Expected '->' to separate anonymous coroutine parameter list from return type.");
-        try self.consume(.LEFT_PAREN, "Expected '(' to start anonymous coroutine yield, return type annotation.");
+        try self.consume(.LEFT_PAREN, "Expected '(' to start anonymous coroutine yield, resume_with, return type annotation.");
         const yield_type = try self.parse_type_expression();
-        try self.consume(.COMMA, "Expected ',' to separate yield type from return type.");
+        try self.consume(.COMMA, "Expected ',' to separate yield type from resume_with type.");
+        const resume_with_type = try self.parse_type_expression();
+        try self.consume(.COMMA, "Expected ',' to separate resume_with type from return type.");
         const return_type = try self.parse_type_expression();
-        try self.consume(.RIGHT_PAREN, "Expected ')' to end anonymous coroutine yield, return type annotation.");
+        try self.consume(.RIGHT_PAREN, "Expected ')' to end anonymous coroutine yield, resume_with, return type annotation.");
 
         const body = try self.parse_statement();
 
@@ -664,6 +684,7 @@ pub const Parser = struct {
             .params = try params.toOwnedSlice(self.allocator),
             .return_type_annotation = return_type,
             .yield_type_annotation = yield_type,
+            .resume_with_type_annotation = resume_with_type,
             .body = body,
             .line = self.previous.line,
             .column = self.previous.column,
@@ -771,12 +792,14 @@ pub const Parser = struct {
             try self.consume(.CO, "Expected 'co' to start coroutine type.");
             try self.consume(.LEFT_SQUARE, "Expected '[' to start coroutine type return type.");
             const yield_type = try self.parse_type_expression();
-            try self.consume(.COMMA, "Expected ',' to separate coroutine type return type and yield type.");
+            try self.consume(.COMMA, "Expected ',' to separate coroutine type yield type and resume_with type.");
+            const resume_with_type = try self.parse_type_expression();
+            try self.consume(.COMMA, "Expected ',' to separate coroutine type resume_with type and return type.");
             const return_type = try self.parse_type_expression();
             try self.consume(.RIGHT_SQUARE, "Expected ']' to end coroutine type return type.");
 
             const co_type = try self.allocator.create(AST.CoType);
-            co_type.* = .{ .params = try params.toOwnedSlice(self.allocator), .return_type = return_type, .yield_type = yield_type };
+            co_type.* = .{ .params = try params.toOwnedSlice(self.allocator), .return_type = return_type, .yield_type = yield_type, .resume_with_type = resume_with_type };
             const node = try self.allocator.create(AST.ASTNode);
             node.* = .{ .co_type = co_type };
             left = node;
@@ -1051,11 +1074,13 @@ pub const Parser = struct {
         try self.consume(.RIGHT_PAREN, "Expected ')' to end coroutine parameters.");
 
         try self.consume(.ARROW, "Expected '->' to separate parameters from return type.");
-        try self.consume(.LEFT_PAREN, "Expected '(' to start coroutine yield, return type.");
+        try self.consume(.LEFT_PAREN, "Expected '(' to start coroutine yield, resume_with, return type.");
         const yield_type = try self.parse_type_expression();
-        try self.consume(.COMMA, "Expected ',' to separate yield type from return type.");
+        try self.consume(.COMMA, "Expected ',' to separate yield type from resume_with type.");
+        const resume_with_type = try self.parse_type_expression();
+        try self.consume(.COMMA, "Expected ',' to separate resume_with type from return type.");
         const return_type = try self.parse_type_expression();
-        try self.consume(.RIGHT_PAREN, "Expected ')' to end coroutine yield, return type.");
+        try self.consume(.RIGHT_PAREN, "Expected ')' to end coroutine yield, resume_with, return type.");
 
         const body = try self.parse_statement();
 
@@ -1066,6 +1091,7 @@ pub const Parser = struct {
             .params = params.items,
             .modifier_static = is_static,
             .yield_type_annotation = yield_type,
+            .resume_with_type_annotation = resume_with_type,
             .return_type_annotation = return_type,
             .body = body,
             .line = name.line,
@@ -1263,30 +1289,6 @@ pub const Parser = struct {
 
         const node = try self.allocator.create(AST.ASTNode);
         node.* = .{ .give_stmt = give_stmt };
-        return node;
-    }
-
-    fn parse_yield_statement(self: *Parser) ParserError!*AST.ASTNode {
-        const expr = try self.parse_expression();
-        try self.consume(.SEMICOLON, "Expected ';' to end yield statement.");
-
-        const yield_stmt = try self.allocator.create(AST.YieldStmt);
-        yield_stmt.* = .{ .expr = expr, .line = self.previous.line, .column = self.previous.column };
-
-        const node = try self.allocator.create(AST.ASTNode);
-        node.* = .{ .yield_stmt = yield_stmt };
-        return node;
-    }
-
-    fn parse_resume_expression(self: *Parser) ParserError!*AST.ASTNode {
-        const expr = try self.parse_expression();
-        try self.consume(.SEMICOLON, "Expected ';' to end resume expression.");
-
-        const resume_expr = try self.allocator.create(AST.ResumeExpr);
-        resume_expr.* = .{ .expr = expr, .line = self.previous.line, .column = self.previous.column };
-
-        const node = try self.allocator.create(AST.ASTNode);
-        node.* = .{ .resume_expr = resume_expr };
         return node;
     }
 
@@ -1524,8 +1526,6 @@ pub const Parser = struct {
             return try self.parse_while_statement();
         } else if (try self.match(.RETURN)) {
             return try self.parse_return_statement();
-        } else if (try self.match(.YIELD)) {
-            return try self.parse_yield_statement();
         } else if (try self.match(.GIVE)) {
             return try self.parse_give_statement();
         } else if (try self.match(.BREAK)) {

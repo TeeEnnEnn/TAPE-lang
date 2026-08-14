@@ -39,7 +39,7 @@ pub const TypeInfo = union(enum) {
     range: struct { start: TypeId, end: TypeId },
     table: struct { key: TypeId, value: TypeId },
     function: struct { args: []TypeId, ret: TypeId },
-    coroutine: struct { args: []TypeId, ret: TypeId, yield: TypeId },
+    coroutine: struct { args: []TypeId, ret: TypeId, yield: TypeId, resume_with: TypeId },
     _union: struct { left: TypeId, right: TypeId },
     _error: struct { name: []const u8, variants: [][]const u8, source_file: []const u8 },
     _enum: struct { name: []const u8, variants: [][]const u8, source_file: []const u8 },
@@ -69,6 +69,25 @@ pub const TypeRegistry = struct {
     }
 
     pub fn deinit(self: *TypeRegistry) void {
+        // Free the heap-allocated slices owned by each type entry. Name and
+        // source_file slices point into the module's arena and are not freed.
+        for (self.types.items) |info| {
+            switch (info) {
+                .tuple => |elements| self.allocator.free(elements),
+                .function => |f| self.allocator.free(f.args),
+                .coroutine => |c| self.allocator.free(c.args),
+                .identifier => |id_info| {
+                    if (id_info.generics) |generics| self.allocator.free(generics);
+                },
+                ._struct => |s| {
+                    self.allocator.free(s.fields);
+                    self.allocator.free(s.methods);
+                },
+                ._error => |e| self.allocator.free(e.variants),
+                ._enum => |e| self.allocator.free(e.variants),
+                else => {},
+            }
+        }
         self.types.deinit(self.allocator);
     }
 
@@ -126,7 +145,8 @@ pub const TypeRegistry = struct {
                 }
                 const ret_id = try self.resolve(co.return_type);
                 const yield_id = try self.resolve(co.yield_type);
-                return try self.add_coroutine_type(try arg_ids.toOwnedSlice(self.allocator), ret_id, yield_id);
+                const resume_with_id = try self.resolve(co.resume_with_type);
+                return try self.add_coroutine_type(try arg_ids.toOwnedSlice(self.allocator), yield_id, resume_with_id, ret_id);
             },
             .range_type => |range| {
                 const start_id = try self.resolve(range.start);
@@ -197,6 +217,7 @@ pub const TypeRegistry = struct {
             switch (info) {
                 .tuple => |existing_elements| {
                     if (std.mem.eql(TypeId, existing_elements, elements)) {
+                        self.allocator.free(elements);
                         return @as(TypeId, @intCast(index));
                     }
                 },
@@ -219,6 +240,7 @@ pub const TypeRegistry = struct {
             switch (info) {
                 .function => |f| {
                     if (std.mem.eql(TypeId, f.args, args) and f.ret == ret) {
+                        self.allocator.free(args);
                         return @as(TypeId, @intCast(index));
                     }
                 },
@@ -232,11 +254,12 @@ pub const TypeRegistry = struct {
         return id;
     }
 
-    pub fn add_coroutine_type(self: *TypeRegistry, args: []TypeId, ret: TypeId, yield: TypeId) std.mem.Allocator.Error!TypeId {
+    pub fn add_coroutine_type(self: *TypeRegistry, args: []TypeId, yield: TypeId, resume_with: TypeId, ret: TypeId) std.mem.Allocator.Error!TypeId {
         for (self.types.items, 0..) |info, index| {
             switch (info) {
                 .coroutine => |c| {
-                    if (std.mem.eql(TypeId, c.args, args) and c.ret == ret and c.yield == yield) {
+                    if (std.mem.eql(TypeId, c.args, args) and c.yield == yield and c.resume_with == resume_with and c.ret == ret) {
+                        self.allocator.free(args);
                         return @as(TypeId, @intCast(index));
                     }
                 },
@@ -246,7 +269,7 @@ pub const TypeRegistry = struct {
 
         // add new type
         const id = @as(TypeId, @intCast(self.types.items.len));
-        try self.types.append(self.allocator, .{ .coroutine = .{ .args = args, .ret = ret, .yield = yield } });
+        try self.types.append(self.allocator, .{ .coroutine = .{ .args = args, .yield = yield, .resume_with = resume_with, .ret = ret } });
         return id;
     }
 
@@ -278,6 +301,7 @@ pub const TypeRegistry = struct {
                         else
                             (generics == null);
                         if (generics_match) {
+                            if (generics) |gen| self.allocator.free(gen);
                             return @as(TypeId, @intCast(index));
                         }
                     }
@@ -336,6 +360,8 @@ pub const TypeRegistry = struct {
                 ._struct => |existing_struct| {
                     if (!std.mem.eql(u8, existing_struct.name, name) or !std.mem.eql(u8, existing_struct.source_file, source_file)) continue;
                     if (existing_struct.fields.len != fields.len or existing_struct.methods.len != methods.len) {
+                        self.allocator.free(fields);
+                        self.allocator.free(methods);
                         return TypeRegistryError.TypeResolutionConflict; // names are the same but the number of fields or methods differ
                     }
 
@@ -352,7 +378,11 @@ pub const TypeRegistry = struct {
                             break;
                         }
                     }
-                    if (match) return @as(TypeId, @intCast(index));
+                    if (match) {
+                        self.allocator.free(fields);
+                        self.allocator.free(methods);
+                        return @as(TypeId, @intCast(index));
+                    }
                 },
                 else => continue,
             }
@@ -370,6 +400,7 @@ pub const TypeRegistry = struct {
                 ._error => |existing_error| {
                     if (!std.mem.eql(u8, existing_error.name, name) or !std.mem.eql(u8, existing_error.source_file, source_file)) continue;
                     if (existing_error.variants.len != variants.len) {
+                        self.allocator.free(variants);
                         return TypeRegistryError.TypeResolutionConflict; // names are the same but the number of variants differ
                     }
 
@@ -380,7 +411,10 @@ pub const TypeRegistry = struct {
                             break;
                         }
                     }
-                    if (match) return @as(TypeId, @intCast(index));
+                    if (match) {
+                        self.allocator.free(variants);
+                        return @as(TypeId, @intCast(index));
+                    }
                 },
                 else => continue,
             }
@@ -398,6 +432,7 @@ pub const TypeRegistry = struct {
                 ._enum => |existing_enum| {
                     if (!std.mem.eql(u8, existing_enum.name, name) or !std.mem.eql(u8, existing_enum.source_file, source_file)) continue;
                     if (existing_enum.variants.len != variants.len) {
+                        self.allocator.free(variants);
                         return TypeRegistryError.TypeResolutionConflict; // names are the same but the number of variants differ
                     }
 
@@ -408,7 +443,10 @@ pub const TypeRegistry = struct {
                             break;
                         }
                     }
-                    if (match) return @as(TypeId, @intCast(index));
+                    if (match) {
+                        self.allocator.free(variants);
+                        return @as(TypeId, @intCast(index));
+                    }
                 },
                 else => continue,
             }

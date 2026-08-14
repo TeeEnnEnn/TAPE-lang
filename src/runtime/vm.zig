@@ -875,6 +875,7 @@ pub const Isolate = struct {
                 },
 
                 .OP_RESUME => {
+                    const resume_value = try self.pop_value();
                     const coroutine_value = try self.pop_value();
                     const coroutine_object: *Entities.ObjectCoroutine = switch (coroutine_value) {
                         .object => |obj| switch (obj.object_type) {
@@ -890,6 +891,14 @@ pub const Isolate = struct {
                     const prev_execution_state = self.current;
                     self.current = &coroutine_object.execution_state;
                     coroutine_object.state = .RUNNING;
+
+                    // Before the first resume the resume value is discarded.
+                    // once started it feeds yield
+                    if (coroutine_object.started) {
+                        try self.push_value(resume_value);
+                    } else {
+                        coroutine_object.started = true;
+                    }
 
                     const result = self.execution_loop(); // resume execution where you left off
                     self.current = prev_execution_state;

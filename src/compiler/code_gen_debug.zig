@@ -53,7 +53,7 @@ pub const ChunkDisassembler = struct {
     fn disassemble_call_instruction(chunk: *Chunk, offset: usize) usize {
         const opcode: Opcode = @enumFromInt(chunk.code.items[offset]);
         const param_count = read_u16(chunk, offset + 1);
-        std.debug.print("{s} - {d} params\n", .{ @tagName(opcode), param_count });
+        std.debug.print("{s} - {d} param(s)\n", .{ @tagName(opcode), param_count });
         return offset + 1 + 2; // +1 for opcode +2 for u16 param_count
     }
 

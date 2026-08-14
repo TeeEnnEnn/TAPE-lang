@@ -112,6 +112,7 @@ pub fn print_node(node: *AST.ASTNode, depth: usize, indent_amt: usize) void {
             }
             print_node(co_decl.return_type_annotation, depth + 1, indent_amt);
             print_node(co_decl.yield_type_annotation, depth + 1, indent_amt);
+            print_node(co_decl.resume_with_type_annotation, depth + 1, indent_amt);
             print_node(co_decl.body, depth + 1, indent_amt);
         },
         .use_decl => |use_decl| {
@@ -140,6 +141,7 @@ pub fn print_node(node: *AST.ASTNode, depth: usize, indent_amt: usize) void {
             }
             print_node(co_expr.return_type_annotation, depth + 1, indent_amt);
             print_node(co_expr.yield_type_annotation, depth + 1, indent_amt);
+            print_node(co_expr.resume_with_type_annotation, depth + 1, indent_amt);
             print_node(co_expr.body, depth + 1, indent_amt);
         },
         .anon_fn_expr => |fn_expr| {
@@ -226,6 +228,9 @@ pub fn print_node(node: *AST.ASTNode, depth: usize, indent_amt: usize) void {
             indent(depth + 1, indent_amt);
             std.debug.print("yield_type:\n", .{});
             print_node(co_type.yield_type, depth + 2, indent_amt);
+            indent(depth + 1, indent_amt);
+            std.debug.print("resume_with_type:\n", .{});
+            print_node(co_type.resume_with_type, depth + 2, indent_amt);
         },
         .default_pat => {
             std.debug.print("DefaultPat:\n", .{});
@@ -367,6 +372,11 @@ pub fn print_node(node: *AST.ASTNode, depth: usize, indent_amt: usize) void {
             write_location(resume_expr.line, resume_expr.column);
             std.debug.print("\n", .{});
             print_node(resume_expr.expr, depth + 1, indent_amt);
+            if (resume_expr.arg) |arg| {
+                indent(depth + 1, indent_amt);
+                std.debug.print("with:\n", .{});
+                print_node(arg, depth + 2, indent_amt);
+            }
         },
         .return_stmt => |return_stmt| {
             std.debug.print("ReturnStmt:", .{});
@@ -446,13 +456,12 @@ pub fn print_node(node: *AST.ASTNode, depth: usize, indent_amt: usize) void {
             print_node(while_stmt.condition, depth + 1, indent_amt);
             print_node(while_stmt.body, depth + 1, indent_amt);
         },
-        .yield_stmt => |yield_stmt| {
-            std.debug.print("YieldStmt:", .{});
-            write_location(yield_stmt.line, yield_stmt.column);
+        .yield_expr => |yield_expr| {
+            std.debug.print("YieldExpr:", .{});
+            write_location(yield_expr.line, yield_expr.column);
             std.debug.print("\n", .{});
-            if (yield_stmt.expr) |expr| {
-                print_node(expr, depth + 1, indent_amt);
-            }
+
+            print_node(yield_expr.expr, depth + 1, indent_amt);
         },
     }
 }

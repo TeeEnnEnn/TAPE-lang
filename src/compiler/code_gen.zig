@@ -222,15 +222,6 @@ pub const CodeGenerator = struct {
                 return CodeGeneratorError.UnsupportedNode;
             },
 
-            .yield_stmt => |stmt| {
-                if (stmt.expr) |expression| {
-                    try self.generate_expression(expression);
-                } else {
-                    try self.current.chunk().write_opcode(.OP_NIL, stmt.line);
-                }
-                try self.current.chunk().write_opcode(.OP_YIELD, stmt.line);
-            },
-
             .give_stmt => |stmt| {
                 _ = stmt;
                 // TODO: give statement
@@ -420,6 +411,12 @@ pub const CodeGenerator = struct {
             .unary_expr => |expr| try self.generate_unary_expression(expr),
             .binary_expr => |expr| try self.generate_binary_expr(expr),
             .resume_expr => |expr| try self.generate_resume_expression(expr),
+            .yield_expr => |expr| {
+                try self.generate_expression(expr.expr);
+                // Pops the yielded value; the next `resume co with V` pushes the
+                // yield expression's value back onto the coroutine's stack.
+                try self.current.chunk().write_opcode(.OP_YIELD, expr.line);
+            },
             .identifier_expr => |expr| try self.generate_identifier_expr(node, expr),
             .assign_expr => |expr| try self.generate_assignment_expression(expr),
             .call_expr => |expr| {
@@ -567,6 +564,11 @@ pub const CodeGenerator = struct {
 
     fn generate_resume_expression(self: *CodeGenerator, expr: *AST.ResumeExpr) CodeGeneratorError!void {
         try self.generate_expression(expr.expr); // should be a call expression
+        if (expr.arg) |arg| {
+            try self.generate_expression(arg);
+        } else {
+            try self.current.chunk().write_opcode(.OP_NIL, expr.line);
+        }
         try self.current.chunk().write_opcode(.OP_RESUME, expr.line);
     }
 

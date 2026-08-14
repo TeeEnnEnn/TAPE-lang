@@ -19,7 +19,7 @@ test "values_equal different types" {
     try std.testing.expect(!result);
 }
 
-test "tableSet tableGet and tableDelete use open addressing" {
+test "table_set table_get and table_delete use open addressing" {
     const allocator = std.testing.allocator;
     var workspace = Workspace.init(allocator, std.testing.io);
     defer workspace.deinit();
@@ -28,20 +28,20 @@ test "tableSet tableGet and tableDelete use open addressing" {
     defer vm.deinit();
 
     const isolate = try vm.new_isolate();
-    const table = try Entities.newTableObject(isolate, 0);
+    const table = try Entities.new_table_object(isolate);
     try isolate.push_value(.{ .object = &table.header });
 
-    _ = try Entities.tableSet(isolate, table, .{ .int = 0 }, .{ .int = 10 });
-    _ = try Entities.tableSet(isolate, table, .{ .int = 8 }, .{ .int = 20 });
-    _ = try Entities.tableSet(isolate, table, .{ .int = 0 }, .{ .int = 30 });
+    _ = try Entities.table_set(isolate, table, .{ .int = 0 }, .{ .int = 10 });
+    _ = try Entities.table_set(isolate, table, .{ .int = 8 }, .{ .int = 20 });
+    _ = try Entities.table_set(isolate, table, .{ .int = 0 }, .{ .int = 30 });
 
-    try std.testing.expectEqual(@as(i64, 30), (try Entities.tableGet(table, .{ .int = 0 })).?.int);
-    try std.testing.expectEqual(@as(i64, 20), (try Entities.tableGet(table, .{ .int = 8 })).?.int);
+    try std.testing.expectEqual(@as(i64, 30), (try Entities.table_get(table, .{ .int = 0 })).?.int);
+    try std.testing.expectEqual(@as(i64, 20), (try Entities.table_get(table, .{ .int = 8 })).?.int);
 
-    try std.testing.expect(try Entities.tableDelete(table, .{ .int = 0 }));
-    try std.testing.expect((try Entities.tableGet(table, .{ .int = 0 })) == null);
-    try std.testing.expectEqual(@as(i64, 20), (try Entities.tableGet(table, .{ .int = 8 })).?.int);
+    try std.testing.expect(try Entities.table_delete(table, .{ .int = 0 }));
+    try std.testing.expect((try Entities.table_get(table, .{ .int = 0 })) == null);
+    try std.testing.expectEqual(@as(i64, 20), (try Entities.table_get(table, .{ .int = 8 })).?.int);
 
-    _ = try Entities.tableSet(isolate, table, .{ .int = 16 }, .{ .int = 40 });
-    try std.testing.expectEqual(@as(i64, 40), (try Entities.tableGet(table, .{ .int = 16 })).?.int);
+    _ = try Entities.table_set(isolate, table, .{ .int = 16 }, .{ .int = 40 });
+    try std.testing.expectEqual(@as(i64, 40), (try Entities.table_get(table, .{ .int = 16 })).?.int);
 }

@@ -172,6 +172,8 @@ pub const TokenType = enum {
     RESUME,
     /// 'try'
     TRY,
+    /// 'with'
+    WITH,
 
     /// 'Nil'
     NIL_TYPE,
@@ -408,7 +410,11 @@ pub const Scanner = struct {
                 } else .IDENTIFIER,
                 else => .IDENTIFIER,
             } else .IDENTIFIER,
-            'w' => self.check_keyword(1, "hile", .WHILE),
+            'w' => if (len > 1) switch (source[1]) {
+                'h' => self.check_keyword(2, "ile", .WHILE),
+                'i' => self.check_keyword(2, "th", .WITH),
+                else => .IDENTIFIER,
+            } else .IDENTIFIER,
             'v' => self.check_keyword(1, "ar", .VAR),
             'y' => self.check_keyword(1, "ield", .YIELD),
             't' => if (len > 1) switch (source[1]) {

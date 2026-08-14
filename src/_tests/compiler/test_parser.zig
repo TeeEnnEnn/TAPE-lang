@@ -262,7 +262,7 @@ test "Parser can parse coroutine" {
     defer arena.deinit();
     const allocator = arena.allocator();
 
-    const source = "co test() -> (Nil, Nil) {}";
+    const source = "co test() -> (Nil, Nil, Nil) {}";
     const node = try parseFirstDecl(allocator, source);
 
     try std.testing.expect(node.* == .co_decl);
