@@ -9,6 +9,7 @@ pub const EnvironmentError = error{
     UndefinedSymbol,
 } || std.mem.Allocator.Error;
 
+// TODO: add is_pub to track whether a symbol is public
 pub const SymbolInfo = struct {
     type_id: TypeId,
     decl: ?DeclRef = null,

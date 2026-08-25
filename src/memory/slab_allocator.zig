@@ -44,7 +44,7 @@ pub const SlabAllocator = struct {
             var curr = self.slab_head;
             while (curr) |node| {
                 curr = node.next;
-                const base: [*]u8 = @ptrCast(node);
+                const base: [*]align(@alignOf(SlabNode)) u8 = @ptrCast(node);
                 const slice = base[0 .. header_size + memory_size];
                 self.allocator.free(slice);
             }
@@ -56,8 +56,8 @@ pub const SlabAllocator = struct {
         const header_size: usize = @sizeOf(SlabNode);
         const memory_size: usize = self.slot_size * self.capacity;
 
-        const new_slab = try self.allocator.alloc(u8, header_size + memory_size);
-        const node: *SlabNode = @ptrCast(@alignCast(new_slab.ptr));
+        const new_slab = try self.allocator.alignedAlloc(u8, std.mem.Alignment.of(SlabNode), header_size + memory_size);
+        const node: *SlabNode = @ptrCast(new_slab.ptr);
 
         node.next = self.slab_head;
         self.slab_head = node;

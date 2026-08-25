@@ -33,6 +33,7 @@ pub const RuntimePanic = error{
     InvalidValue,
     FinishedCoroutineResumption,
     CoroutineAlreadyRunning,
+    Panic,
 };
 
 /// Represents the virtual machine - the orchestrator of execution.
@@ -136,8 +137,16 @@ pub const Isolate = struct {
         // mark open upvalues
         var upvalue = isolate.execution_state.open_upvalues;
         while (upvalue) |uv| {
-            Entities.mark_value(gc, .{ .object = &uv.header }) catch {};
+            Entities.mark_value(gc, .{ .object = &uv.header }) catch {
+                isolate.vm.workspace.diagnostics.add_diagnostic(.{ .column = 0, .line = 0, .severity = .Error, .message = "Failed to mark value", .stage = .Execution, .file_path = "", .hint = "This is an internal error. Please report it to the TAPE-lang team." }) catch {};
+            };
             upvalue = uv.next;
+        }
+
+        for (0..isolate.function_constants.items.len) |index| {
+            Entities.mark_value(gc, isolate.function_constants.items[index]) catch {
+                isolate.vm.workspace.diagnostics.add_diagnostic(.{ .column = 0, .line = 0, .severity = .Error, .message = "Failed to mark value", .stage = .Execution, .file_path = "", .hint = "This is an internal error. Please report it to the TAPE-lang team." }) catch {};
+            };
         }
     }
 
@@ -938,6 +947,62 @@ pub const Isolate = struct {
                     } else {
                         upvalue.location.* = try self.peek_value(0);
                     }
+                },
+
+                .OP_STRUCT => {
+                    const type_id = frame.read_u32();
+                    const field_count = frame.read_u16();
+
+                    const instance = try self.gc.allocate_object(Entities.ObjectStructInstance, .ObjectStructInstance);
+                    instance.type_id = type_id;
+                    instance.fields = try self.gc.managed_allocator.allocator().alloc(TapeValue, field_count);
+
+                    var i: usize = field_count;
+                    while (i > 0) {
+                        i -= 1;
+                        instance.fields[i] = try self.pop_value();
+                    }
+
+                    try self.push_value(.{ .object = &instance.header });
+                },
+
+                .OP_GET_FIELD => {
+                    const index = frame.read_u16();
+                    const struct_val = try self.pop_value();
+                    const instance = Entities.object_as(Entities.ObjectStructInstance, struct_val.object);
+
+                    try self.push_value(instance.fields[index]);
+                },
+
+                .OP_SET_FIELD => {
+                    const index = frame.read_u16();
+                    const new_val = try self.pop_value();
+                    const struct_val = try self.pop_value();
+                    const instance = Entities.object_as(Entities.ObjectStructInstance, struct_val.object);
+
+                    instance.fields[index] = new_val;
+                    try self.push_value(new_val); // Assignment expression evaluates to the assigned value
+                },
+
+                .OP_DUP => {
+                    const top = try self.peek_value(0);
+                    try self.push_value(top);
+                },
+
+                .OP_PANIC => {
+                    const val = try self.pop_value();
+                    std.debug.print("PANIC: ", .{});
+                    Entities.print_value(val);
+                    std.debug.print("\n", .{});
+                    self.vm.workspace.diagnostics.add_diagnostic(.{
+                        .file_path = "",
+                        .line = 0,
+                        .column = 0,
+                        .stage = .Execution,
+                        .severity = .Error,
+                        .message = "panic",
+                    }) catch {};
+                    return RuntimePanic.Panic;
                 },
             }
         }

@@ -34,6 +34,12 @@ pub const ChunkDisassembler = struct {
         return (high << 8) | low;
     }
 
+    fn read_u32(chunk: *Chunk, offset: usize) u32 {
+        const high: u32 = read_u16(chunk, offset);
+        const low: u32 = read_u16(chunk, offset + 2);
+        return (high << 16) | low;
+    }
+
     fn disassemble_simple_instruction(chunk: *Chunk, offset: usize) usize {
         const opcode: Opcode = @enumFromInt(chunk.code.items[offset]);
         std.debug.print("{s}\n", .{@tagName(opcode)});
@@ -82,6 +88,15 @@ pub const ChunkDisassembler = struct {
         const arg_count = read_u16(chunk, offset + 1);
         std.debug.print("{s}  {} args\n", .{ @tagName(opcode), arg_count });
         return offset + 3;
+    }
+
+    fn disassemble_struct_instruction(chunk: *Chunk, offset: usize) usize {
+        // opcode, typeid, field_count
+        const opcode: Opcode = @enumFromInt(chunk.code.items[offset]);
+        const type_id = read_u32(chunk, offset + 1);
+        const arg_count = read_u16(chunk, offset + 5);
+        std.debug.print("{s} - type_id: {d} - {} args\n", .{ @tagName(opcode), type_id, arg_count });
+        return offset + 7;
     }
 
     pub fn disassemble_chunk(chunk: *Chunk, offset: usize) usize {
@@ -158,6 +173,8 @@ pub const ChunkDisassembler = struct {
             .OP_INDEX_TABLE,
             .OP_RESUME,
             .OP_YIELD,
+            .OP_DUP,
+            .OP_PANIC,
             => {
                 return disassemble_simple_instruction(chunk, offset);
             },
@@ -176,6 +193,8 @@ pub const ChunkDisassembler = struct {
             .OP_LOAD_FUNCTION_CONSTANT,
             .OP_LOAD_UPVALUE,
             .OP_STORE_UPVALUE,
+            .OP_GET_FIELD,
+            .OP_SET_FIELD,
             => {
                 return disassemble_load_store_instruction(chunk, offset);
             },
@@ -198,6 +217,10 @@ pub const ChunkDisassembler = struct {
 
             .OP_ARRAY, .OP_TABLE, .OP_TUPLE => {
                 return disassemble_object_inline_arg_instruction(chunk, offset);
+            },
+
+            .OP_STRUCT => {
+                return disassemble_struct_instruction(chunk, offset);
             },
         }
     }

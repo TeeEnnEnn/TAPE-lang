@@ -70,7 +70,15 @@ pub const CodeGenerator = struct {
     /// The module being compiled
     module: *Module,
 
-    pub fn init(allocator: std.mem.Allocator, isolate: *Runtime.Isolate, binding_resolution: *const BindingResolver.BindingResolution, registry: *TypeRegistry.TypeRegistry, node: *AST.ASTNode, diagnostics: *DiagnosticReporter, module: *Module) !CodeGenerator {
+    pub fn init(
+        allocator: std.mem.Allocator,
+        isolate: *Runtime.Isolate,
+        binding_resolution: *const BindingResolver.BindingResolution,
+        registry: *TypeRegistry.TypeRegistry,
+        node: *AST.ASTNode,
+        diagnostics: *DiagnosticReporter,
+        module: *Module,
+    ) !CodeGenerator {
         return .{
             .allocator = allocator,
             .isolate = isolate,
@@ -151,6 +159,9 @@ pub const CodeGenerator = struct {
             },
             .co_decl => |decl| {
                 try self.generate_callable_decl(node, @ptrCast(decl), AST.CoDecl);
+            },
+            .struct_decl => |decl| {
+                try self.generate_struct_decl(node, decl);
             },
             .enum_decl => {
                 // nothing to do - fully comptime
@@ -243,16 +254,52 @@ pub const CodeGenerator = struct {
                 return CodeGeneratorError.UnsupportedNode;
             },
             .panic_stmt => |stmt| {
-                _ = stmt;
-                // TODO: panic statement
-                self.fail("Unsupported node type in code generation.", "This node type is not yet implemented for bytecode emission.", 0, 0);
-                return CodeGeneratorError.UnsupportedNode;
+                try self.generate_expression(stmt.expr);
+                try self.current.chunk().write_opcode(.OP_PANIC, stmt.line);
             },
 
             else => {
                 self.fail("Unsupported node type in code generation.", "This node type is not yet implemented for bytecode emission.", 0, 0);
                 return CodeGeneratorError.UnsupportedNode;
             },
+        }
+    }
+
+    fn generate_struct_decl(self: *CodeGenerator, node: *AST.ASTNode, decl: *AST.StructDecl) CodeGeneratorError!void {
+        for (decl.methods) |method| {
+            switch (method.method.*) {
+                .fn_decl => try self.generate_callable_decl(method.method, @ptrCast(method.method.fn_decl), AST.FnDecl),
+                .co_decl => try self.generate_callable_decl(method.method, @ptrCast(method.method.co_decl), AST.CoDecl),
+                else => return CodeGeneratorError.UnsupportedNode,
+            }
+        }
+        // TODO: public visibility for static fields
+        const struct_type = self.binding_resolution.declaration_bindings.get(.{ .node = node }) orelse {
+            // struct itself is comptime, but we need its type id to find static fields
+            // If missing, nothing to init
+            return;
+        };
+
+        const type_id = struct_type.type_id;
+        const type_info = self.registry.get_type_info(type_id);
+
+        if (type_info != ._struct) return;
+
+        // handle static fields -  storing them as globals
+        for (type_info._struct.fields, 0..) |field, idx| {
+            if (!field.is_static) continue;
+            // static fields must always have a default value
+            const default_val = field.default_value orelse continue;
+            // Lookup global slot for this static field
+            const ref: AST.DeclRef = .{ .static_field = .{ .type_id = type_id, .index = @intCast(idx) } };
+            const binding = self.binding_resolution.declaration_bindings.get(ref) orelse {
+                self.fail("Missing binding for static field initializer.", null, decl.line, decl.column);
+                return CodeGeneratorError.MissingBinding;
+            };
+            try self.generate_expression(default_val);
+            try self.current.chunk().write_opcode(.OP_STORE_GLOBAL, decl.line);
+            try self.current.chunk().write_u16(binding.slot, decl.line);
+            try self.current.chunk().write_opcode(.OP_POP, decl.line);
         }
     }
 
@@ -420,6 +467,39 @@ pub const CodeGenerator = struct {
             .identifier_expr => |expr| try self.generate_identifier_expr(node, expr),
             .assign_expr => |expr| try self.generate_assignment_expression(expr),
             .call_expr => |expr| {
+                // instance method call
+                if (expr.expr.* == .dot_expr) {
+                    if (self.binding_resolution.member_infos.get(expr.expr)) |member_info| {
+                        if (member_info == .method) {
+                            const method_slot = member_info.method.index;
+                            const dot = expr.expr.dot_expr;
+
+                            try self.current.chunk().write_opcode(.OP_LOAD_FUNCTION_CONSTANT, expr.line);
+                            try self.current.chunk().write_u16(method_slot, expr.line);
+
+                            // Push `self` - evaluate the receiver
+                            try self.generate_expression(dot.expr);
+
+                            for (expr.args) |arg| {
+                                try self.generate_expression(arg);
+                            }
+
+                            const indexed_type = resolve_typeof(expr.expr);
+                            const opcode: Opcode = switch (self.registry.get_type_info(indexed_type)) {
+                                .function => .OP_CALL,
+                                .coroutine => .OP_COROUTINE,
+                                else => return CodeGeneratorError.UnsupportedOperandType,
+                            };
+
+                            // args + 1 for self
+                            try self.current.chunk().write_opcode(opcode, expr.line);
+                            try self.current.chunk().write_u16(@intCast(expr.args.len + 1), expr.line);
+                            return;
+                        }
+                    }
+                }
+
+                // Regular function call
                 try self.generate_expression(expr.expr); // the closure
                 for (expr.args) |arg| {
                     try self.generate_expression(arg);
@@ -459,6 +539,11 @@ pub const CodeGenerator = struct {
                         try self.current.chunk().write_opcode(.OP_INDEX_TUPLE, expr.line);
                         try self.current.chunk().write_u16(tuple_index.index, expr.line);
                     },
+                    .field => |field_index| {
+                        try self.generate_expression(expr.expr);
+                        try self.current.chunk().write_opcode(.OP_GET_FIELD, expr.line);
+                        try self.current.chunk().write_u16(field_index.index, expr.line);
+                    },
                     else => return CodeGeneratorError.UnsupportedNode,
                 }
             },
@@ -470,12 +555,12 @@ pub const CodeGenerator = struct {
                 const member_info = self.binding_resolution.member_infos.get(node) orelse return self.fail("Missing binding for static member.", "This is an internal error, please leave a bug report.", expr.line, expr.column);
                 switch (member_info) {
                     .static_field => |field| {
-                        _ = field;
-                        self.fail("Unsupported expression type in code generation.", "This expression type is not yet implemented.", expr.line, expr.column);
+                        try self.current.chunk().write_opcode(.OP_LOAD_GLOBAL, expr.line);
+                        try self.current.chunk().write_u16(field.index, expr.line);
                     },
                     .static_method => |method| {
-                        _ = method;
-                        self.fail("Unsupported expression type in code generation.", "This expression type is not yet implemented.", expr.line, expr.column);
+                        try self.current.chunk().write_opcode(.OP_LOAD_FUNCTION_CONSTANT, expr.line);
+                        try self.current.chunk().write_u16(method.index, expr.line);
                     },
                     .enum_variant => |variant| {
                         try self.current.chunk().emit_constant(.{ .enum_ = .{ .type_id = variant.type_id, .index = @intCast(variant.index) } }, expr.line);
@@ -486,6 +571,39 @@ pub const CodeGenerator = struct {
                     else => return CodeGeneratorError.UnsupportedOperandType,
                 }
             },
+
+            .new_expr => |expr| {
+                const member_info = self.binding_resolution.member_infos.get(node) orelse return CodeGeneratorError.MissingBinding;
+                const struct_init = member_info.struct_init;
+                const type_info = self.registry.get_type_info(struct_init.type_id)._struct;
+
+                for (type_info.fields) |field| {
+                    if (field.is_static) continue; // static fields are already handled
+
+                    var provided_expr: ?*AST.ASTNode = null;
+                    for (expr.fields) |f| {
+                        if (std.mem.eql(u8, f.name.lexeme, field.name)) {
+                            provided_expr = f.value;
+                            break;
+                        }
+                    }
+
+                    if (provided_expr) |val| {
+                        try self.generate_expression(val);
+                    } else if (field.default_value) |def| {
+                        try self.generate_expression(def);
+                    }
+                }
+
+                var instance_field_count: u16 = 0;
+                for (type_info.fields) |f| {
+                    if (!f.is_static) instance_field_count += 1;
+                }
+
+                try self.current.chunk().write_opcode(.OP_STRUCT, expr.line);
+                try self.current.chunk().write_u32(struct_init.type_id, expr.line);
+                try self.current.chunk().write_u16(instance_field_count, expr.line);
+            },
             else => {
                 self.fail("Unsupported expression type in code generation.", "This expression type is not yet implemented.", 0, 0);
                 return CodeGeneratorError.UnsupportedNode;
@@ -494,13 +612,70 @@ pub const CodeGenerator = struct {
     }
 
     fn generate_assignment_expression(self: *CodeGenerator, expr: *AST.AssignExpr) CodeGeneratorError!void {
+        const op = expr.operator.lexeme;
+
+        // setting a static struct member
+        if (expr.left.* == .static_member_expr) {
+            const member_info = self.binding_resolution.member_infos.get(expr.left) orelse return CodeGeneratorError.MissingBinding;
+            if (member_info != .static_field) return CodeGeneratorError.UnsupportedNode;
+            const field = member_info.static_field;
+            if (std.mem.eql(u8, op, "=")) {
+                try self.generate_expression(expr.right);
+            } else {
+                // compound: load old value, compute, store
+                try self.current.chunk().write_opcode(.OP_LOAD_GLOBAL, expr.line);
+                try self.current.chunk().write_u16(field.index, expr.line);
+                try self.generate_expression(expr.right);
+                const base_op = op[0 .. op.len - 1];
+                const left_kind = resolve_typeof(expr.left);
+                const right_kind = resolve_typeof(expr.right);
+                const opcode = try CodeGenerator.select_opcode(base_op, left_kind, right_kind);
+                try self.current.chunk().write_opcode(opcode, expr.line);
+            }
+            try self.current.chunk().write_opcode(.OP_STORE_GLOBAL, expr.line);
+            try self.current.chunk().write_u16(field.index, expr.line);
+            return;
+        }
+
+        // assigning a struct member
+        if (expr.left.* == .dot_expr) {
+            const dot = expr.left.dot_expr;
+            const member_info = self.binding_resolution.member_infos.get(expr.left) orelse return CodeGeneratorError.MissingBinding;
+            if (member_info != .field) return CodeGeneratorError.UnsupportedNode;
+            const field_index = member_info.field.index;
+
+            if (std.mem.eql(u8, op, "=")) {
+                try self.generate_expression(expr.right);
+                try self.generate_expression(dot.expr);
+            } else {
+                // compound assignment
+                // Push target struct instance
+                try self.generate_expression(dot.expr);
+
+                try self.current.chunk().write_opcode(.OP_DUP, expr.line); // Duplicate struct instance so one remains for storing
+                try self.current.chunk().write_opcode(.OP_GET_FIELD, expr.line);
+                try self.current.chunk().write_u16(field_index, expr.line);
+                try self.generate_expression(expr.right);
+
+                const base_op = op[0 .. op.len - 1];
+                const left_kind = resolve_typeof(expr.left);
+                const right_kind = resolve_typeof(expr.right);
+                const opcode = try CodeGenerator.select_opcode(base_op, left_kind, right_kind);
+                try self.current.chunk().write_opcode(opcode, expr.line);
+            }
+
+            try self.current.chunk().write_opcode(.OP_SET_FIELD, expr.line);
+            try self.current.chunk().write_u16(field_index, expr.line);
+            return;
+        }
+
+        // local / global / upvalue
         const identifier = switch (expr.left.*) {
             .identifier_expr => |ie| ie,
-            else => return CodeGeneratorError.UnsupportedNode, // dot_expr targets: no runtime struct support yet
+            else => return CodeGeneratorError.UnsupportedNode,
         };
 
         const binding = self.binding_resolution.identifier_bindings.get(expr.left) orelse return CodeGeneratorError.MissingBinding;
-        const op = expr.operator.lexeme;
 
         if (std.mem.eql(u8, op, "=")) {
             try self.generate_expression(expr.right);

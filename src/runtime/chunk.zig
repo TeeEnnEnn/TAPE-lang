@@ -100,6 +100,15 @@ pub const Opcode = enum(u8) {
     OP_LOAD_FUNCTION_CONSTANT,
     OP_LOAD_UPVALUE,
     OP_STORE_UPVALUE,
+
+    OP_STRUCT,
+    OP_GET_FIELD,
+    OP_SET_FIELD,
+
+    /// Duplicate the value on the top of the stack
+    OP_DUP,
+
+    OP_PANIC,
 };
 
 /// A chunk of bytecode
@@ -136,6 +145,13 @@ pub const Chunk = struct {
 
     /// Writes a 16-bit value to the chunk.
     pub fn write_u16(self: *Chunk, value: u16, line: usize) !void {
+        try self.write_u8(@as(u8, @truncate(value >> 8)), line);
+        try self.write_u8(@as(u8, @truncate(value)), line);
+    }
+
+    pub fn write_u32(self: *Chunk, value: u32, line: usize) !void {
+        try self.write_u8(@as(u8, @truncate(value >> 24)), line);
+        try self.write_u8(@as(u8, @truncate(value >> 16)), line);
         try self.write_u8(@as(u8, @truncate(value >> 8)), line);
         try self.write_u8(@as(u8, @truncate(value)), line);
     }

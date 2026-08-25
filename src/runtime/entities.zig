@@ -19,6 +19,18 @@ pub const CallFrame = struct {
         return frame.closure.function.chunk.code.items[frame.ip - 1];
     }
 
+    pub fn read_u32(frame: *CallFrame) u32 {
+        frame.ip += 4;
+        const code = frame.closure.function.chunk.code.items;
+
+        const high_high: u32 = code[frame.ip - 4];
+        const low_high: u32 = code[frame.ip - 3];
+        const high_low: u32 = code[frame.ip - 2];
+        const low_low: u32 = code[frame.ip - 1];
+
+        return (high_high << 24) | (low_high << 16) | (high_low << 8) | (low_low);
+    }
+
     pub fn read_u16(frame: *CallFrame) u16 {
         frame.ip += 2;
         const code = frame.closure.function.chunk.code.items;
@@ -48,6 +60,7 @@ pub const ObjectType = enum(u8) {
     ObjectClosure,
     ObjectCoroutine,
     ObjectUpvalue,
+    ObjectStructInstance,
 };
 
 pub const ObjectHeader = struct {
@@ -155,6 +168,12 @@ pub const ObjectCoroutine = struct {
     /// Whether the coroutine has been resumed at least once. Until it suspends
     /// at a yield, resume values have nowhere to go and are discarded.
     started: bool,
+};
+
+pub const ObjectStructInstance = struct {
+    header: ObjectHeader,
+    type_id: AST.TypeId,
+    fields: []Value,
 };
 
 pub const Variant = struct {
@@ -278,6 +297,7 @@ pub fn object_as(comptime T: type, obj: *ObjectHeader) *T {
         .ObjectTable => @ptrCast(obj),
         .ObjectTuple => @ptrCast(obj),
         .ObjectUpvalue => @ptrCast(obj),
+        .ObjectStructInstance => @ptrCast(obj),
     };
 }
 
@@ -290,32 +310,34 @@ pub fn print_object(obj: *ObjectHeader) void {
         .ObjectArray => {
             const object = object_as(ObjectArray, obj);
             std.debug.print("[", .{});
-            for (object.elements) |element| {
+            for (object.elements, 0..object.elements.len) |element, i| {
                 print_value(element);
-                std.debug.print(", ", .{});
+                if (i != object.elements.len - 1)
+                    std.debug.print(", ", .{});
             }
             std.debug.print("]", .{});
         },
         .ObjectTuple => {
             const object = object_as(ObjectTuple, obj);
             std.debug.print("(", .{});
-            for (object.elements) |element| {
+            for (object.elements, 0..object.elements.len) |element, i| {
                 print_value(element);
-                std.debug.print(", ", .{});
+                if (i != object.elements.len - 1)
+                    std.debug.print(", ", .{});
             }
             std.debug.print(")", .{});
         },
         .ObjectTable => {
             const object = object_as(ObjectTable, obj);
             std.debug.print("{{", .{});
-            var first = true;
+            var printed: usize = 0;
             for (object.entries) |entry| {
                 if (entry.state != .occupied) continue;
-                if (!first) std.debug.print(", ", .{});
-                first = false;
+                if (printed > 0) std.debug.print(", ", .{});
                 print_value(entry.key);
                 std.debug.print(": ", .{});
                 print_value(entry.value);
+                printed += 1;
             }
             std.debug.print("}}", .{});
         },
@@ -612,20 +634,13 @@ pub fn blacken_object(garbage_collector: *basic_gc, obj: *ObjectHeader) !void {
                 try mark_object(garbage_collector, @ptrCast(next));
             }
         },
+        .ObjectStructInstance => {
+            const struct_instance: *ObjectStructInstance = @ptrCast(obj);
+            for (struct_instance.fields) |field| {
+                try mark_value(garbage_collector, field);
+            }
+        },
     }
-}
-
-pub fn get_size_of_object(obj: *ObjectHeader) usize {
-    return switch (obj.object_type) {
-        .ObjectFunction => @sizeOf(ObjectFunction),
-        .ObjectArray => @sizeOf(ObjectArray),
-        .ObjectTuple => @sizeOf(ObjectTuple),
-        .ObjectTable => @sizeOf(ObjectTable),
-        .ObjectString => @sizeOf(ObjectString),
-        .ObjectUpvalue => @sizeOf(ObjectUpvalue),
-        .ObjectClosure => @sizeOf(ObjectClosure),
-        .ObjectCoroutine => @sizeOf(ObjectCoroutine),
-    };
 }
 
 pub fn free_object(allocator: std.mem.Allocator, obj: *ObjectHeader) void {
@@ -668,6 +683,11 @@ pub fn free_object(allocator: std.mem.Allocator, obj: *ObjectHeader) void {
             const coroutine: *ObjectCoroutine = @ptrCast(obj);
             allocator.free(coroutine.execution_state.stack[0..coroutine.execution_state.stack_size]);
             allocator.destroy(coroutine);
+        },
+        .ObjectStructInstance => {
+            const struct_instance: *ObjectStructInstance = @ptrCast(obj);
+            allocator.free(struct_instance.fields);
+            allocator.destroy(struct_instance);
         },
     }
 }

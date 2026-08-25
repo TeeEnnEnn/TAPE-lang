@@ -158,10 +158,11 @@ pub const TypeChecker = struct {
 
                 for (decl.fields) |field| {
                     const field_type = try self.registry.resolve(field.type_annotation);
-                    try field_types.append(self.allocator, .{ .name = field.name.lexeme, .type = field_type, .is_static = field.is_static, .is_pub = field.is_pub, .has_default = field.has_default });
+                    // store the default value if there is one
+                    try field_types.append(self.allocator, .{ .name = field.name.lexeme, .type = field_type, .is_static = field.is_static, .is_pub = field.is_pub, .default_value = field.default_value });
                 }
 
-                // Create struct with empty methods first to get its type ID for self
+                // Create struct with empty methods first to get its type_id for self
                 const struct_id = try self.registry.add_struct_type(decl.name.lexeme, try field_types.toOwnedSlice(self.allocator), &.{}, self.module.filepath);
 
                 var method_types: std.ArrayList(StructMethod) = .empty;
@@ -170,7 +171,8 @@ pub const TypeChecker = struct {
                 for (decl.methods) |method| {
                     const self_type: ?AST.TypeId = if (method.is_static) null else struct_id;
                     const method_type = try self.check_declaration_type(method.method, self_type);
-                    try method_types.append(self.allocator, .{ .name = method.name.lexeme, .type = method_type, .is_static = method.is_static, .is_pub = method.is_pub });
+                    // store the node with the method definition
+                    try method_types.append(self.allocator, .{ .name = method.name.lexeme, .type = method_type, .is_static = method.is_static, .is_pub = method.is_pub, .method_node = method.method });
                 }
 
                 // Update the struct with actual methods
@@ -321,6 +323,18 @@ pub const TypeChecker = struct {
 
                 for (decl.fields) |field| {
                     _ = try self.check(field.type_annotation);
+                }
+
+                // Type-check the initializer and ensure it matches the field type.
+                const struct_info_for_defaults = self.registry.get_type_info(struct_typeid)._struct;
+                for (decl.fields, struct_info_for_defaults.fields) |field, sfield| {
+                    if (field.default_value) |def| {
+                        const def_type = try self.check_expression(def);
+                        if (!try self.is_compatible(sfield.type, def_type)) {
+                            try self.fail("Type Mismatch", "Default value type does not match field type.", decl.line, decl.column);
+                            return TypeCheckerError.TypeMismatch;
+                        }
+                    }
                 }
 
                 // Push scope for method bodies
@@ -609,6 +623,7 @@ pub const TypeChecker = struct {
 
     /// Rejects reads/writes of module-global mutable state from within a function or
     /// coroutine body. Functions must be fully compile-time knowable.
+    /// TODO: make this more strict (dot expr etc)
     fn reject_global_state_access(self: *TypeChecker, name: []const u8, info: SymbolInfo, scope: *Environment, line: usize, column: usize) TypeCheckerError!void {
         if (!self.in_function and !self.in_coroutine) return;
         if (scope.parent != null) return; // local / upvalue, allowed (closures)
@@ -638,8 +653,8 @@ pub const TypeChecker = struct {
 
                 const right_type = try self.check_expression(expr.right);
 
-                // if assigning to a variable
-                if (expr.left.* == .identifier_expr or expr.left.* == .dot_expr) {
+                // if assigning to a variable or static field
+                if (expr.left.* == .identifier_expr or expr.left.* == .dot_expr or expr.left.* == .static_member_expr) {
                     const left_type = try self.check_expression(expr.left);
                     if (!try self.is_compatible(left_type, right_type)) {
                         try self.fail("Type Mismatch", "Ensure that the assigned value type matches the variable's declared type.", expr.line, expr.column);
@@ -867,7 +882,50 @@ pub const TypeChecker = struct {
                 }
             },
             .call_expr => |expr| {
-                // check if the call target is a callable type. Otherwise error
+                // check if this is an instance method - if so, it needs an implicit self
+                if (expr.expr.* == .dot_expr) {
+                    const dot = expr.expr.dot_expr;
+                    const receiver_type = try self.check_expression(dot.expr);
+                    const receiver_info = self.registry.get_type_info(receiver_type);
+
+                    if (receiver_info == ._struct) {
+                        for (receiver_info._struct.methods) |method| {
+                            if (!method.is_static and std.mem.eql(u8, method.name, dot.member.lexeme)) {
+                                const method_info = self.registry.get_type_info(method.type);
+                                const args = switch (method_info) {
+                                    .function => |f| f.args,
+                                    .coroutine => |c| c.args,
+                                    else => return TypeCheckerError.NotCallable,
+                                };
+                                const return_type = switch (method_info) {
+                                    .function => |f| f.ret,
+                                    .coroutine => method.type,
+                                    else => return TypeCheckerError.NotCallable,
+                                };
+
+                                // args[0] is the implicut`self`. args start at index 1.
+                                const expected_arg_count = args.len - 1;
+                                if (expr.args.len != expected_arg_count) {
+                                    try self.fail("Invalid argument count", "Method expects a different number of arguments.", expr.line, expr.column);
+                                    return TypeCheckerError.InvalidArgumentCount;
+                                }
+
+                                for (expr.args, 0..) |arg, index| {
+                                    const arg_type = try self.check_expression(arg);
+                                    if (arg_type != args[index + 1]) {
+                                        try self.fail("Type Mismatch", "Argument type does not match method parameter type.", expr.line, expr.column);
+                                        return TypeCheckerError.TypeMismatch;
+                                    }
+                                }
+
+                                dot.resolved_type = method.type;
+                                expr.resolved_type = return_type;
+                                return expr.resolved_type;
+                            }
+                        }
+                    }
+                }
+
                 const expr_type = try self.check_expression(expr.expr);
                 const type_info = self.registry.get_type_info(expr_type);
                 switch (type_info) {
@@ -1086,8 +1144,10 @@ pub const TypeChecker = struct {
                         return TypeCheckerError.TypeMismatch;
                     }
                 }
+                // if this array has no initial values it is Array[Never]
+                // Array[Never] is compatible with anything
                 if (current_id == null) {
-                    current_id = @intFromEnum(PrimitiveType.Nil); // nil
+                    current_id = @intFromEnum(PrimitiveType.Never);
                 }
                 const array_type = try self.registry.add_array_type(current_id.?);
                 expr.resolved_type = array_type;
@@ -1137,16 +1197,20 @@ pub const TypeChecker = struct {
                     }
                 }
 
-                if (key_type == null) {
-                    try self.fail("Unknown Type", "Table literal must have at least one key.", expr.line, expr.column);
-                    return TypeCheckerError.UnknownType;
+                var table_type: AST.TypeId = undefined;
+                // if table has not initial values it is `Table[Never, Never]`
+                // Table[Never, Never] is compatible with anything
+                if (key_type == null or value_type == null) {
+                    table_type = try self.registry.add_table_type(
+                        @intFromEnum(PrimitiveType.Never),
+                        @intFromEnum(PrimitiveType.Never),
+                    );
+                    expr.resolved_type = table_type;
+                } else {
+                    table_type = try self.registry.add_table_type(key_type.?, value_type.?);
+                    expr.resolved_type = table_type;
                 }
-                if (value_type == null) {
-                    try self.fail("Unknown Type", "Table literal must have at least one value.", expr.line, expr.column);
-                    return TypeCheckerError.UnknownType;
-                }
-                const table_type = try self.registry.add_table_type(key_type.?, value_type.?);
-                expr.resolved_type = table_type;
+
                 return table_type;
             },
             .new_expr => |expr| {
@@ -1157,20 +1221,45 @@ pub const TypeChecker = struct {
 
                 const type_info = self.registry.get_type_info(struct_typeid);
                 if (type_info != ._struct) {
-                    try self.fail("Invalid Operation", "`new` can only construct a struct.", expr.line, expr.column);
+                    try self.fail("Invalid Operation", "`new` can only be used to construct a struct.", expr.line, expr.column);
                     return TypeCheckerError.InvalidOperation;
                 }
 
                 const struct_fields = type_info._struct.fields;
-                var provided_count: usize = 0;
 
+                for (struct_fields) |struct_field| {
+                    if (struct_field.is_static) continue; // static fields should not appear in the `new` construction - error will come
+
+                    if (struct_field.default_value == null) {
+                        var found = false;
+                        for (expr.fields) |provided| {
+                            if (std.mem.eql(u8, provided.name.lexeme, struct_field.name)) {
+                                found = true;
+                                break;
+                            }
+                        }
+
+                        if (!found) {
+                            const msg = try std.fmt.allocPrint(self.allocator, "Missing required field '{s}' in struct constructor.", .{struct_field.name});
+                            defer self.allocator.free(msg);
+                            try self.fail("Missing Required Field", msg, expr.line, expr.column);
+                            return TypeCheckerError.InvalidArgumentCount;
+                        }
+                    }
+                }
+
+                // Verify no unknown or duplicate fields were provided
                 for (expr.fields) |provided_field| {
                     const val_type = try self.check_expression(provided_field.value);
 
                     var matched = false;
-                    for (struct_fields) |sf| {
-                        if (std.mem.eql(u8, sf.name, provided_field.name.lexeme)) {
-                            if (!try self.is_compatible(sf.type, val_type)) {
+                    for (struct_fields) |struct_field| {
+                        if (std.mem.eql(u8, struct_field.name, provided_field.name.lexeme)) {
+                            if (struct_field.is_static) {
+                                try self.fail("Invalid Field", "Cannot initialize static field in struct instance constructor.", expr.line, expr.column);
+                                return TypeCheckerError.InvalidMemberAccess;
+                            }
+                            if (!try self.is_compatible(struct_field.type, val_type)) {
                                 try self.fail("Type Mismatch", "Field value type does not match the struct field type.", expr.line, expr.column);
                                 return TypeCheckerError.TypeMismatch;
                             }
@@ -1182,19 +1271,7 @@ pub const TypeChecker = struct {
                         try self.fail("Invalid Member Access", "Struct has no field with this name.", expr.line, expr.column);
                         return TypeCheckerError.InvalidMemberAccess;
                     }
-                    provided_count += 1;
                 }
-
-                // Count fields that have no default — those are required
-                var required_count: usize = 0;
-                for (struct_fields) |sf| {
-                    if (!sf.has_default) required_count += 1;
-                }
-                if (provided_count < required_count or provided_count > struct_fields.len) {
-                    try self.fail("Invalid argument count", "Struct constructor has the wrong number of fields.", expr.line, expr.column);
-                    return TypeCheckerError.InvalidArgumentCount;
-                }
-
                 expr.resolved_type = struct_typeid;
                 return struct_typeid;
             },
@@ -1399,6 +1476,22 @@ pub const TypeChecker = struct {
         }
 
         const target_info = self.registry.get_type_info(target);
+
+        //  Array[Never] matches Array[T] for any T
+        if (target_info == .array and source_info == .array) {
+            if (source_info.array == @intFromEnum(PrimitiveType.Never)) {
+                return true;
+            }
+            return try self.is_compatible(target_info.array, source_info.array);
+        }
+
+        // Table[Never, Never] matches Table[K, V] for any K, V
+        if (target_info == .table and source_info == .table) {
+            const key_compat = (source_info.table.key == @intFromEnum(PrimitiveType.Never)) or (try self.is_compatible(target_info.table.key, source_info.table.key));
+            const val_compat = (source_info.table.value == @intFromEnum(PrimitiveType.Never)) or (try self.is_compatible(target_info.table.value, source_info.table.value));
+            return key_compat and val_compat;
+        }
+
         return switch (target_info) {
             ._union => |u| {
                 // source is compatible if it fits either side of target union

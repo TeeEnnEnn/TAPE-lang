@@ -8,8 +8,11 @@ pub const TypeId = u32;
 /// Used to emit context aware bytecode
 pub const DeclRef = union(enum) {
     node: *ASTNode,
+
+    // not AST nodes themselves but "sub-elements" of other AST nodes
     param: struct { func: *ASTNode, index: u32 },
     import: struct { use_decl: *ASTNode, index: u32 },
+    static_field: struct { type_id: TypeId, index: u32 },
 };
 
 /// A Abstract Syntax Tree Node

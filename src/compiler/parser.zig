@@ -495,7 +495,7 @@ pub const Parser = struct {
         } else if (try self.match(.MATCH)) {
             return try self.parse_match_expression();
         } else {
-            try self.fail("Unexpected Token", "Please check the language grammar documentation for guidance on how to correct this error.");
+            try self.fail("Unexpected Token at primary expression position", "Please check the language grammar documentation for guidance on how to correct this error.");
             return ParserError.UnexpectedToken;
         }
     }
@@ -568,7 +568,7 @@ pub const Parser = struct {
                 return node;
             },
             else => {
-                try self.fail("Unexpected Token", "Expected any of 'String', 'Int', 'Float', Hex-Int, `true`, `false`, `nil` as literals.");
+                try self.fail("Unexpected Token at literal expression position.", "Expected any of 'String', 'Int', 'Float', Hex-Int, `true`, `false`, `nil` as literals.");
                 return ParserError.UnexpectedToken;
             },
         }
@@ -626,7 +626,7 @@ pub const Parser = struct {
 
         if (!self.check(.RIGHT_BRACE)) {
             while (true) {
-                try self.consume(.IDENTIFIER, "Expected field name after");
+                try self.consume(.IDENTIFIER, "Expected field name. Trailing commas are not allowed.");
                 const field_name = self.previous;
                 try self.consume(.EQUAL, "Expected '=' after field name to initialize it");
                 const value = try self.parse_expression();
@@ -931,16 +931,14 @@ pub const Parser = struct {
         var key_types: std.ArrayList(*AST.ASTNode) = .empty;
         var value_types: std.ArrayList(*AST.ASTNode) = .empty;
 
-        while (true) {
+        while (!self.check(.RIGHT_BRACE)) {
             const key_type = try self.parse_expression();
             try self.consume(.COLON, "Expected ':' to separate key from value.");
             const value_type = try self.parse_expression();
             try key_types.append(self.allocator, key_type);
             try value_types.append(self.allocator, value_type);
-            if (self.check(.RIGHT_BRACE)) {
-                break;
-            }
-            try self.consume(.COMMA, "Expected ',' to separate key-value pairs in table literal.");
+            if (!self.check(.RIGHT_BRACE))
+                try self.consume(.COMMA, "Expected ',' to separate key-value pairs in table literal.");
         }
         try self.consume(.RIGHT_BRACE, "Expected '}' to end table literal.");
 
@@ -960,13 +958,11 @@ pub const Parser = struct {
 
     fn parse_array_literal(self: *Parser) ParserError!*AST.ASTNode {
         var elements: std.ArrayList(*AST.ASTNode) = .empty;
-        while (true) {
+        while (!self.check(.RIGHT_SQUARE)) {
             const element = try self.parse_expression();
             try elements.append(self.allocator, element);
-            if (self.check(.RIGHT_SQUARE)) {
-                break;
-            }
-            try self.consume(.COMMA, "Expected ',' to separate array elements.");
+            if (!self.check(.RIGHT_SQUARE))
+                try self.consume(.COMMA, "Expected ',' to separate array elements.");
         }
         try self.consume(.RIGHT_SQUARE, "Expected ']' to end array literal.");
 
@@ -1453,63 +1449,51 @@ pub const Parser = struct {
     }
 
     fn is_table_literal_lookahead(self: *Parser) bool {
-        var idx = self.scanner.current;
-        // Skip whitespace and comments
-        while (idx < self.scanner.source.len) {
-            const c = self.scanner.source[idx];
-            if (c == ' ' or c == '\t' or c == '\r' or c == '\n') {
-                idx += 1;
-            } else if (c == '/' and idx + 1 < self.scanner.source.len and self.scanner.source[idx + 1] == '/') {
-                // Skip comment
-                idx += 2;
-                while (idx < self.scanner.source.len and self.scanner.source[idx] != '\n') {
-                    idx += 1;
-                }
-            } else {
-                break;
+        var tmp = self.scanner;
+        const first = tmp.scan_token() catch return false;
+        if (first.token_type == .RIGHT_BRACE) {
+            // an empty table needs a emicolon `{};` whereas an empty block is just `{}`
+            const after = tmp.scan_token() catch return false;
+            if (after.token_type == .SEMICOLON) return true;
+            return false;
+        }
+
+        // If the content starts with a declaration/statement keyword, it's a block, not a table.
+        switch (first.token_type) {
+            .VAR, .CONST, .STRUCT, .TYPE, .ENUM, .ERROR, .USE, .IF, .FOR, .WHILE, .RETURN, .GIVE, .BREAK, .CONTINUE, .PANIC, .PUB => return false,
+            .FN, .CO => {
+                var peek_tmp = tmp;
+                const second = peek_tmp.scan_token() catch return false;
+                if (second.token_type == .IDENTIFIER) return false;
+            },
+            else => {},
+        }
+
+        var depth: usize = 0;
+        switch (first.token_type) {
+            .LEFT_BRACE, .LEFT_SQUARE, .LEFT_PAREN => depth = 1,
+            else => {},
+        }
+
+        while (true) {
+            const tok = tmp.scan_token() catch return false;
+            switch (tok.token_type) {
+                .EOF => return false,
+                .LEFT_BRACE, .LEFT_SQUARE, .LEFT_PAREN => depth += 1,
+                .RIGHT_BRACE => {
+                    if (depth == 0) return false;
+                    depth -= 1;
+                },
+                .RIGHT_SQUARE, .RIGHT_PAREN => {
+                    if (depth == 0) return false;
+                    if (depth > 0) depth -= 1;
+                },
+                .COLON => if (depth == 0) return true,
+                .COLON_COLON => {},
+                .SEMICOLON, .COMMA => if (depth == 0) return false,
+                else => {},
             }
         }
-        if (idx >= self.scanner.source.len) return false;
-
-        const quote = self.scanner.source[idx];
-        if (quote != '"' and quote != '\'') return false;
-        idx += 1;
-
-        // Find matching quote
-        var escaped = false;
-        while (idx < self.scanner.source.len) {
-            if (idx >= self.scanner.source.len) break;
-            const c = self.scanner.source[idx];
-            if (escaped) {
-                escaped = false;
-            } else if (c == '\\') {
-                escaped = true;
-            } else if (c == quote) {
-                idx += 1;
-                break;
-            }
-            idx += 1;
-        }
-
-        // Skip whitespace and comments again
-        while (idx < self.scanner.source.len) {
-            const c = self.scanner.source[idx];
-            if (c == ' ' or c == '\t' or c == '\r' or c == '\n') {
-                idx += 1;
-            } else if (c == '/' and idx + 1 < self.scanner.source.len and self.scanner.source[idx + 1] == '/') {
-                idx += 2;
-                while (idx < self.scanner.source.len and self.scanner.source[idx] != '\n') {
-                    idx += 1;
-                }
-            } else {
-                break;
-            }
-        }
-
-        if (idx < self.scanner.source.len and self.scanner.source[idx] == ':') {
-            return true;
-        }
-        return false;
     }
 
     fn parse_statement(self: *Parser) ParserError!*AST.ASTNode {

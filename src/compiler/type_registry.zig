@@ -1,14 +1,14 @@
 const std = @import("std");
-const ast = @import("ast.zig");
+const AST = @import("ast.zig");
 
-pub const TypeId = ast.TypeId;
+pub const TypeId = AST.TypeId;
 
 pub const StructField = struct {
     name: []const u8,
     type: TypeId,
     is_static: bool,
     is_pub: bool,
-    has_default: bool,
+    default_value: ?*AST.ASTNode,
 };
 
 pub const StructMethod = struct {
@@ -16,6 +16,7 @@ pub const StructMethod = struct {
     type: TypeId,
     is_static: bool,
     is_pub: bool,
+    method_node: *AST.ASTNode,
 };
 
 pub const TypeRegistryError = error{
@@ -99,7 +100,7 @@ pub const TypeRegistry = struct {
     /// - `UnknownType`: The type could not be resolved.
     /// - `TypeResolutionConflict`: The type could not be resolved due to a type resolution conflict.
     /// - `Allocator.Error`: The type could not be resolved due to an allocator error.
-    pub fn resolve(self: *TypeRegistry, type_node: *ast.ASTNode) TypeRegistryError!TypeId {
+    pub fn resolve(self: *TypeRegistry, type_node: *AST.ASTNode) TypeRegistryError!TypeId {
         return switch (type_node.*) {
             .nil_type => @intFromEnum(PrimitiveType.Nil),
             .int_type => @intFromEnum(PrimitiveType.Int),
@@ -317,6 +318,7 @@ pub const TypeRegistry = struct {
     }
 
     pub fn add_union_type(self: *TypeRegistry, left_id: TypeId, right_id: TypeId) !TypeId {
+        if (left_id == right_id) return left_id;
         for (self.types.items, 0..) |info, index| {
             switch (info) {
                 ._union => |u| {

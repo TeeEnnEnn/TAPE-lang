@@ -218,9 +218,48 @@ pub const BindingResolver = struct {
                         });
                     }
                 },
-                .fn_decl => |decl| try self.register_function_node(decl_node, decl.name.lexeme, try self.functionTypeId(decl_node)),
-                .co_decl => |decl| try self.register_function_node(decl_node, decl.name.lexeme, try self.coroutineTypeId(decl_node)),
-                .struct_decl => |decl| try self.registerComptimeNode(decl_node, decl.name.lexeme, try self.named_typeid(decl.name.lexeme, decl_node)),
+                .fn_decl => |decl| try self.register_function_node(decl_node, decl.name.lexeme, try self.functionTypeId(decl_node, null)),
+                .co_decl => |decl| try self.register_function_node(decl_node, decl.name.lexeme, try self.coroutineTypeId(decl_node, null)),
+                .struct_decl => |decl| {
+                    // structs are pre hoisted
+                    // This allows structs to reference other structs
+                    // We also pre hoist the static methods and static variables so we can use those out of order
+                    // static fields are treated the same a globals and are assigned a slot in the globals array
+                    // static method are treated like regular functions and are given a slot in the function_constants array
+
+                    const struct_type_id = try self.named_typeid(decl.name.lexeme, decl_node);
+                    try self.registerComptimeNode(decl_node, decl.name.lexeme, struct_type_id);
+
+                    // pre hoist static fields (allocating global slots)
+                    for (decl.fields, 0..) |field, index| {
+                        if (field.is_static) {
+                            const field_type = try self.registry.resolve(field.type_annotation);
+                            const field_ref: AST.DeclRef = .{ .static_field = .{ .type_id = struct_type_id, .index = @intCast(index) } };
+
+                            try self.putDeclBinding(field_ref, .{
+                                .kind = .global,
+                                .slot = try self.next_global(),
+                                .type_id = field_type,
+                                .decl = field_ref,
+                                .name = field.name.lexeme,
+                                .module_path = self.module.filepath,
+                            });
+                        }
+                    }
+
+                    // pre hoist methods (allocating function slots)
+                    for (decl.methods) |method| {
+                        const ref: AST.DeclRef = .{ .node = method.method };
+                        try self.putDeclBinding(ref, .{
+                            .decl = ref,
+                            .kind = .function_constant,
+                            .slot = try self.next_function_constant(),
+                            .type_id = try self.callable_type_id(method.method, if (method.is_static) null else struct_type_id),
+                            .name = method.name.lexeme,
+                            .module_path = self.module.filepath,
+                        });
+                    }
+                },
                 .type_decl => |decl| try self.registerComptimeNode(decl_node, decl.name.lexeme, try self.named_typeid(decl.name.lexeme, decl_node)),
                 .enum_decl => |decl| try self.registerComptimeNode(decl_node, decl.name.lexeme, try self.named_typeid(decl.name.lexeme, decl_node)),
                 .error_decl => |decl| try self.registerComptimeNode(decl_node, decl.name.lexeme, try self.named_typeid(decl.name.lexeme, decl_node)),
@@ -308,32 +347,20 @@ pub const BindingResolver = struct {
     }
 
     fn resolveStructDecl(self: *BindingResolver, node: *AST.ASTNode, decl: *AST.StructDecl) BindingResolverError!void {
+        // TODO: public visibility for static fields/methods - currently ignored
+        _ = node;
+
         for (decl.fields) |field| {
-            if (field.default_value) |value| try self.resolveNode(value, false);
+            if (field.default_value) |value| {
+                try self.resolveNode(value, false);
+            }
         }
 
-        const pos: NodePosition = node_position(node);
-        _ = self.result.declaration_bindings.get(.{ .node = node }) orelse return self.fail("Missing struct binding.", null, pos.line, pos.column);
-        for (decl.methods, 0..) |method, index| {
-            const ref: AST.DeclRef = .{ .node = method.method };
-            try self.putDeclBinding(ref, .{
-                .kind = .method,
-                .slot = @intCast(index),
-                .type_id = try self.callable_type_id(method.method),
-                .decl = ref,
-                .name = method.name.lexeme,
-                .module_path = self.module.filepath,
-            });
-        }
         for (decl.methods) |method| {
-            const method_pos: NodePosition = node_position(method.method);
             switch (method.method.*) {
                 .fn_decl => |fn_decl| try self.resolveFnDecl(method.method, fn_decl, false, true),
                 .co_decl => |co_decl| try self.resolveCoDecl(method.method, co_decl, false, true),
-                else => try {
-                    try self.fail("Struct method is not callable.", null, method_pos.line, method_pos.column);
-                    return BindingResolverError.MissingBinding;
-                },
+                else => return BindingResolverError.MissingBinding,
             }
         }
     }
@@ -358,10 +385,10 @@ pub const BindingResolver = struct {
 
     fn resolveFnDecl(self: *BindingResolver, node: *AST.ASTNode, decl: *AST.FnDecl, direct_program_decl: bool, is_method: bool) !void {
         if (!direct_program_decl and !is_method and !self.result.declaration_bindings.contains(.{ .node = node })) {
-            try self.registerLocal(.{ .node = node }, decl.name.lexeme, try self.functionTypeId(node));
+            try self.registerLocal(.{ .node = node }, decl.name.lexeme, try self.functionTypeId(node, null));
         }
 
-        const type_id = try self.callable_type_id(node);
+        const type_id = try self.callable_type_id(node, null);
         const type_info = self.registry.get_type_info(type_id);
         const param_count: u16 = @intCast(type_info.function.args.len);
         try self.begin_function(node, param_count);
@@ -372,10 +399,10 @@ pub const BindingResolver = struct {
 
     fn resolveCoDecl(self: *BindingResolver, node: *AST.ASTNode, decl: *AST.CoDecl, direct_program_decl: bool, is_method: bool) !void {
         if (!direct_program_decl and !is_method and !self.result.declaration_bindings.contains(.{ .node = node })) {
-            try self.registerLocal(.{ .node = node }, decl.name.lexeme, try self.coroutineTypeId(node));
+            try self.registerLocal(.{ .node = node }, decl.name.lexeme, try self.coroutineTypeId(node, null));
         }
 
-        const type_id = try self.callable_type_id(node);
+        const type_id = try self.callable_type_id(node, null);
         const type_info = self.registry.get_type_info(type_id);
         const param_count: u16 = @intCast(type_info.coroutine.args.len);
         try self.begin_function(node, param_count);
@@ -459,15 +486,27 @@ pub const BindingResolver = struct {
                 }
             },
             ._struct => |info| {
-                for (info.fields, 0..) |field, index| {
-                    if (!field.is_static and std.mem.eql(u8, field.name, expr.member.lexeme)) {
-                        try self.result.member_infos.put(node, .{ .field = .{ .index = @intCast(index), .type_id = field.type } });
-                        return;
+                // instance fields are stored on the struct instance
+                // so the instance_field_index is the index into that array of values at runtime
+                var instance_field_index: u16 = 0;
+                for (info.fields) |field| {
+                    if (!field.is_static) {
+                        if (std.mem.eql(u8, field.name, expr.member.lexeme)) {
+                            try self.result.member_infos.put(node, .{ .field = .{ .index = instance_field_index, .type_id = field.type } });
+                            return;
+                        }
+                        instance_field_index += 1;
                     }
                 }
-                for (info.methods, 0..) |method, index| {
+
+                // methods are stored in the function constants array
+                for (info.methods) |method| {
                     if (!method.is_static and std.mem.eql(u8, method.name, expr.member.lexeme)) {
-                        try self.result.member_infos.put(node, .{ .method = .{ .index = @intCast(index), .type_id = method.type } });
+                        const method_binding = self.result.declaration_bindings.get(.{ .node = method.method_node }) orelse {
+                            try self.fail("Method binding not found.", null, expr.line, expr.column);
+                            return BindingResolverError.MissingBinding;
+                        };
+                        try self.result.member_infos.put(node, .{ .method = .{ .index = method_binding.slot, .type_id = method.type } });
                         return;
                     }
                 }
@@ -480,15 +519,27 @@ pub const BindingResolver = struct {
         const obj_type = resolved_type_of(expr.expr);
         switch (self.registry.get_type_info(obj_type)) {
             ._struct => |info| {
-                for (info.fields, 0..) |field, index| {
+                // Check static fields
+                for (info.fields, 0..) |field, field_idx| {
                     if (field.is_static and std.mem.eql(u8, field.name, expr.member.lexeme)) {
-                        try self.result.member_infos.put(node, .{ .static_field = .{ .index = @intCast(index), .type_id = field.type } });
+                        const field_ref: AST.DeclRef = .{ .static_field = .{ .type_id = obj_type, .index = @intCast(field_idx) } };
+                        const binding = self.result.declaration_bindings.get(field_ref) orelse {
+                            try self.fail("Static field binding not found.", null, expr.line, expr.column);
+                            return BindingResolverError.MissingBinding;
+                        };
+                        try self.result.member_infos.put(node, .{ .static_field = .{ .index = binding.slot, .type_id = field.type } });
                         return;
                     }
                 }
-                for (info.methods, 0..) |method, index| {
+
+                // Check static methods
+                for (info.methods) |method| {
                     if (method.is_static and std.mem.eql(u8, method.name, expr.member.lexeme)) {
-                        try self.result.member_infos.put(node, .{ .static_method = .{ .index = @intCast(index), .type_id = method.type } });
+                        const method_binding = self.result.declaration_bindings.get(.{ .node = method.method_node }) orelse {
+                            try self.fail("Static method binding not found.", null, expr.line, expr.column);
+                            return BindingResolverError.MissingBinding;
+                        };
+                        try self.result.member_infos.put(node, .{ .static_method = .{ .index = method_binding.slot, .type_id = method.type } });
                         return;
                     }
                 }
@@ -695,27 +746,35 @@ pub const BindingResolver = struct {
         return slot;
     }
 
-    fn callable_type_id(self: *BindingResolver, node: *AST.ASTNode) !AST.TypeId {
+    fn callable_type_id(self: *BindingResolver, node: *AST.ASTNode, self_type: ?AST.TypeId) !AST.TypeId {
         if (self.result.declaration_bindings.get(.{ .node = node })) |binding| return binding.type_id;
         return switch (node.*) {
-            .fn_decl => self.functionTypeId(node),
-            .co_decl => self.coroutineTypeId(node),
+            .fn_decl => self.functionTypeId(node, self_type),
+            .co_decl => self.coroutineTypeId(node, self_type),
             else => BindingResolverError.MissingBinding,
         };
     }
 
-    fn functionTypeId(self: *BindingResolver, node: *AST.ASTNode) !AST.TypeId {
+    /// Add a function's type id to the registry
+    /// @param node:        the ast node that introduced this function
+    /// @param self_type:   the type of the self variable if this function exists as a method
+    fn functionTypeId(self: *BindingResolver, node: *AST.ASTNode, self_type: ?AST.TypeId) !AST.TypeId {
         const decl = node.fn_decl;
         var param_types: std.ArrayList(AST.TypeId) = .empty;
         defer param_types.deinit(self.allocator);
+        if (self_type) |st| try param_types.append(self.allocator, st);
         for (decl.params) |param| try param_types.append(self.allocator, try self.registry.resolve(param.type_annotation));
         return self.registry.add_function_type(try param_types.toOwnedSlice(self.allocator), try self.registry.resolve(decl.return_type_annotation));
     }
 
-    fn coroutineTypeId(self: *BindingResolver, node: *AST.ASTNode) !AST.TypeId {
+    /// Add a coroutine's type id to the registry
+    /// @param node:        the ast node that introduced this coroutine
+    /// @param self_type:   the type of the self variable if this coroutine exists as a method
+    fn coroutineTypeId(self: *BindingResolver, node: *AST.ASTNode, self_type: ?AST.TypeId) !AST.TypeId {
         const decl = node.co_decl;
         var param_types: std.ArrayList(AST.TypeId) = .empty;
         defer param_types.deinit(self.allocator);
+        if (self_type) |st| try param_types.append(self.allocator, st);
         for (decl.params) |param| try param_types.append(self.allocator, try self.registry.resolve(param.type_annotation));
         return self.registry.add_coroutine_type(try param_types.toOwnedSlice(self.allocator), try self.registry.resolve(decl.yield_type_annotation), try self.registry.resolve(decl.resume_with_type_annotation), try self.registry.resolve(decl.return_type_annotation));
     }
