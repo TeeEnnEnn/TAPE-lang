@@ -870,6 +870,10 @@ pub const CodeGenerator = struct {
             if (std.mem.eql(u8, op, "++")) return .OP_STRING_CONCAT;
         }
 
+        if (left == @intFromEnum(TypeRegistry.PrimitiveType.Int) and right == @intFromEnum(TypeRegistry.PrimitiveType.Int)) {
+            if (std.mem.eql(u8, op, "..")) return .OP_RANGE;
+        }
+
         return CodeGeneratorError.UnsupportedOperator;
     }
 

@@ -61,6 +61,7 @@ pub const ObjectType = enum(u8) {
     ObjectCoroutine,
     ObjectUpvalue,
     ObjectStructInstance,
+    ObjectRange,
 };
 
 pub const ObjectHeader = struct {
@@ -174,6 +175,13 @@ pub const ObjectStructInstance = struct {
     header: ObjectHeader,
     type_id: AST.TypeId,
     fields: []Value,
+};
+
+pub const ObjectRange = struct {
+    header: ObjectHeader,
+    start: i64,
+    end: i64,
+    step: i64,
 };
 
 pub const Variant = struct {
@@ -298,6 +306,7 @@ pub fn object_as(comptime T: type, obj: *ObjectHeader) *T {
         .ObjectTuple => @ptrCast(obj),
         .ObjectUpvalue => @ptrCast(obj),
         .ObjectStructInstance => @ptrCast(obj),
+        .ObjectRange => @ptrCast(obj),
     };
 }
 
@@ -345,6 +354,10 @@ pub fn print_object(obj: *ObjectHeader) void {
             const object = object_as(ObjectUpvalue, obj);
             std.debug.print("ObjectUpvalue: ", .{});
             print_value(object.closed_value);
+        },
+        .ObjectRange => {
+            const object = object_as(ObjectRange, obj);
+            std.debug.print("{d}..{d} step {d}", .{ object.start, object.end, object.step });
         },
         else => std.debug.print("{s}@{*}\n", .{ @tagName(obj.object_type), obj }),
     }
@@ -566,6 +579,15 @@ pub fn new_coroutine_object(isolate: *Isolate, closure: *ObjectClosure, max_fram
     return coroutine;
 }
 
+pub fn new_range_object(isolate: *Isolate, start: i64, end: i64, step: i64) !*ObjectRange {
+    const range: *ObjectRange = try isolate.gc.allocate_object(ObjectRange, .ObjectRange);
+    range.start = start;
+    range.end = end;
+    range.step = step;
+
+    return range;
+}
+
 pub fn mark_value(garbage_collector: *basic_gc, value: Value) !void {
     switch (value) {
         .object => |obj| {
@@ -640,6 +662,7 @@ pub fn blacken_object(garbage_collector: *basic_gc, obj: *ObjectHeader) !void {
                 try mark_value(garbage_collector, field);
             }
         },
+        .ObjectRange => {},
     }
 }
 
@@ -688,6 +711,10 @@ pub fn free_object(allocator: std.mem.Allocator, obj: *ObjectHeader) void {
             const struct_instance: *ObjectStructInstance = @ptrCast(obj);
             allocator.free(struct_instance.fields);
             allocator.destroy(struct_instance);
+        },
+        .ObjectRange => {
+            const range: *ObjectRange = @ptrCast(obj);
+            allocator.destroy(range);
         },
     }
 }

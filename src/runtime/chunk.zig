@@ -109,6 +109,9 @@ pub const Opcode = enum(u8) {
     OP_DUP,
 
     OP_PANIC,
+
+    /// Constructs a range object at runtime
+    OP_RANGE,
 };
 
 /// A chunk of bytecode

@@ -1000,9 +1000,22 @@ pub const Isolate = struct {
                         .column = 0,
                         .stage = .Execution,
                         .severity = .Error,
-                        .message = "panic",
+                        .message = "Programmer generated runtime panic.",
                     }) catch {};
                     return RuntimePanic.Panic;
+                },
+
+                .OP_RANGE => {
+                    const end = try self.pop_value();
+                    const start = try self.pop_value();
+                    var step: i64 = 1;
+
+                    if (end.int < start.int) {
+                        step = -1;
+                    }
+
+                    const range_object = try Entities.new_range_object(self, start.int, end.int, step);
+                    try self.push_value(.{ .object = &range_object.header });
                 },
             }
         }
