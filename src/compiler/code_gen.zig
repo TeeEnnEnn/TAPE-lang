@@ -30,19 +30,47 @@ pub const CodeGeneratorError = error{
     Utf8CodepointTooLarge,
 };
 
+pub const LoopContext = struct {
+    allocator: std.mem.Allocator,
+    /// All `break` jumps that need to be patched at loop exit
+    break_jumps: std.ArrayList(usize),
+    /// Local variable count at the loop's outer boundary - for cleanup
+    scope_local_floor: u16,
+    /// where to jump for `continue` statement
+    continue_target: u32,
+    /// parent loop
+    enclosing: ?*LoopContext,
+
+    pub fn init(allocator: std.mem.Allocator, scope_floor: u16, continue_target: u32, enclosing: ?*LoopContext) LoopContext {
+        return .{
+            .allocator = allocator,
+            .break_jumps = .empty,
+            .scope_local_floor = scope_floor,
+            .continue_target = continue_target,
+            .enclosing = enclosing,
+        };
+    }
+
+    pub fn deinit(self: *LoopContext) void {
+        self.break_jumps.deinit(self.allocator);
+    }
+};
+
 pub const FunctionCompiler = struct {
     allocator: std.mem.Allocator,
     /// The function we are emitting code into
     function: *Entities.ObjectFunction,
     /// The enclosing function
     enclosing: ?*FunctionCompiler,
+    current_locals_count: u16 = 0,
 
-    pub fn init(allocator: std.mem.Allocator, function: *Entities.ObjectFunction, enclosing: ?*FunctionCompiler) !*FunctionCompiler {
+    pub fn init(allocator: std.mem.Allocator, function: *Entities.ObjectFunction, enclosing: ?*FunctionCompiler, initial_locals: u16) !*FunctionCompiler {
         const compiler = try allocator.create(FunctionCompiler);
         compiler.* = .{
             .allocator = allocator,
             .function = function,
             .enclosing = enclosing,
+            .current_locals_count = initial_locals,
         };
         return compiler;
     }
@@ -69,6 +97,8 @@ pub const CodeGenerator = struct {
     diagnostics: *DiagnosticReporter,
     /// The module being compiled
     module: *Module,
+    ///The stack of currently executing loop
+    current_loop: ?*LoopContext = null,
 
     pub fn init(
         allocator: std.mem.Allocator,
@@ -85,7 +115,7 @@ pub const CodeGenerator = struct {
             .binding_resolution = binding_resolution,
             .registry = registry,
             .node = node,
-            .current = try FunctionCompiler.init(allocator, try Entities.new_function_object(isolate), null),
+            .current = try FunctionCompiler.init(allocator, try Entities.new_function_object(isolate), null, 0),
             .diagnostics = diagnostics,
             .module = module,
         };
@@ -183,8 +213,11 @@ pub const CodeGenerator = struct {
                     self.fail("Block scope has no pop count in binding resolution.", null, stmt.line, stmt.column);
                     return CodeGeneratorError.MissingBinding;
                 };
-                try self.current.chunk().write_opcode(.OP_POP_N, stmt.line);
-                try self.current.chunk().write_u16(pop_count, stmt.line);
+                if (pop_count > 0) {
+                    try self.current.chunk().write_opcode(.OP_POP_N, stmt.line);
+                    try self.current.chunk().write_u16(pop_count, stmt.line);
+                    self.current.current_locals_count -= pop_count;
+                }
             },
 
             .if_stmt => |stmt| {
@@ -208,13 +241,27 @@ pub const CodeGenerator = struct {
 
             .while_stmt => |stmt| {
                 const loop_start = self.current.chunk().code.items.len;
+
+                var loop_context = LoopContext.init(self.allocator, self.current.current_locals_count, @intCast(loop_start), self.current_loop);
+                defer loop_context.deinit();
+
+                const prev_loop = self.current_loop;
+                self.current_loop = &loop_context;
+                defer self.current_loop = prev_loop;
+
                 try self.generate_expression(stmt.condition);
                 const exit_jump = try self.emit_jump(.OP_JUMP_IF_FALSE, stmt.line);
                 try self.current.chunk().write_opcode(.OP_POP, stmt.line);
+
                 try self.generate_node(stmt.body);
                 try self.emit_loop(@intCast(loop_start), stmt.line);
                 try self.patch_jump(exit_jump);
                 try self.current.chunk().write_opcode(.OP_POP, stmt.line);
+
+                // patching all break statements
+                for (loop_context.break_jumps.items) |break_jump| {
+                    try self.patch_jump(break_jump);
+                }
             },
 
             .return_stmt => |stmt| {
@@ -241,17 +288,33 @@ pub const CodeGenerator = struct {
             },
 
             .break_stmt => |stmt| {
-                _ = stmt;
-                // TODO: break statement
+                const loop_context = self.current_loop orelse {
+                    self.fail("`break` statement outside of loop", null, stmt.line, stmt.column);
+                    return CodeGeneratorError.UnsupportedNode;
+                };
 
-                self.fail("Unsupported node type in code generation.", "This node type is not yet implemented for bytecode emission.", 0, 0);
-                return CodeGeneratorError.UnsupportedNode;
+                const locals_to_pop = self.current.current_locals_count - loop_context.scope_local_floor;
+                if (locals_to_pop > 0) {
+                    try self.current.chunk().write_opcode(.OP_POP_N, stmt.line);
+                    try self.current.chunk().write_u16(locals_to_pop, stmt.line);
+                }
+
+                const jump = try self.emit_jump(.OP_JUMP, stmt.line);
+                try loop_context.break_jumps.append(loop_context.allocator, jump);
             },
+
             .continue_stmt => |stmt| {
-                _ = stmt;
-                // TODO: continue statement
-                self.fail("Unsupported node type in code generation.", "This node type is not yet implemented for bytecode emission.", 0, 0);
-                return CodeGeneratorError.UnsupportedNode;
+                const loop_context = self.current_loop orelse {
+                    self.fail("`continue` statement outside of loop", null, stmt.line, stmt.column);
+                    return CodeGeneratorError.UnsupportedNode;
+                };
+
+                const locals_to_pop = self.current.current_locals_count - loop_context.scope_local_floor;
+                if (locals_to_pop > 0) {
+                    try self.current.chunk().write_opcode(.OP_POP_N, stmt.line);
+                    try self.current.chunk().write_u16(locals_to_pop, stmt.line);
+                }
+                try self.emit_loop(loop_context.continue_target, stmt.line);
             },
             .panic_stmt => |stmt| {
                 try self.generate_expression(stmt.expr);
@@ -304,12 +367,6 @@ pub const CodeGenerator = struct {
     }
 
     fn generate_callable_decl(self: *CodeGenerator, node: *AST.ASTNode, decl: *AST.ASTNode, decl_type: anytype) CodeGeneratorError!void {
-        const function_object = try Entities.new_function_object(self.isolate);
-        const new_function = try FunctionCompiler.init(self.allocator, function_object, self.current);
-        const enclosing = self.current;
-        self.current = new_function;
-        defer self.current = enclosing;
-
         const callable_decl: *decl_type = @ptrCast(decl);
 
         const binding = self.binding_resolution.function_infos.get(node) orelse {
@@ -317,17 +374,24 @@ pub const CodeGenerator = struct {
             return CodeGeneratorError.MissingBinding;
         };
 
-        // params are already locals at this point
+        const function_object = try Entities.new_function_object(self.isolate);
+        // Start nested function with its own parameter count:
+        const new_function = try FunctionCompiler.init(self.allocator, function_object, self.current, binding.param_count);
+        const enclosing = self.current;
+        self.current = new_function;
 
+        // Generate body for the inner function
         try self.generate_node(callable_decl.body);
 
-        // TODO: use type checker statement termination to determine whether or not we need to add a return
         try self.current.chunk().write_opcode(.OP_NIL, callable_decl.line);
         try self.current.chunk().write_opcode(.OP_RETURN, callable_decl.line);
 
         function_object.arity = binding.param_count;
         function_object.name = try Entities.copy_string(self.isolate, callable_decl.name.lexeme);
         function_object.upvalue_count = binding.upvalues.len;
+
+        // Restore enclosing function compiler!
+        self.current = enclosing;
 
         const ref: AST.DeclRef = .{ .node = node };
         const decl_binding = self.binding_resolution.declaration_bindings.get(ref) orelse {
@@ -341,16 +405,19 @@ pub const CodeGenerator = struct {
                 try self.isolate.function_constants.append(self.isolate.base_allocator, .{ .object = &closure_object.header });
             },
             .local => {
-                // Nested function: emit a closure instruction to create closure and capture upvalues
-                const const_index = try enclosing.chunk().write_constant(.{ .object = &function_object.header });
-                try enclosing.chunk().write_opcode(.OP_CLOSURE, callable_decl.line);
-                try enclosing.chunk().write_u16(const_index, callable_decl.line);
+                // Nested function: emit a closure instruction into the enclosing chunk
+                const const_index = try self.current.chunk().write_constant(.{ .object = &function_object.header });
+                try self.current.chunk().write_opcode(.OP_CLOSURE, callable_decl.line);
+                try self.current.chunk().write_u16(const_index, callable_decl.line);
                 for (binding.upvalues) |upvalue| {
-                    try enclosing.chunk().write_u8(if (upvalue.captures_parent_local) 1 else 0, callable_decl.line);
-                    try enclosing.chunk().write_u16(upvalue.parent_slot, callable_decl.line);
+                    try self.current.chunk().write_u8(if (upvalue.captures_parent_local) 1 else 0, callable_decl.line);
+                    try self.current.chunk().write_u16(upvalue.parent_slot, callable_decl.line);
                 }
-                try enclosing.chunk().write_opcode(.OP_STORE_LOCAL, callable_decl.line);
-                try enclosing.chunk().write_u16(decl_binding.slot, callable_decl.line);
+                try self.current.chunk().write_opcode(.OP_STORE_LOCAL, callable_decl.line);
+                try self.current.chunk().write_u16(decl_binding.slot, callable_decl.line);
+
+                // Increment enclosing function's local count!
+                self.current.current_locals_count += 1;
             },
             else => return CodeGeneratorError.UnsupportedNode,
         }
@@ -368,8 +435,8 @@ pub const CodeGenerator = struct {
         switch (binding.kind) {
             .local => {
                 // The initializer is already sitting on the stack in the correct
-                // slot position — a local's storage IS the stack slot. Nothing
-                // further to emit. (Unexercised until function bodies compile.)
+                // slot position
+                self.current.current_locals_count += 1;
             },
             .global => {
                 try self.current.chunk().write_opcode(.OP_STORE_GLOBAL, decl.line);
@@ -604,6 +671,23 @@ pub const CodeGenerator = struct {
                 try self.current.chunk().write_u32(struct_init.type_id, expr.line);
                 try self.current.chunk().write_u16(instance_field_count, expr.line);
             },
+
+            .match_expr => |expr| {
+                _ = expr;
+            },
+
+            .try_expr => |expr| {
+                _ = expr;
+            },
+
+            .anon_fn_expr => |expr| {
+                _ = expr;
+            },
+
+            .anon_co_expr => |expr| {
+                _ = expr;
+            },
+
             else => {
                 self.fail("Unsupported expression type in code generation.", "This expression type is not yet implemented.", 0, 0);
                 return CodeGeneratorError.UnsupportedNode;
