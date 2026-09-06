@@ -34,17 +34,20 @@ pub const LoopContext = struct {
     allocator: std.mem.Allocator,
     /// All `break` jumps that need to be patched at loop exit
     break_jumps: std.ArrayList(usize),
+    /// All `continue` jumps that need to be patched (for `for` loops — forward jumps to FOR_NEXT)
+    continue_jumps: std.ArrayList(usize),
     /// Local variable count at the loop's outer boundary - for cleanup
     scope_local_floor: u16,
-    /// where to jump for `continue` statement
-    continue_target: u32,
+    /// where to jump for `continue` statement (null => forward jump to be patched, used by `for` loops)
+    continue_target: ?u32,
     /// parent loop
     enclosing: ?*LoopContext,
 
-    pub fn init(allocator: std.mem.Allocator, scope_floor: u16, continue_target: u32, enclosing: ?*LoopContext) LoopContext {
+    pub fn init(allocator: std.mem.Allocator, scope_floor: u16, continue_target: ?u32, enclosing: ?*LoopContext) LoopContext {
         return .{
             .allocator = allocator,
             .break_jumps = .empty,
+            .continue_jumps = .empty,
             .scope_local_floor = scope_floor,
             .continue_target = continue_target,
             .enclosing = enclosing,
@@ -53,6 +56,7 @@ pub const LoopContext = struct {
 
     pub fn deinit(self: *LoopContext) void {
         self.break_jumps.deinit(self.allocator);
+        self.continue_jumps.deinit(self.allocator);
     }
 };
 
@@ -274,10 +278,69 @@ pub const CodeGenerator = struct {
             },
 
             .for_stmt => |stmt| {
-                _ = stmt;
-                // TODO: for statements
-                self.fail("Unsupported node type in code generation.", "This node type is not yet implemented for bytecode emission.", 0, 0);
-                return CodeGeneratorError.UnsupportedNode;
+                const binding = self.binding_resolution.declaration_bindings.get(.{ .node = node }) orelse {
+                    self.fail("Missing binding for `for` loop iterator.", null, stmt.iterator_name.line, stmt.iterator_name.column);
+                    return CodeGeneratorError.MissingBinding;
+                };
+                const i_slot = binding.slot;
+
+                try self.generate_expression(stmt.iterator_expr);
+                self.current.current_locals_count += 1;
+
+                // Reserve local slot for iterator variable
+                try self.current.chunk().write_opcode(.OP_NIL, stmt.iterator_name.line);
+                self.current.current_locals_count += 1;
+
+                // OP_FOR_PREP with placeholder for exit jump
+                try self.current.chunk().write_opcode(.OP_FOR_PREP, stmt.iterator_name.line);
+                try self.current.chunk().write_u16(i_slot, stmt.iterator_name.line);
+                const exit_jump = try self.emit_jump_placeholder(stmt.iterator_name.line);
+
+                // set up loop context
+                const body_start: u32 = @intCast(self.current.chunk().code.items.len);
+                var loop_context = LoopContext.init(self.allocator, self.current.current_locals_count, null, self.current_loop);
+                defer loop_context.deinit();
+
+                const prev_loop = self.current_loop;
+                self.current_loop = &loop_context;
+                defer self.current_loop = prev_loop;
+
+                try self.generate_node(stmt.body);
+
+                const for_next_target: u32 = @intCast(self.current.chunk().code.items.len);
+
+                try self.current.chunk().write_opcode(.OP_FOR_NEXT, stmt.iterator_name.line);
+                try self.current.chunk().write_u16(i_slot, stmt.iterator_name.line);
+                const loop_offset = self.current.chunk().code.items.len - body_start + 2;
+                if (loop_offset > std.math.maxInt(u16)) {
+                    self.fail("Loop size exceeds maximum supported offset.", null, stmt.iterator_name.line, stmt.iterator_name.column);
+                    return CodeGeneratorError.LoopSizeTooLarge;
+                }
+                try self.current.chunk().write_u16(@intCast(loop_offset), stmt.iterator_name.line);
+
+                //  patch exit jump if range is empty
+                try self.patch_jump(exit_jump);
+
+                // patch continue jumps
+                for (loop_context.continue_jumps.items) |cont_jump| {
+                    try self.patch_jump_to(cont_jump, for_next_target);
+                }
+
+                // patch break jumps
+                for (loop_context.break_jumps.items) |break_jump| {
+                    try self.patch_jump(break_jump);
+                }
+
+                // pop range and iterator variable expressions
+                const pop_count = self.binding_resolution.scope_pop_counts.get(node) orelse {
+                    self.fail("For-loop scope has no pop count in binding resolution.", null, stmt.iterator_name.line, stmt.iterator_name.column);
+                    return CodeGeneratorError.MissingBinding;
+                };
+                if (pop_count > 0) {
+                    try self.current.chunk().write_opcode(.OP_POP_N, stmt.iterator_name.line);
+                    try self.current.chunk().write_u16(pop_count, stmt.iterator_name.line);
+                    self.current.current_locals_count -= pop_count;
+                }
             },
 
             .give_stmt => |stmt| {
@@ -314,7 +377,12 @@ pub const CodeGenerator = struct {
                     try self.current.chunk().write_opcode(.OP_POP_N, stmt.line);
                     try self.current.chunk().write_u16(locals_to_pop, stmt.line);
                 }
-                try self.emit_loop(loop_context.continue_target, stmt.line);
+                if (loop_context.continue_target) |target| { // if this is a while loop
+                    try self.emit_loop(target, stmt.line);
+                } else { // this is a for loop
+                    const jump = try self.emit_jump(.OP_JUMP, stmt.line);
+                    try loop_context.continue_jumps.append(loop_context.allocator, jump);
+                }
             },
             .panic_stmt => |stmt| {
                 try self.generate_expression(stmt.expr);
@@ -477,6 +545,26 @@ pub const CodeGenerator = struct {
     /// offset is the index of the jump instruction in the bytecode that needs to be patched
     fn patch_jump(self: *CodeGenerator, offset: usize) CodeGeneratorError!void {
         const jump = self.current.chunk().code.items.len - offset - 2;
+        if (jump > std.math.maxInt(u16)) {
+            self.fail("Jump offset exceeds maximum supported size.", null, 0, 0);
+            return CodeGeneratorError.LoopSizeTooLarge;
+        }
+        self.current.chunk().code.items[offset] = @intCast(jump >> 8);
+        self.current.chunk().code.items[offset + 1] = @intCast(jump & 0xff);
+    }
+
+    /// Patches a jump instruction to an explicit target offset
+    ///
+    /// offset is the index of the jump's operand bytes;
+    /// target is the bytecode offset to jump to.
+    fn patch_jump_to(self: *CodeGenerator, offset: usize, target: u32) CodeGeneratorError!void {
+        // `offset` points at the 2-byte operand of the jump. The IP after reading the offset
+        // is `offset + 2`, so the forward offset is `target - (offset + 2)`.
+        if (target < offset + 2) {
+            self.fail("Invalid forward jump target.", null, 0, 0);
+            return CodeGeneratorError.LoopSizeTooLarge;
+        }
+        const jump: usize = @intCast(target - @as(u32, @intCast(offset + 2)));
         if (jump > std.math.maxInt(u16)) {
             self.fail("Jump offset exceeds maximum supported size.", null, 0, 0);
             return CodeGeneratorError.LoopSizeTooLarge;
@@ -729,8 +817,8 @@ pub const CodeGenerator = struct {
             const field_index = member_info.field.index;
 
             if (std.mem.eql(u8, op, "=")) {
-                try self.generate_expression(expr.right);
-                try self.generate_expression(dot.expr);
+                try self.generate_expression(dot.expr); // target
+                try self.generate_expression(expr.right); // value
             } else {
                 // compound assignment
                 // Push target struct instance
@@ -897,6 +985,12 @@ pub const CodeGenerator = struct {
         try self.current.chunk().write_opcode(.OP_POP, line);
         try self.generate_expression(right);
         try self.patch_jump(end_jump);
+    }
+
+    fn emit_jump_placeholder(self: *CodeGenerator, line: usize) CodeGeneratorError!usize {
+        try self.current.chunk().write_u8(0xff, line);
+        try self.current.chunk().write_u8(0xff, line);
+        return self.current.chunk().code.items.len - 2;
     }
 
     fn generate_binary_expr(self: *CodeGenerator, expr: *AST.BinaryExpr) CodeGeneratorError!void {

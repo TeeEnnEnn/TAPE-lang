@@ -1017,6 +1017,36 @@ pub const Isolate = struct {
                     const range_object = try Entities.new_range_object(self, start.int, end.int, step);
                     try self.push_value(.{ .object = &range_object.header });
                 },
+
+                .OP_FOR_PREP => {
+                    const iterator_var = frame.read_u16();
+                    const exit_offset = frame.read_u16();
+                    const range_val = self.current.stack[frame.slot_start + iterator_var - 1];
+                    const range = Entities.object_as(Entities.ObjectRange, range_val.object);
+
+                    const is_empty = if (range.step > 0) range.start >= range.end else range.start <= range.end;
+                    if (is_empty) {
+                        frame.ip += exit_offset;
+                    } else {
+                        self.current.stack[frame.slot_start + iterator_var] = .{ .int = range.start };
+                    }
+                },
+
+                .OP_FOR_NEXT => {
+                    const iteratr_var = frame.read_u16();
+                    const loop_offset = frame.read_u16();
+                    const range_val = self.current.stack[frame.slot_start + iteratr_var - 1];
+                    const range = Entities.object_as(Entities.ObjectRange, range_val.object);
+
+                    var current_i = self.current.stack[frame.slot_start + iteratr_var].int;
+                    current_i += range.step;
+                    self.current.stack[frame.slot_start + iteratr_var] = .{ .int = current_i };
+
+                    const should_continue = if (range.step > 0) current_i < range.end else current_i > range.end;
+                    if (should_continue) {
+                        frame.ip -= loop_offset;
+                    }
+                },
             }
         }
     }

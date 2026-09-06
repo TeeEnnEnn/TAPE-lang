@@ -112,6 +112,11 @@ pub const Opcode = enum(u8) {
 
     /// Constructs a range object at runtime
     OP_RANGE,
+
+    /// Prepres for loop execution state
+    OP_FOR_PREP,
+    /// Moves to the next iteration of a for loop
+    OP_FOR_NEXT,
 };
 
 /// A chunk of bytecode

@@ -441,7 +441,14 @@ pub const BindingResolver = struct {
     fn resolveForStmt(self: *BindingResolver, node: *AST.ASTNode, stmt: *AST.ForStmt) !void {
         try self.resolveNode(stmt.iterator_expr, false);
         const floor = self.current_function().local_count;
+
+        // hidden local slot for the ObjectRange
+        const range_ref: AST.DeclRef = .{ .node = stmt.iterator_expr };
+        try self.registerLocal(range_ref, "$range", @intFromEnum(PrimitiveType.Never));
+
+        // user visible iterator variable
         try self.registerLocal(.{ .node = node }, stmt.iterator_name.lexeme, @intFromEnum(PrimitiveType.Int));
+
         try self.resolveNode(stmt.body, false);
         const current = self.current_function();
         const pop_count = current.local_count - floor;

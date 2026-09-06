@@ -515,6 +515,14 @@ pub const TypeChecker = struct {
                 return .{ .yield_ = body_term.yield_ };
             },
             .for_stmt => |stmt| {
+                // ensure that iterator expression produces a range
+                const iter_type = try self.check_expression(stmt.iterator_expr);
+                const iter_info = self.registry.get_type_info(iter_type);
+                if (iter_info != .range) {
+                    try self.fail("Type Mismatch", "`for` iterator expression must be a Range.", stmt.iterator_name.line, stmt.iterator_name.column);
+                    return TypeCheckerError.TypeMismatch;
+                }
+
                 var local_env = Environment.init(self.allocator, self.environment);
                 defer local_env.deinit();
 
@@ -527,7 +535,7 @@ pub const TypeChecker = struct {
                 self.in_loop = true;
                 const body_term = try self.check(stmt.body);
                 self.in_loop = prev_loop;
-                // See .while_stmt — propagate only the existential yield flag.
+
                 return .{ .yield_ = body_term.yield_ };
             },
             .if_stmt => |stmt| {

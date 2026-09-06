@@ -99,6 +99,15 @@ pub const ChunkDisassembler = struct {
         return offset + 7;
     }
 
+    fn disassemble_for_instruction(chunk: *Chunk, offset: usize) usize {
+        const opcode: Opcode = @enumFromInt(chunk.code.items[offset]);
+        const slot = read_u16(chunk, offset + 1);
+        // this may be the loop offset or the exit offset
+        const jump_offset = read_u16(chunk, offset + 3);
+        std.debug.print("{s} - variable slot: {d} - offset: {d}", .{ @tagName(opcode), slot, jump_offset });
+        return offset + 5;
+    }
+
     pub fn disassemble_chunk(chunk: *Chunk, offset: usize) usize {
         std.debug.print("{:4}  ", .{offset});
 
@@ -222,6 +231,11 @@ pub const ChunkDisassembler = struct {
 
             .OP_STRUCT => {
                 return disassemble_struct_instruction(chunk, offset);
+            },
+            .OP_FOR_PREP,
+            .OP_FOR_NEXT,
+            => {
+                return disassemble_for_instruction(chunk, offset);
             },
         }
     }
