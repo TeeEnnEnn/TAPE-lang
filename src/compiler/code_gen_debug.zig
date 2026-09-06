@@ -72,8 +72,30 @@ pub const ChunkDisassembler = struct {
 
     fn disassemble_closure_instruction(chunk: *Chunk, offset: usize) usize {
         const opcode: Opcode = @enumFromInt(chunk.code.items[offset]);
-        std.debug.print("{s}\n", .{@tagName(opcode)});
-        return offset + 1;
+        const index = read_u16(chunk, offset + 1);
+        std.debug.print("{s}  {d}", .{ @tagName(opcode), index });
+        if (index < chunk.constants.items.len) {
+            const value = chunk.constants.items[index];
+            switch (value) {
+                .object => |obj| switch (obj.object_type) {
+                    .ObjectFunction => {
+                        const func: *Entities.ObjectFunction = @ptrCast(obj);
+                        std.debug.print(" (upvalues: {d})", .{func.upvalue_count});
+                        for (0..func.upvalue_count) |i| {
+                            const is_local = chunk.code.items[offset + 3 + i * 3];
+                            const slot = read_u16(chunk, offset + 4 + i * 3);
+                            std.debug.print(" [{d}: {s} {d}]", .{ i, if (is_local != 0) "local" else "upvalue", slot });
+                        }
+                        if (func.upvalue_count > 0) std.debug.print("\n", .{});
+                        return offset + 3 + func.upvalue_count * 3;
+                    },
+                    else => {},
+                },
+                else => {},
+            }
+        }
+        std.debug.print("\n", .{});
+        return offset + 3;
     }
 
     fn disassemble_load_store_instruction(chunk: *Chunk, offset: usize) usize {

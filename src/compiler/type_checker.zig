@@ -744,7 +744,6 @@ pub const TypeChecker = struct {
                     try self.fail("Invalid Operation", "`resume` can only be applied to a coroutine.", expr.line, expr.column);
                     return TypeCheckerError.InvalidOperation;
                 }
-
                 // The value passed in (`resume co with V`) becomes the yield
                 // expression's value, so it must match the resume_with type.
                 // Omitting `with V` passes nil.
@@ -1327,7 +1326,8 @@ pub const TypeChecker = struct {
 
                 const ret_typeid = try self.registry.resolve(expr.return_type_annotation);
 
-                const function_typeid = try self.registry.add_function_type(try arg_types.toOwnedSlice(self.allocator), ret_typeid);
+                const owned_for_registry = try self.allocator.dupe(AST.TypeId, arg_types.items);
+                const function_typeid = try self.registry.add_function_type(owned_for_registry, ret_typeid);
 
                 // Push function scope
                 var local_env = Environment.init(self.allocator, self.environment);
@@ -1380,7 +1380,8 @@ pub const TypeChecker = struct {
                 self.expected_resume_with_type = resume_with_typeid;
                 defer self.expected_resume_with_type = prev_resume_with;
 
-                const coroutine_typeid = try self.registry.add_coroutine_type(try arg_types.toOwnedSlice(self.allocator), yield_typeid, resume_with_typeid, ret_typeid);
+                const owned_for_registry_co = try self.allocator.dupe(AST.TypeId, arg_types.items);
+                const coroutine_typeid = try self.registry.add_coroutine_type(owned_for_registry_co, yield_typeid, resume_with_typeid, ret_typeid);
 
                 var local_env = Environment.init(self.allocator, self.environment);
                 defer local_env.deinit();

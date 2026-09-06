@@ -765,15 +765,25 @@ pub const CodeGenerator = struct {
             },
 
             .try_expr => |expr| {
-                _ = expr;
+                try self.generate_expression(expr.expr);
+
+                const err_jump = try self.emit_jump(.OP_JUMP_IF_ERROR, expr.line);
+                const success_jump = try self.emit_jump(.OP_JUMP, expr.line);
+
+                // early return
+                try self.patch_jump(err_jump);
+                try self.current.chunk().write_opcode(.OP_RETURN, expr.line);
+
+                // non error success case
+                try self.patch_jump(success_jump);
             },
 
             .anon_fn_expr => |expr| {
-                _ = expr;
+                try self.generate_anonymous_callable(node, expr.params, expr.body, expr.line);
             },
 
             .anon_co_expr => |expr| {
-                _ = expr;
+                try self.generate_anonymous_callable(node, expr.params, expr.body, expr.line);
             },
 
             else => {
@@ -1069,5 +1079,46 @@ pub const CodeGenerator = struct {
             },
             else => unreachable,
         };
+    }
+
+    fn generate_anonymous_callable(
+        self: *CodeGenerator,
+        node: *AST.ASTNode,
+        params: []*AST.TypedNamedField,
+        body: *AST.ASTNode,
+        line: usize,
+    ) CodeGeneratorError!void {
+        const binding = self.binding_resolution.function_infos.get(node) orelse {
+            self.fail("Anonymous function has no binding info.", null, line, 0);
+            return CodeGeneratorError.MissingBinding;
+        };
+
+        const function_object = try Entities.new_function_object(self.isolate);
+        const new_function = try FunctionCompiler.init(self.allocator, function_object, self.current, binding.param_count);
+        const enclosing = self.current;
+        self.current = new_function;
+
+        try self.generate_node(body);
+
+        // implicit return
+        try self.current.chunk().write_opcode(.OP_NIL, line);
+        try self.current.chunk().write_opcode(.OP_RETURN, line);
+
+        function_object.arity = @intCast(params.len);
+        function_object.name = null; // no name for anonymous function
+        function_object.upvalue_count = binding.upvalues.len;
+
+        // Restore enclosing function
+        self.current = enclosing;
+
+        // emit closure as the expression result
+        const const_index = try self.current.chunk().write_constant(.{ .object = &function_object.header });
+        try self.current.chunk().write_opcode(.OP_CLOSURE, line);
+        try self.current.chunk().write_u16(const_index, line);
+
+        for (binding.upvalues) |upvalue| {
+            try self.current.chunk().write_u8(if (upvalue.captures_parent_local) 1 else 0, line);
+            try self.current.chunk().write_u16(upvalue.parent_slot, line);
+        }
     }
 };
