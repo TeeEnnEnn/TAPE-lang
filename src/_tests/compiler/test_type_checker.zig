@@ -232,6 +232,18 @@ test "Type Checker - compound assignment semantics" {
     try std.testing.expectError(TypeCheckerError.InvalidOperation, checkSource(allocator, "var x = \"a\"; x /= \"b\";"));
 }
 
+test "Type Checker - collection index assignment semantics" {
+    const allocator = std.testing.allocator;
+
+    var arrays = try checkSource(allocator, "var xs: Array[Int] = [1, 2]; xs[0] = 3; xs[1] += 4;");
+    defer arrays.env.deinit();
+    defer arrays.registry.deinit();
+    var tables = try checkSource(allocator, "var values: Table[String, Int] = {\"a\": 1}; values[\"a\"] = 2; values[\"b\"] += 3;");
+    defer tables.env.deinit();
+    defer tables.registry.deinit();
+    try std.testing.expectError(TypeCheckerError.InvalidOperation, checkSource(allocator, "var text = \"ab\"; text[0] = \"z\";"));
+}
+
 test "Type Checker - exponentiation with **" {
     var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
     defer arena.deinit();

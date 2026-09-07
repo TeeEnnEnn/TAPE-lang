@@ -65,6 +65,12 @@ test "Code Generator - emits collection index opcodes" {
     try expectOpcode("var x = (1, true).0;", .OP_INDEX_TUPLE);
 }
 
+test "Code Generator - emits collection index assignment opcodes" {
+    try expectOpcode("var xs: Array[Int] = [1, 2]; xs[0] = 3;", .OP_SET_INDEX_ARRAY);
+    try expectOpcode("var values: Table[String, Int] = {\"a\": 1}; values[\"a\"] += 2;", .OP_SET_INDEX_TABLE);
+    try expectOpcode("var xs: Array[Int] = [1, 2]; xs[0] += 3;", .OP_DUP_TWO);
+}
+
 test "Code Generator - emits coroutine creation and resume opcodes" {
     // the coroutine body compiles into its own chunk (OP_YIELD lives there);
     // the top-level chunk carries OP_COROUTINE and OP_RESUME

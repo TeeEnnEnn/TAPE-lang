@@ -72,41 +72,32 @@ pub const DiagnosticsReporter = struct {
     }
 
     pub fn report_all(self: *DiagnosticsReporter, io: std.Io) !void {
-        const stderr = std.Io.File.stderr();
-        var buf: [32]u8 = undefined;
+        _ = io;
         for (self.diagnostics.items) |diagnostic| {
-            try stderr.writeStreamingAll(io, "\n");
             const color = switch (diagnostic.severity) {
                 .Fatal => BOLD_RED,
                 .Error => RED,
                 .Warning => YELLOW,
                 .Info => GRAY,
             };
-            try stderr.writeStreamingAll(io, color);
-            try stderr.writeStreamingAll(io, @tagName(diagnostic.severity));
-            try stderr.writeStreamingAll(io, RESET);
-            try stderr.writeStreamingAll(io, " during ");
-            try stderr.writeStreamingAll(io, @tagName(diagnostic.stage));
-            try stderr.writeStreamingAll(io, "\nAt ");
-            try stderr.writeStreamingAll(io, diagnostic.file_path);
-            try stderr.writeStreamingAll(io, " (line ");
-            try stderr.writeStreamingAll(io, std.fmt.bufPrint(&buf, "{}", .{diagnostic.line}) catch unreachable);
-            try stderr.writeStreamingAll(io, ", column ");
-            try stderr.writeStreamingAll(io, std.fmt.bufPrint(&buf, "{}", .{diagnostic.column}) catch unreachable);
-            try stderr.writeStreamingAll(io, ")\n");
-            try stderr.writeStreamingAll(io, diagnostic.message);
-            try stderr.writeStreamingAll(io, "\n");
+            std.debug.print("\n{s}{s}{s} during {s}\nAt {s} (line {}, column {})\n{s}\n", .{
+                color,
+                @tagName(diagnostic.severity),
+                RESET,
+                @tagName(diagnostic.stage),
+                diagnostic.file_path,
+                diagnostic.line,
+                diagnostic.column,
+                diagnostic.message,
+            });
             if (diagnostic.hint) |hint| {
-                try stderr.writeStreamingAll(io, "Hint: ");
-                try stderr.writeStreamingAll(io, hint);
-                try stderr.writeStreamingAll(io, "\n");
+                std.debug.print("Hint: {s}\n", .{hint});
             }
         }
         self.diagnostics.clearAndFree(self.allocator);
         self.has_errors = false;
         self.has_warnings = false;
         self.has_infos = false;
-        try stderr.writeStreamingAll(io, RESET);
     }
 
     pub fn has_content(self: *DiagnosticsReporter) bool {

@@ -68,7 +68,7 @@ const Command = struct {
     /// The description of the command.
     description: []const u8,
     /// The handler function for the command.
-    handler: *const fn (io: std.Io, [][]const u8, allocator: std.mem.Allocator) u8,
+    handler: *const fn (io: std.Io, []const []const u8, allocator: std.mem.Allocator) u8,
     /// The options of the command. The arguments needed to execute the command.
     options: []const CommandOption,
 };
@@ -300,7 +300,7 @@ pub fn create_tape_project(io: std.Io, allocator: std.mem.Allocator, name: []con
     try std.Io.Dir.writeFile(cwd, io, .{ .data = script_content, .sub_path = script_path, .flags = .{} });
 }
 
-pub fn run_repl(io: std.Io, parsed_args: [][]const u8, allocator: std.mem.Allocator) u8 {
+pub fn run_repl(io: std.Io, parsed_args: []const []const u8, allocator: std.mem.Allocator) u8 {
     _ = parsed_args;
     const stdout = std.Io.File.stdout();
     _ = allocator;
@@ -310,54 +310,93 @@ pub fn run_repl(io: std.Io, parsed_args: [][]const u8, allocator: std.mem.Alloca
     return 0;
 }
 
-pub fn run_file(io: std.Io, parsed_args: [][]const u8, allocator: std.mem.Allocator) u8 {
-    const stdout = std.Io.File.stdout();
-    _ = allocator;
-    stdout.writeStreamingAll(io, "Run a file") catch {
-        return 1;
-    };
-    for (parsed_args) |arg| {
-        stdout.writeStreamingAll(io, arg) catch {
-            return 1;
-        };
-    }
-    return 0;
+const CompileCommandArgs = struct {
+    path: ?[]const u8 = null,
+    debug: TapeWorkspace.DebugOptions = .{},
+};
+
+fn emit_cli_error(message: []const u8) void {
+    std.debug.print("{s}Error:{s} {s}\n", .{ RED, RESET, message });
 }
 
-pub fn run_check(io: std.Io, parsed_args: [][]const u8, allocator: std.mem.Allocator) u8 {
+fn parse_compile_command_args(args: []const []const u8) !CompileCommandArgs {
+    var result = CompileCommandArgs{};
+    for (args) |arg| {
+        if (std.mem.eql(u8, arg, "--debug")) {
+            result.debug.enable_all();
+        } else if (std.mem.eql(u8, arg, "--debug-ast")) {
+            result.debug.ast = true;
+        } else if (std.mem.eql(u8, arg, "--debug-bytecode")) {
+            result.debug.bytecode = true;
+        } else if (std.mem.eql(u8, arg, "--debug-vm")) {
+            result.debug.vm = true;
+        } else if (std.mem.eql(u8, arg, "--debug-pipeline")) {
+            result.debug.pipeline = true;
+        } else if (std.mem.startsWith(u8, arg, "--")) {
+            return error.InvalidOption;
+        } else if (result.path == null) {
+            result.path = arg;
+        } else {
+            return error.TooManyPaths;
+        }
+    }
+    return result;
+}
+
+fn resolve_source_path(allocator: std.mem.Allocator, io: std.Io, path: ?[]const u8) ![]u8 {
+    if (path) |provided_path| {
+        if (std.fs.path.isAbsolute(provided_path)) return try allocator.dupe(u8, provided_path);
+        const current_dir = try get_current_dir_path(allocator, io);
+        defer allocator.free(current_dir);
+        return try std.fs.path.join(allocator, &.{ current_dir, provided_path });
+    }
+    return get_entrypoint(allocator, std.Io.Dir.cwd(), io);
+}
+
+fn run_compile_command(io: std.Io, parsed_args: []const []const u8, allocator: std.mem.Allocator, execute: bool) u8 {
+    const command_args = parse_compile_command_args(parsed_args) catch |err| {
+        emit_cli_error(switch (err) {
+            error.InvalidOption => "Unknown option. Supported debug options: --debug, --debug-ast, --debug-bytecode, --debug-vm, --debug-pipeline.",
+            error.TooManyPaths => "Expected at most one source file path.",
+        });
+        return 1;
+    };
+
     var workspace = TapeWorkspace.Workspace.init(allocator, io);
     defer workspace.deinit();
 
-    const file_path = if (parsed_args.len == 0) blk: {
-        break :blk get_entrypoint(allocator, std.Io.Dir.cwd(), io) catch {
-            return 1;
-        };
-    } else blk: {
-        const current_dir = get_current_dir_path(allocator, io) catch {
-            return 1;
-        };
-        defer allocator.free(current_dir);
-        break :blk std.fs.path.join(allocator, &.{ current_dir, parsed_args[0] }) catch {
-            return 1;
-        };
+    const file_path = resolve_source_path(allocator, io, command_args.path) catch {
+        emit_cli_error("Unable to resolve the source file path.");
+        return 1;
     };
     defer allocator.free(file_path);
 
-    const succeeded = workspace.compile_workspace(file_path) catch {
-        workspace.diagnostics.report_all(io) catch {
-            return 1;
-        };
+    const succeeded = workspace.compile_workspace(file_path, .{ .execute = execute, .debug = command_args.debug }) catch {
+        if (workspace.diagnostics.has_content()) {
+            workspace.diagnostics.report_all(io) catch {};
+        } else {
+            emit_cli_error("The compiler could not complete the requested operation.");
+        }
         return 1;
     };
 
     if (!succeeded) {
+        workspace.diagnostics.report_all(io) catch {};
         return 1;
     }
 
     return 0;
 }
 
-pub fn get_version(io: std.Io, parsed_args: [][]const u8, allocator: std.mem.Allocator) u8 {
+pub fn run_file(io: std.Io, parsed_args: []const []const u8, allocator: std.mem.Allocator) u8 {
+    return run_compile_command(io, parsed_args, allocator, true);
+}
+
+pub fn run_check(io: std.Io, parsed_args: []const []const u8, allocator: std.mem.Allocator) u8 {
+    return run_compile_command(io, parsed_args, allocator, false);
+}
+
+pub fn get_version(io: std.Io, parsed_args: []const []const u8, allocator: std.mem.Allocator) u8 {
     _ = parsed_args;
     _ = allocator;
     const stdout = std.Io.File.stdout();
@@ -368,14 +407,21 @@ pub fn get_version(io: std.Io, parsed_args: [][]const u8, allocator: std.mem.All
     return 0;
 }
 
-pub fn init_project(io: std.Io, parsed_args: [][]const u8, allocator: std.mem.Allocator) u8 {
+pub fn init_project(io: std.Io, parsed_args: []const []const u8, allocator: std.mem.Allocator) u8 {
     const stdout = std.Io.File.stdout();
-    var new_project_name: []const u8 = "tape_project";
-    var manifest_type: ManifestType = undefined;
-    if (parsed_args.len > 0) {
-        new_project_name = parsed_args[1];
-        manifest_type = if (std.mem.eql(u8, "pkg", parsed_args[0])) ManifestType.Package else if (std.mem.eql(u8, "app", parsed_args[0])) ManifestType.Application else unreachable;
+    if (parsed_args.len == 0 or parsed_args.len > 2) {
+        emit_cli_error("Usage: TAPE_lang init [app|pkg] [name]");
+        return 1;
     }
+    const manifest_type = if (std.mem.eql(u8, "pkg", parsed_args[0]))
+        ManifestType.Package
+    else if (std.mem.eql(u8, "app", parsed_args[0]))
+        ManifestType.Application
+    else {
+        emit_cli_error("Project kind must be `app` or `pkg`.");
+        return 1;
+    };
+    const new_project_name: []const u8 = if (parsed_args.len == 2) parsed_args[1] else "tape_project";
     create_tape_project(io, allocator, new_project_name, manifest_type) catch {
         stdout.writeStreamingAll(io, "Failed to initialize TAPE project.\n") catch {};
         return 1;
@@ -386,7 +432,7 @@ pub fn init_project(io: std.Io, parsed_args: [][]const u8, allocator: std.mem.Al
     return 0;
 }
 
-pub fn get_help(io: std.Io, parsed_args: [][]const u8, allocator: std.mem.Allocator) u8 {
+pub fn get_help(io: std.Io, parsed_args: []const []const u8, allocator: std.mem.Allocator) u8 {
     _ = parsed_args;
     _ = allocator;
     const stdout = std.Io.File.stdout();
@@ -451,102 +497,25 @@ pub fn get_help(io: std.Io, parsed_args: [][]const u8, allocator: std.mem.Alloca
         stdout.writeStreamingAll(io, command.description) catch {};
         stdout.writeStreamingAll(io, "\n") catch {};
     }
+    stdout.writeStreamingAll(io, "\nrun and check accept: --debug, --debug-ast, --debug-bytecode, --debug-vm, --debug-pipeline\n") catch {};
     return 0;
 }
 
 /// Runs the TAPE CLI with the given arguments.
 pub fn cli_main(args: []const []const u8, allocator: std.mem.Allocator, io: std.Io) u8 {
-    const stdout = std.Io.File.stdout();
-    var possible_commands: std.ArrayList(Command) = .empty;
-    defer possible_commands.deinit(allocator);
-    for (commands) |command| {
-        if (std.mem.eql(u8, command.name, "repl")) {
-            continue; // skip the repl command
-        }
-        possible_commands.append(allocator, command) catch {
-            return 1;
-        };
-    }
-
-    // check all of the possible commands against the args.
-    // Loop through the args removing the commands that do not match.
-    // At the end the remaining command is the one to run.
-    //
-    // If there are multiple commands at the end of the args, return an error.
-    //
-    // If there are no commands at the end of the args, return an error.
-
-    var parsed_args: std.ArrayList([]const u8) = .empty;
-    defer parsed_args.deinit(allocator);
     if (args.len == 1) {
-        return run_repl(io, parsed_args.items, allocator);
+        return run_repl(io, &.{}, allocator);
     }
 
-    var selected_command: ?Command = null;
+    const command = args[1];
+    const command_args = args[2..];
+    if (std.mem.eql(u8, command, "run")) return run_file(io, command_args, allocator);
+    if (std.mem.eql(u8, command, "check")) return run_check(io, command_args, allocator);
+    if (std.mem.eql(u8, command, "init")) return init_project(io, command_args, allocator);
+    if (std.mem.eql(u8, command, "repl")) return run_repl(io, command_args, allocator);
+    if (std.mem.eql(u8, command, "version") or std.mem.eql(u8, command, "-v")) return get_version(io, command_args, allocator);
+    if (std.mem.eql(u8, command, "help") or std.mem.eql(u8, command, "-h") or std.mem.eql(u8, command, "--help")) return get_help(io, command_args, allocator);
 
-    for (args, 0..) |arg, i| {
-        if (i == 0) {
-            continue; // skip the program path
-        }
-
-        var write_index: usize = 0;
-        const current_commands = possible_commands.items;
-
-        for (possible_commands.items) |command| {
-            if (command.options.len < i) continue;
-
-            const option = command.options[i - 1];
-            var match = false;
-
-            switch (option) {
-                .optional_keyword => |keyword| {
-                    if (std.mem.eql(u8, arg, keyword)) {
-                        match = true;
-                    }
-                },
-                .required_keyword => |keyword| {
-                    if (std.mem.eql(u8, arg, keyword)) {
-                        match = true;
-                    }
-                },
-                .optional_value, .required_value => {
-                    match = true;
-                    parsed_args.append(allocator, arg) catch {
-                        return 1;
-                    };
-                },
-                .required_choice => |choices| {
-                    for (choices) |choice| {
-                        if (std.mem.eql(u8, arg, choice)) {
-                            match = true;
-                            parsed_args.append(allocator, arg) catch {
-                                return 1;
-                            };
-                        }
-                    }
-                },
-            }
-
-            if (match) {
-                current_commands[write_index] = command;
-                write_index += 1;
-            }
-        }
-
-        possible_commands.shrinkAndFree(allocator, write_index);
-    }
-    if (possible_commands.items.len == 1) {
-        selected_command = possible_commands.items[0];
-    } else if (possible_commands.items.len > 1) { // Can't tell what the user wants to do
-        stdout.writeStreamingAll(io, RED ++ "Error: " ++ RESET ++ "Ambiguous command. -h for help.\n") catch {};
-        return 1;
-    }
-
-    if (selected_command) |cmd| {
-        return cmd.handler(io, parsed_args.items, allocator);
-    } else {
-        stdout.writeStreamingAll(io, RED ++ "Error: " ++ RESET ++ "Invalid command. -h for help.\n") catch {};
-        return 1;
-    }
-    return 0;
+    emit_cli_error("Invalid command. Use `TAPE_lang help` for usage.");
+    return 1;
 }

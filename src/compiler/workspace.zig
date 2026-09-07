@@ -15,10 +15,55 @@ const Runtime = @import("../runtime/vm.zig");
 const print_node = @import("ast_debug.zig").print_node;
 const CodeGeneratorDebug = @import("code_gen_debug.zig").ChunkDisassembler;
 
+fn runtime_panic_message(panic: Runtime.RuntimePanic) []const u8 {
+    return switch (panic) {
+        error.DivisionByZero => "Division by zero.",
+        error.IndexOutOfBounds => "Collection index is out of bounds.",
+        error.KeyNotFound => "Table key was not found.",
+        error.ArgumentCountMismatch => "Function was called with the wrong number of arguments.",
+        error.StackOverflow => "Runtime stack limit exceeded.",
+        error.StackUnderflow, error.CorruptedState => "Internal VM state became invalid.",
+        error.NegativeDenominator => "Invalid numeric operation.",
+        error.OutOfMemory => "The runtime could not allocate memory.",
+        error.InvalidValue => "Runtime value is invalid for this operation.",
+        error.FinishedCoroutineResumption => "Cannot resume a finished coroutine.",
+        error.CoroutineAlreadyRunning => "Cannot resume a coroutine that is already running.",
+        error.Panic => "Program panicked.",
+    };
+}
+
+fn runtime_panic_hint(panic: Runtime.RuntimePanic) ?[]const u8 {
+    return switch (panic) {
+        error.DivisionByZero => "Check the divisor before performing division.",
+        error.IndexOutOfBounds => "Ensure the index is within the collection bounds.",
+        error.KeyNotFound => "Ensure the key exists before indexing the table.",
+        error.FinishedCoroutineResumption => "Create a new coroutine before resuming again.",
+        error.CoroutineAlreadyRunning => "A coroutine may only be resumed by one execution path at a time.",
+        error.StackOverflow => "Reduce recursion or increase the VM stack limit.",
+        else => null,
+    };
+}
+
 pub const WorkspaceError = std.mem.Allocator.Error || std.Io.OperateTimeoutError || error{
     CircularDependencyError,
     FileNotFoundError,
     CodeGenerationError,
+};
+
+pub const DebugOptions = struct {
+    ast: bool = false,
+    bytecode: bool = false,
+    vm: bool = false,
+    pipeline: bool = false,
+
+    pub fn enable_all(self: *DebugOptions) void {
+        self.* = .{ .ast = true, .bytecode = true, .vm = true, .pipeline = true };
+    }
+};
+
+pub const CompileOptions = struct {
+    execute: bool = false,
+    debug: DebugOptions = .{},
 };
 
 /// The possible state a module (file) can be in when being handled by the compiler
@@ -100,6 +145,7 @@ pub const Workspace = struct {
     /// Mutex for accessing diagnostics
     diagnostics_mutex: std.Io.Mutex,
     vm: ?*Runtime.VM,
+    debug: DebugOptions,
 
     pub fn init(allocator: std.mem.Allocator, io: std.Io) Workspace {
         return Workspace{
@@ -110,6 +156,7 @@ pub const Workspace = struct {
             .diagnostics = Diagnostics.init(allocator),
             .diagnostics_mutex = std.Io.Mutex.init,
             .vm = null,
+            .debug = .{},
         };
     }
 
@@ -131,9 +178,10 @@ pub const Workspace = struct {
         self.diagnostics.deinit();
     }
 
-    /// Compiles the workspace starting from the entrypoint module.
-    /// Returns whether the compilation completed without reporting errors.
-    pub fn compile_workspace(self: *Workspace, entrypoint: []const u8) !bool {
+    /// Analyzes the workspace and, when requested, generates and executes it.
+    /// Diagnostics are collected here and emitted by the CLI exactly once.
+    pub fn compile_workspace(self: *Workspace, entrypoint: []const u8, compile_options: CompileOptions) !bool {
+        self.debug = compile_options.debug;
         var group = std.Io.Group.init;
 
         const entrypoint_absolute = try self.allocator.dupe(u8, entrypoint);
@@ -153,7 +201,7 @@ pub const Workspace = struct {
             });
             return switch (e) {
                 error.OutOfMemory => error.OutOfMemory,
-                else => WorkspaceError.FileNotFoundError,
+                else => false,
             };
         };
 
@@ -179,10 +227,7 @@ pub const Workspace = struct {
         // wait for tasks to complete
         try group.await(self.io);
 
-        if (self.diagnostics.has_errors) {
-            self.diagnostics.report_all(self.io) catch {};
-            return false;
-        }
+        if (self.diagnostics.has_errors) return false;
 
         // detect cycles
         try entrypoint_module.detect_cycles();
@@ -190,8 +235,8 @@ pub const Workspace = struct {
         // sort modules
         const sorted_modules = try self.sort_modules(entrypoint_module);
 
-        for (sorted_modules) |module| {
-            print_node(module.ast, 0, 4);
+        if (compile_options.debug.ast) {
+            for (sorted_modules) |module| print_node(module.ast, 0, 4);
         }
 
         // type check
@@ -201,7 +246,7 @@ pub const Workspace = struct {
         defer type_registry.deinit();
 
         for (sorted_modules) |module| {
-            std.debug.print("Type checking {s}\n", .{module.filepath});
+            if (compile_options.debug.pipeline) std.debug.print("Type checking {s}\n", .{module.filepath});
             // each module has its own environment and type checker
             var global_environment = Environment.init(self.allocator, null);
             defer global_environment.deinit();
@@ -222,44 +267,39 @@ pub const Workspace = struct {
                 }
             };
 
-            if (self.diagnostics.has_content()) {
-                const had_errors = self.diagnostics.has_errors;
-                self.diagnostics.report_all(self.io) catch {};
-                if (had_errors) {
-                    return false;
-                }
-            }
-            std.debug.print("Type checked {s}\n", .{module.filepath});
+            if (self.diagnostics.has_errors) return false;
+            if (compile_options.debug.pipeline) std.debug.print("Type checked {s}\n", .{module.filepath});
         }
         // resolve bindings
-        std.debug.print("Resolving bindings...\n", .{});
+        if (compile_options.debug.pipeline) std.debug.print("Resolving bindings...\n", .{});
         for (sorted_modules) |module| {
-            const new_resolution = BindingResolver.resolve(module.allocator, &type_registry, &self.diagnostics, module, self, module.ast) catch {
-                if (self.diagnostics.has_content()) {
-                    const had_errors = self.diagnostics.has_errors;
-                    self.diagnostics.report_all(self.io) catch {};
-                    if (had_errors) return false;
+            const new_resolution = BindingResolver.resolve(module.allocator, &type_registry, &self.diagnostics, module, self, module.ast) catch |err| {
+                if (!self.diagnostics.has_errors) {
+                    try self.diagnostics.add_diagnostic(.{
+                        .column = 0,
+                        .line = 0,
+                        .stage = .BindingResolver,
+                        .severity = .Error,
+                        .message = "Binding resolution failed",
+                        .hint = @errorName(err),
+                        .file_path = module.filepath,
+                    });
                 }
                 return false;
             };
             module.binding_resolution.deinit();
             module.binding_resolution = new_resolution;
 
-            if (self.diagnostics.has_content()) {
-                const had_errors = self.diagnostics.has_errors;
-                self.diagnostics.report_all(self.io) catch {};
-                if (had_errors) {
-                    return false;
-                }
-            }
-            std.debug.print("Type checked {s}\n", .{module.filepath});
+            if (self.diagnostics.has_errors) return false;
+            if (compile_options.debug.pipeline) std.debug.print("Resolved bindings for {s}\n", .{module.filepath});
         }
+
+        if (!compile_options.execute) return true;
 
         // Code Generation is where the VM needs to be set up and the first isolate is created
 
-        std.debug.print("Generating code ...\n", .{});
-        // empty config for defaults
-        var vm = try Runtime.VM.init(.{}, self, self.allocator);
+        if (compile_options.debug.pipeline) std.debug.print("Generating code ...\n", .{});
+        var vm = try Runtime.VM.init(.{ .debug_execution = compile_options.debug.vm }, self, self.allocator);
         self.vm = vm;
         // first isolate
         const first_isolate = try vm.new_isolate();
@@ -271,25 +311,35 @@ pub const Workspace = struct {
             const function = code_gen.generate();
             if (function) |f| {
                 module.function = f;
-                CodeGeneratorDebug.disassemble(&f.chunk, module.filepath);
+                if (compile_options.debug.bytecode) CodeGeneratorDebug.disassemble(&f.chunk, module.filepath);
             } else {
-                try self.diagnostics.add_diagnostic(.{ .column = 0, .line = 0, .file_path = module.filepath, .message = "Code generation failed", .severity = .Error, .stage = .CodeGenerator });
-                return WorkspaceError.CodeGenerationError;
+                if (!self.diagnostics.has_errors) {
+                    try self.diagnostics.add_diagnostic(.{ .column = 0, .line = 0, .file_path = module.filepath, .message = "Code generation failed", .severity = .Error, .stage = .CodeGenerator });
+                }
+                return false;
             }
-            //
         }
-        std.debug.print("Code Generated ...\n", .{});
+        if (compile_options.debug.pipeline) std.debug.print("Code generated.\n", .{});
         // at this point all the modules should have bytecode in a ObjectFunction
 
-        std.debug.print("Creating Script Closure...\n", .{});
+        if (compile_options.debug.pipeline) std.debug.print("Creating script closure...\n", .{});
         const entrypoint_closure = try Entities.new_closure_object(first_isolate, entrypoint_module.function);
         first_isolate.isolate_closure = entrypoint_closure;
 
-        std.debug.print("Executing...\n", .{});
-
-        const result = try first_isolate.execute();
-        _ = result;
-        std.debug.print("\x1b[32m Done. \x1b[0m\n", .{});
+        if (compile_options.debug.pipeline) std.debug.print("Executing...\n", .{});
+        _ = first_isolate.execute() catch |err| {
+            try self.diagnostics.add_diagnostic(.{
+                .column = 0,
+                .line = first_isolate.current_line() orelse 0,
+                .stage = .Execution,
+                .severity = .Error,
+                .message = runtime_panic_message(err),
+                .hint = runtime_panic_hint(err),
+                .file_path = entrypoint_module.filepath,
+            });
+            return false;
+        };
+        if (compile_options.debug.pipeline) std.debug.print("Execution completed.\n", .{});
         return true;
     }
 
@@ -367,7 +417,7 @@ pub const Workspace = struct {
     }
 
     fn worker_parse_module(param: ParserWorkerParam) void {
-        std.debug.print("Starting Parsing {s}\n", .{param.module.filepath});
+        if (param.workspace.debug.pipeline) std.debug.print("Starting parsing {s}\n", .{param.module.filepath});
 
         var parser = Parser.init(param.module.arena.allocator(), param.workspace, param.module, param.io, param.group) catch {
             param.workspace.diagnostics_mutex.lock(param.io) catch {};
@@ -402,7 +452,7 @@ pub const Workspace = struct {
         param.module.state = .Parsed;
         param.module.mutex.unlock(param.io);
 
-        std.debug.print("Finished Parsing {s}\n", .{param.module.filepath});
+        if (param.workspace.debug.pipeline) std.debug.print("Finished parsing {s}\n", .{param.module.filepath});
     }
 
     fn sort_modules(self: *Workspace, entrypoint_module: *Module) ![]*Module {

@@ -871,6 +871,39 @@ pub const CodeGenerator = struct {
     fn generate_assignment_expression(self: *CodeGenerator, expr: *AST.AssignExpr) CodeGeneratorError!void {
         const op = expr.operator.lexeme;
 
+        if (expr.left.* == .index_expr) {
+            const index = expr.left.index_expr;
+            const setter: Opcode = switch (self.registry.get_type_info(resolve_typeof(index.expr))) {
+                .array => .OP_SET_INDEX_ARRAY,
+                .table => .OP_SET_INDEX_TABLE,
+                else => return CodeGeneratorError.UnsupportedNode,
+            };
+
+            try self.generate_expression(index.expr);
+            try self.generate_expression(index.index);
+
+            if (std.mem.eql(u8, op, "=")) {
+                try self.generate_expression(expr.right);
+            } else {
+                // Preserve the evaluated collection and index. Re-evaluating an
+                // index target would duplicate user-visible side effects.
+                try self.current.chunk().write_opcode(.OP_DUP_TWO, expr.line);
+                const getter: Opcode = switch (setter) {
+                    .OP_SET_INDEX_ARRAY => .OP_INDEX_ARRAY,
+                    .OP_SET_INDEX_TABLE => .OP_INDEX_TABLE,
+                    else => unreachable,
+                };
+                try self.current.chunk().write_opcode(getter, expr.line);
+                try self.generate_expression(expr.right);
+                const base_op = op[0 .. op.len - 1];
+                const opcode = try CodeGenerator.select_opcode(base_op, resolve_typeof(expr.left), resolve_typeof(expr.right));
+                try self.current.chunk().write_opcode(opcode, expr.line);
+            }
+
+            try self.current.chunk().write_opcode(setter, expr.line);
+            return;
+        }
+
         // setting a static struct member
         if (expr.left.* == .static_member_expr) {
             const member_info = self.binding_resolution.member_infos.get(expr.left) orelse return CodeGeneratorError.MissingBinding;

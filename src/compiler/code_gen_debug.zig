@@ -202,9 +202,12 @@ pub const ChunkDisassembler = struct {
             .OP_INDEX_ARRAY,
             .OP_INDEX_STRING,
             .OP_INDEX_TABLE,
+            .OP_SET_INDEX_ARRAY,
+            .OP_SET_INDEX_TABLE,
             .OP_RESUME,
             .OP_YIELD,
             .OP_DUP,
+            .OP_DUP_TWO,
             .OP_PANIC,
             .OP_RANGE,
             => {

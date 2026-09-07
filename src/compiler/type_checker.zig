@@ -661,9 +661,20 @@ pub const TypeChecker = struct {
 
                 const right_type = try self.check_expression(expr.right);
 
-                // if assigning to a variable or static field
-                if (expr.left.* == .identifier_expr or expr.left.* == .dot_expr or expr.left.* == .static_member_expr) {
+                // Only mutable l-values can be assigned. Arrays and tables are
+                // mutable through an index; strings and tuples are not.
+                if (expr.left.* == .identifier_expr or expr.left.* == .dot_expr or expr.left.* == .static_member_expr or expr.left.* == .index_expr) {
                     const left_type = try self.check_expression(expr.left);
+                    if (expr.left.* == .index_expr) {
+                        const collection_type = try self.check_expression(expr.left.index_expr.expr);
+                        switch (self.registry.get_type_info(collection_type)) {
+                            .array, .table => {},
+                            else => {
+                                try self.fail("Invalid assignment target", "Only array and table elements can be assigned through an index.", expr.line, expr.column);
+                                return TypeCheckerError.InvalidOperation;
+                            },
+                        }
+                    }
                     if (!try self.is_compatible(left_type, right_type)) {
                         try self.fail("Type Mismatch", "Ensure that the assigned value type matches the variable's declared type.", expr.line, expr.column);
                         return TypeCheckerError.TypeMismatch;

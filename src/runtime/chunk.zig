@@ -93,6 +93,8 @@ pub const Opcode = enum(u8) {
     OP_INDEX_STRING,
     OP_INDEX_TABLE,
     OP_INDEX_TUPLE,
+    OP_SET_INDEX_ARRAY,
+    OP_SET_INDEX_TABLE,
 
     OP_CLOSURE,
     OP_COROUTINE,
@@ -108,6 +110,8 @@ pub const Opcode = enum(u8) {
 
     /// Duplicate the value on the top of the stack
     OP_DUP,
+    /// Duplicate the top two values while preserving their order.
+    OP_DUP_TWO,
 
     OP_PANIC,
 

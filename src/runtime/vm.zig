@@ -11,6 +11,7 @@ pub const VMConfig = struct {
     stack_size: usize = 2048,
     max_frame_count: usize = 128,
     globals_size: usize = 1024,
+    debug_execution: bool = false,
 };
 
 pub const BuiltinFunctions = struct {};
@@ -280,6 +281,13 @@ pub const Isolate = struct {
         return try self.execution_loop();
     }
 
+    pub fn current_line(self: *const Isolate) ?usize {
+        if (self.current.frame_count == 0) return null;
+        const frame = &self.current.frames[self.current.frame_count - 1];
+        if (frame.ip == 0) return null;
+        return frame.closure.function.chunk.line_numbers.items[frame.ip - 1];
+    }
+
     pub fn execution_loop(self: *Isolate) RuntimePanic!InterpretResult {
         var frame = &self.current.frames[self.current.frame_count - 1];
 
@@ -290,9 +298,11 @@ pub const Isolate = struct {
             switch (instruction) {
                 .OP_RETURN => {
                     const result = try self.pop_value();
-                    std.debug.print("RETURN: ", .{});
-                    Entities.print_value(result);
-                    std.debug.print("\n", .{});
+                    if (self.vm.config.debug_execution) {
+                        std.debug.print("RETURN: ", .{});
+                        Entities.print_value(result);
+                        std.debug.print("\n", .{});
+                    }
                     self.close_upvalues(&self.current.stack[frame.slot_start]);
                     self.current.stack_top_index = frame.slot_start - 1;
                     self.current.frame_count -= 1;
@@ -636,9 +646,11 @@ pub const Isolate = struct {
 
                 .OP_POP => {
                     const v = try self.pop_value();
-                    std.debug.print("POP: ", .{});
-                    Entities.print_value(v);
-                    std.debug.print("\n", .{});
+                    if (self.vm.config.debug_execution) {
+                        std.debug.print("POP: ", .{});
+                        Entities.print_value(v);
+                        std.debug.print("\n", .{});
+                    }
                 },
 
                 .OP_POP_N => {
@@ -826,6 +838,44 @@ pub const Isolate = struct {
                     _ = try self.pop_value();
                     try self.push_value(value);
                 },
+                .OP_SET_INDEX_ARRAY => {
+                    const value = try self.peek_value(0);
+                    const index = try self.peek_value(1);
+                    const collection = try self.peek_value(2);
+                    const array: *Entities.ObjectArray = switch (collection) {
+                        .object => |obj| switch (obj.object_type) {
+                            .ObjectArray => @ptrCast(obj),
+                            else => return RuntimePanic.CorruptedState,
+                        },
+                        else => return RuntimePanic.CorruptedState,
+                    };
+                    const idx = try checked_index(index, array.length);
+                    array.elements[idx] = value;
+                    _ = try self.pop_value();
+                    _ = try self.pop_value();
+                    _ = try self.pop_value();
+                    try self.push_value(value);
+                },
+                .OP_SET_INDEX_TABLE => {
+                    const value = try self.peek_value(0);
+                    const key = try self.peek_value(1);
+                    const collection = try self.peek_value(2);
+                    const table: *Entities.ObjectTable = switch (collection) {
+                        .object => |obj| switch (obj.object_type) {
+                            .ObjectTable => @ptrCast(obj),
+                            else => return RuntimePanic.CorruptedState,
+                        },
+                        else => return RuntimePanic.CorruptedState,
+                    };
+                    _ = Entities.table_set(self, table, key, value) catch |err| switch (err) {
+                        error.OutOfMemory => return RuntimePanic.OutOfMemory,
+                        error.NonHashableElement => return RuntimePanic.CorruptedState,
+                    };
+                    _ = try self.pop_value();
+                    _ = try self.pop_value();
+                    _ = try self.pop_value();
+                    try self.push_value(value);
+                },
                 .OP_CALL => {
                     const arg_count = frame.read_u16();
                     const callee = try self.peek_value(arg_count);
@@ -998,20 +1048,19 @@ pub const Isolate = struct {
                     const top = try self.peek_value(0);
                     try self.push_value(top);
                 },
+                .OP_DUP_TWO => {
+                    const first = try self.peek_value(1);
+                    const second = try self.peek_value(0);
+                    try self.push_value(first);
+                    try self.push_value(second);
+                },
 
                 .OP_PANIC => {
-                    const val = try self.pop_value();
-                    std.debug.print("PANIC: ", .{});
-                    Entities.print_value(val);
-                    std.debug.print("\n", .{});
-                    self.vm.workspace.diagnostics.add_diagnostic(.{
-                        .file_path = "",
-                        .line = 0,
-                        .column = 0,
-                        .stage = .Execution,
-                        .severity = .Error,
-                        .message = "Programmer generated runtime panic.",
-                    }) catch {};
+                    _ = try self.pop_value();
+                    if (self.vm.config.debug_execution) {
+                        std.debug.print("PANIC: ", .{});
+                        std.debug.print("\n", .{});
+                    }
                     return RuntimePanic.Panic;
                 },
 
