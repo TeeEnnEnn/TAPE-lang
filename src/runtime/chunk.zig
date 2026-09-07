@@ -74,6 +74,7 @@ pub const Opcode = enum(u8) {
 
     OP_POP,
     OP_POP_N,
+    OP_GIVE_POP,
     OP_LOAD_GLOBAL,
     OP_STORE_GLOBAL,
     OP_STORE_LOCAL,

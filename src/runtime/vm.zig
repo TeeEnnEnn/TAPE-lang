@@ -649,6 +649,16 @@ pub const Isolate = struct {
                     self.current.stack_top_index -= pop_count;
                 },
 
+                .OP_GIVE_POP => {
+                    const pop_count = frame.read_u16();
+                    const give_value = try self.pop_value();
+                    if (pop_count > 0) {
+                        self.close_upvalues(&self.current.stack[self.current.stack_top_index - pop_count]);
+                        self.current.stack_top_index -= pop_count;
+                    }
+                    try self.push_value(give_value);
+                },
+
                 .OP_LOAD_GLOBAL => {
                     const index = frame.read_u16();
                     try self.push_value(self.globals[index]);

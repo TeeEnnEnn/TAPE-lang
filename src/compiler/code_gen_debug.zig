@@ -221,6 +221,7 @@ pub const ChunkDisassembler = struct {
             .OP_STORE_LOCAL,
             .OP_LOAD_LOCAL,
             .OP_POP_N,
+            .OP_GIVE_POP,
             .OP_INDEX_TUPLE,
             .OP_LOAD_FUNCTION_CONSTANT,
             .OP_LOAD_UPVALUE,

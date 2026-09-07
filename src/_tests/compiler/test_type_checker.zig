@@ -160,8 +160,8 @@ test "Type Checker - match exhaustiveness" {
 
     // valid: exhaustive match on enum with returns
     _ = try checkSource(allocator, "enum Color { Red, Green, Blue } fn f(c: Color) -> Int { match (c) { Color::Red => { return 1; }, Color::Green => { return 2; }, Color::Blue => { return 3; }, }; }");
-    // valid: match on non-enum type (no exhaustiveness check needed)
-    _ = try checkSource(allocator, "fn f(x: Int) -> Int { match (x) { 1 => { return 10; }, 2 => { return 20; }, }; }");
+    // valid: match on primitive requires default (now exhaustive)
+    _ = try checkSource(allocator, "fn f(x: Int) -> Int { match (x) { 1 => { return 10; }, default => { return 20; }, }; }");
 
     // invalid: non-exhaustive match on enum
     try std.testing.expectError(TypeCheckerError.NonExhaustiveMatch, checkSource(allocator, "enum Color { Red, Green, Blue } fn f(c: Color) -> Int { match (c) { Color::Red => { return 1; }, Color::Green => { return 2; }, }; }"));
@@ -331,8 +331,8 @@ test "Type Checker - match return completeness" {
     _ = try checkSource(allocator, "enum Color { Red, Green, Blue } fn f(c: Color) -> Int { match (c) { Color::Red => { return 1; }, Color::Green => { return 2; }, Color::Blue => { return 3; }, }; }");
     // valid: match with one case panicking
     _ = try checkSource(allocator, "enum Color { Red, Green } fn f(c: Color) -> Int { match (c) { Color::Red => { return 1; }, Color::Green => { panic \"no\"; }, }; }");
-    // valid: non-enum match (no exhaustiveness check needed)
-    _ = try checkSource(allocator, "fn f(x: Int) -> Int { match (x) { 1 => { return 10; }, 2 => { return 20; }, }; return 0; }");
+    // valid: primitive match with default
+    _ = try checkSource(allocator, "fn f(x: Int) -> Int { match (x) { 1 => { return 10; }, default => { return 20; }, }; return 0; }");
 
     // invalid: match case uses give not return — function missing return
     try std.testing.expectError(TypeCheckerError.MissingReturn, checkSource(allocator, "enum Color { Red, Green } fn f(c: Color) -> Int { match (c) { Color::Red => { give 1; }, Color::Green => { give 2; }, }; }"));

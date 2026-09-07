@@ -1287,6 +1287,17 @@ pub const TypeChecker = struct {
                 self.expected_give_type = null;
                 defer self.expected_give_type = prev_give;
                 const expr_typeid = try self.check_expression(expr.expr);
+                // duplicate default detection
+                {
+                    var default_count: usize = 0;
+                    for (expr.cases) |case| {
+                        if (case.pattern.* == .default_pat) default_count += 1;
+                    }
+                    if (default_count > 1) {
+                        try self.fail("Duplicate default", "Match expression cannot have more than one `default` case.", expr.line, expr.column);
+                        return TypeCheckerError.DuplicateSymbol;
+                    }
+                }
                 try self.check_match_exhaustiveness(expr_typeid, expr);
                 var all_return = expr.cases.len > 0;
                 for (expr.cases) |case| {
@@ -1433,38 +1444,140 @@ pub const TypeChecker = struct {
         };
     }
 
-    fn check_match_exhaustiveness(self: *TypeChecker, matched_type: AST.TypeId, expr: *AST.MatchExpr) TypeCheckerError!void {
-        const type_info = self.registry.get_type_info(matched_type);
-        const variants: []const []const u8 = switch (type_info) {
-            ._enum => |e| e.variants,
-            ._error => |e| e.variants,
-            else => return, // not an enum/error, skip exhaustiveness check
-        };
-
-        // If any case pattern is not a static_member_expr, assume catch-all and skip
-        var has_catch_all = false;
+    fn hasDefault(self: *TypeChecker, expr: *AST.MatchExpr) bool {
+        _ = self;
         for (expr.cases) |case| {
-            if (case.pattern.* != .static_member_expr) {
-                has_catch_all = true;
-                break;
-            }
+            if (case.pattern.* == .default_pat) return true;
         }
-        if (has_catch_all) return;
+        return false;
+    }
 
-        // Collect covered variants
+    fn isPrimitiveTypeId(self: *TypeChecker, id: AST.TypeId) bool {
+        if (id == @intFromEnum(PrimitiveType.Never)) return false;
+        const info = self.registry.get_type_info(id);
+        return switch (info) {
+            .primitive => true,
+            .array, .table, .range, .tuple, .function, .coroutine, ._struct, ._type => true,
+            else => false,
+        };
+    }
+
+    fn unionContainsPrimitive(self: *TypeChecker, id: AST.TypeId) bool {
+        const info = self.registry.get_type_info(id);
+        if (info == ._union) {
+            return self.unionContainsPrimitive(info._union.left) or self.unionContainsPrimitive(info._union.right);
+        }
+        return self.isPrimitiveTypeId(id);
+    }
+
+    fn isNeverTypeId(self: *TypeChecker, id: AST.TypeId) bool {
+        _ = self;
+        return id == @intFromEnum(PrimitiveType.Never);
+    }
+
+    fn check_match_exhaustiveness(self: *TypeChecker, matched_type: AST.TypeId, expr: *AST.MatchExpr) TypeCheckerError!void {
+        const has_default = self.hasDefault(expr);
+
+        // Never is exhaustive even with empty cases
+        if (self.isNeverTypeId(matched_type)) return;
+
+        // Empty match without default is non-exhaustive (unless Never)
+        if (expr.cases.len == 0) {
+            if (!has_default) {
+                try self.fail("Non-exhaustive match", "Empty match requires `default` unless matched type is `Never`.", expr.line, expr.column);
+                return TypeCheckerError.NonExhaustiveMatch;
+            }
+            return;
+        }
+
+        if (has_default) return; // default covers remaining values, anywhere
+
+        // Bool and Nil are finite - check exhaustive without default
+        if (matched_type == @intFromEnum(PrimitiveType.Bool)) {
+            var has_true = false;
+            var has_false = false;
+            for (expr.cases) |case| {
+                if (case.pattern.* == .bool_lit) {
+                    if (case.pattern.bool_lit.value) has_true = true else has_false = true;
+                }
+            }
+            if (has_true and has_false) return;
+            try self.fail("Non-exhaustive match", "Bool match must cover `true` and `false` or have `default`.", expr.line, expr.column);
+            return TypeCheckerError.NonExhaustiveMatch;
+        }
+        if (matched_type == @intFromEnum(PrimitiveType.Nil)) {
+            var has_nil = false;
+            for (expr.cases) |case| {
+                if (case.pattern.* == .nil_lit) has_nil = true;
+            }
+            if (has_nil) return;
+            try self.fail("Non-exhaustive match", "Nil match must cover `nil` or have `default`.", expr.line, expr.column);
+            return TypeCheckerError.NonExhaustiveMatch;
+        }
+
+        _ = self.registry.get_type_info(matched_type);
+
+        // Primitive, union containing primitive, array, table, tuple, etc. -> requires default
+        if (self.unionContainsPrimitive(matched_type)) {
+            try self.fail("Non-exhaustive match", "Match on primitive or union containing primitive requires `default`.", expr.line, expr.column);
+            return TypeCheckerError.NonExhaustiveMatch;
+        }
+
+        // Pure enum/error (or union of them) - check variant coverage
+        // Collect all enum/error variants from (possibly union) type
+        var expected_variants: std.ArrayList([]const u8) = .empty;
+        defer expected_variants.deinit(self.allocator);
+        var has_enum_error = false;
+
+        // Helper to collect variants from a type id
+        const collect = struct {
+            fn run(s: *TypeChecker, id: AST.TypeId, out: *std.ArrayList([]const u8), has: *bool) TypeCheckerError!void {
+                const inf = s.registry.get_type_info(id);
+                switch (inf) {
+                    ._enum => |e| {
+                        has.* = true;
+                        for (e.variants) |v| try out.append(s.allocator, v);
+                    },
+                    ._error => |e| {
+                        has.* = true;
+                        for (e.variants) |v| try out.append(s.allocator, v);
+                    },
+                    ._union => |u| {
+                        try run(s, u.left, out, has);
+                        try run(s, u.right, out, has);
+                    },
+                    else => {},
+                }
+            }
+        }.run;
+
+        try collect(self, matched_type, &expected_variants, &has_enum_error);
+
+        if (!has_enum_error) {
+            // Should have been caught by primitive check, but be safe
+            try self.fail("Non-exhaustive match", "Match requires `default` for this type.", expr.line, expr.column);
+            return TypeCheckerError.NonExhaustiveMatch;
+        }
+
+        // Collect covered variants (only static_member patterns contribute)
         var covered = std.ArrayList([]const u8).empty;
         defer covered.deinit(self.allocator);
         for (expr.cases) |case| {
             if (case.pattern.* == .static_member_expr) {
                 try covered.append(self.allocator, case.pattern.static_member_expr.member.lexeme);
+            } else if (case.pattern.* == .default_pat) {
+                // already handled has_default
+            } else {
+                // Non-static pattern (e.g., literal 1 on enum) does not count as covering;
+                // type mismatch already reported via is_compatible check, but for exhaustiveness
+                // we treat it as not covering any variant (needs default which we don't have)
             }
         }
 
-        // Check all variants are covered
-        for (variants) |variant| {
+        for (expected_variants.items) |variant| {
             var found = false;
-            for (covered.items) |covered_variant| {
-                if (std.mem.eql(u8, covered_variant, variant)) {
+            for (covered.items) |c| {
+                if (std.mem.eql(u8, c, variant)) {
                     found = true;
                     break;
                 }

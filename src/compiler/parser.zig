@@ -1264,7 +1264,13 @@ pub const Parser = struct {
         while (!self.check(.RIGHT_BRACE) and !self.check(.EOF)) {
             const case = try self.parse_match_case();
             try cases.append(self.allocator, case);
-            if (!self.check(.RIGHT_BRACE)) try self.consume(.COMMA, "Expected ',' to separate match cases.");
+            if (!self.check(.RIGHT_BRACE)) {
+                if (case.stmt.* == .block_stmt) {
+                    try self.consume(.COMMA, "Expected ',' after block match arm.");
+                } else {
+                    _ = try self.match(.COMMA);
+                }
+            }
         }
         try self.consume(.RIGHT_BRACE, "Expected '}' to end match expression body.");
 

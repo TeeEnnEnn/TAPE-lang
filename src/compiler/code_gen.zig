@@ -217,9 +217,15 @@ pub const CodeGenerator = struct {
                     self.fail("Block scope has no pop count in binding resolution.", null, stmt.line, stmt.column);
                     return CodeGeneratorError.MissingBinding;
                 };
+
                 if (pop_count > 0) {
-                    try self.current.chunk().write_opcode(.OP_POP_N, stmt.line);
-                    try self.current.chunk().write_u16(pop_count, stmt.line);
+                    if (stmt_has_give(node)) {
+                        try self.current.chunk().write_opcode(.OP_GIVE_POP, stmt.line);
+                        try self.current.chunk().write_u16(pop_count, stmt.line);
+                    } else {
+                        try self.current.chunk().write_opcode(.OP_POP_N, stmt.line);
+                        try self.current.chunk().write_u16(pop_count, stmt.line);
+                    }
                     self.current.current_locals_count -= pop_count;
                 }
             },
@@ -344,10 +350,7 @@ pub const CodeGenerator = struct {
             },
 
             .give_stmt => |stmt| {
-                _ = stmt;
-                // TODO: give statement
-                self.fail("Unsupported node type in code generation.", "This node type is not yet implemented for bytecode emission.", 0, 0);
-                return CodeGeneratorError.UnsupportedNode;
+                try self.generate_expression(stmt.expr);
             },
 
             .break_stmt => |stmt| {
@@ -761,7 +764,79 @@ pub const CodeGenerator = struct {
             },
 
             .match_expr => |expr| {
-                _ = expr;
+                // match target expression
+                try self.generate_expression(expr.expr);
+
+                var end_jumps: std.ArrayList(usize) = .empty;
+                defer end_jumps.deinit(self.allocator);
+
+                var has_default = false;
+
+                for (expr.cases) |case| {
+                    if (case.pattern.* == .default_pat) {
+                        has_default = true;
+
+                        // Pop target since default always matches
+                        try self.current.chunk().write_opcode(.OP_POP, case.line);
+
+                        try self.generate_node(case.stmt);
+
+                        // if no give then emit nil
+                        if (!stmt_has_give(case.stmt)) {
+                            try self.current.chunk().write_opcode(.OP_NIL, case.line);
+                        }
+
+                        // Jump to end of match
+                        const jump_to_end = try self.emit_jump(.OP_JUMP, case.line);
+                        try end_jumps.append(self.allocator, jump_to_end);
+                        continue;
+                    }
+
+                    // non default arms
+
+                    // duplicate target: [target] -> [target, target]
+                    try self.current.chunk().write_opcode(.OP_DUP, case.line);
+
+                    // Evaluate pattern: [target, target] -> [target, target, pattern]
+                    try self.generate_expression(case.pattern);
+
+                    // Compare equality: [target, target, pattern] -> [target, bool]
+                    try self.current.chunk().write_opcode(.OP_EQUAL, case.line);
+
+                    // Jump to next case if not equal
+                    const mismatch_jump = try self.emit_jump(.OP_JUMP_IF_FALSE, case.line);
+
+                    // match succeeded
+                    try self.current.chunk().write_opcode(.OP_POP, case.line); // Pop bool
+                    try self.current.chunk().write_opcode(.OP_POP, case.line); // Pop target
+
+                    // case body
+                    try self.generate_node(case.stmt);
+
+                    // if no give then emit nil
+                    if (!stmt_has_give(case.stmt)) {
+                        try self.current.chunk().write_opcode(.OP_NIL, case.line);
+                    }
+
+                    // Jump to end of match
+                    const jump_to_end = try self.emit_jump(.OP_JUMP, case.line);
+                    try end_jumps.append(self.allocator, jump_to_end);
+
+                    // mismatch branch
+                    try self.patch_jump(mismatch_jump);
+                    try self.current.chunk().write_opcode(.OP_POP, case.line); // Pop 'false' (leaves [target] on stack)
+                }
+
+                // If no default arm matched or was present:
+                if (!has_default) {
+                    try self.current.chunk().write_opcode(.OP_POP, expr.line); // Pop target
+                    try self.current.chunk().write_opcode(.OP_NIL, expr.line); // Result is nil
+                }
+
+                // Patch all exit jumps to land here
+                for (end_jumps.items) |end_jump| {
+                    try self.patch_jump(end_jump);
+                }
             },
 
             .try_expr => |expr| {
@@ -1120,5 +1195,21 @@ pub const CodeGenerator = struct {
             try self.current.chunk().write_u8(if (upvalue.captures_parent_local) 1 else 0, line);
             try self.current.chunk().write_u16(upvalue.parent_slot, line);
         }
+    }
+
+    fn stmt_has_give(node: *AST.ASTNode) bool {
+        return switch (node.*) {
+            .give_stmt => true,
+            .block_stmt => |b| for (b.stmts) |s| {
+                if (stmt_has_give(s)) return true;
+            } else false,
+            .if_stmt => |s| stmt_has_give(s.then_branch) or (if (s.else_branch) |e| stmt_has_give(e) else false),
+            .while_stmt => |s| stmt_has_give(s.body),
+            .for_stmt => |s| stmt_has_give(s.body),
+            .match_expr => |e| for (e.cases) |c| {
+                if (stmt_has_give(c.stmt)) return true;
+            } else false,
+            else => false,
+        };
     }
 };
