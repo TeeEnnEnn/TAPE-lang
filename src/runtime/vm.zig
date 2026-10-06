@@ -9,7 +9,7 @@ const Opcode = Chunk.Opcode;
 
 pub const VMConfig = struct {
     stack_size: usize = 2048,
-    max_frame_count: usize = 128,
+    frame_capacity: usize = 128,
     globals_size: usize = 1024,
     debug_execution: bool = false,
 };
@@ -100,7 +100,7 @@ pub const Isolate = struct {
 
         isolate.gc = try BasicGarbageCollector.BasicGarbageCollector.init(base_allocator, isolate, mark_roots, clean_string_intern);
 
-        isolate.execution_state = try Entities.ExecutionState.init(isolate.base_allocator, vm.config.max_frame_count, vm.config.stack_size);
+        isolate.execution_state = try Entities.ExecutionState.init(isolate.gc.managed_allocator.allocator(), vm.config.frame_capacity, vm.config.stack_size);
 
         isolate.globals = @ptrCast(@alignCast(try base_allocator.alloc(TapeValue, vm.config.globals_size)));
         isolate.globals_count = 0;
@@ -113,10 +113,9 @@ pub const Isolate = struct {
 
     pub fn deinit(self: *Isolate) void {
         self.string_intern.deinit();
-        self.gc.deinit();
-        self.base_allocator.free(self.execution_state.stack[0..self.vm.config.stack_size]);
-        self.base_allocator.free(self.execution_state.frames[0..self.vm.config.max_frame_count]);
+        self.execution_state.deinit(self.gc.managed_allocator.allocator());
         self.base_allocator.free(self.globals[0..self.vm.config.globals_size]);
+        self.gc.deinit();
         self.function_constants.deinit(self.base_allocator);
         self.base_allocator.destroy(self);
     }
@@ -264,7 +263,7 @@ pub const Isolate = struct {
         if (arg_count != closure.function.arity) {
             return RuntimePanic.ArgumentCountMismatch;
         }
-        if (self.current.frame_count + 1 >= self.vm.config.max_frame_count) {
+        if (self.current.frame_count + 1 >= self.vm.config.frame_capacity) {
             return RuntimePanic.StackOverflow;
         }
         self.current.frame_count += 1;
@@ -899,14 +898,30 @@ pub const Isolate = struct {
                         else => return RuntimePanic.CorruptedState,
                     };
                     const closure = try Entities.new_closure_object(self, function);
-                    for (0..function.upvalue_count) |upvalue_slot| {
-                        const captures_parent_local = frame.read_u8() != 0;
-                        const parent_slot = frame.read_u16();
-                        closure.upvalues[upvalue_slot] = if (captures_parent_local)
-                            try self.capture_upvalue(&self.current.stack[frame.slot_start + parent_slot])
-                        else
-                            frame.closure.upvalues[parent_slot];
+                    // root the closure
+                    try self.push_value(.{ .object = &closure.header });
+
+                    if (function.upvalue_count != 0) {
+                        const upvalues = try self.gc.managed_allocator.allocator().alloc(*Entities.ObjectUpvalue, function.upvalue_count);
+                        errdefer {
+                            self.gc.managed_allocator.allocator().free(upvalues);
+                            _ = self.pop_value() catch {
+                                // do nothing if we fail at this point
+                            }; // remove the rooted closure on failure
+                        }
+
+                        for (0..function.upvalue_count) |upvalue_slot| {
+                            const captures_parent_local = frame.read_u8() != 0;
+                            const parent_slot = frame.read_u16();
+                            upvalues[upvalue_slot] = if (captures_parent_local)
+                                try self.capture_upvalue(&self.current.stack[frame.slot_start + parent_slot])
+                            else
+                                frame.closure.upvalues[parent_slot];
+                        }
+                        closure.upvalues = upvalues;
                     }
+                    // remove rooted closure
+                    _ = try self.pop_value();
                     try self.push_value(.{ .object = &closure.header });
                 },
                 .OP_COROUTINE => {
@@ -927,7 +942,7 @@ pub const Isolate = struct {
                         args.appendAssumeCapacity(try self.peek_value(arg_count - 1 - i));
                     }
 
-                    const coroutine = try Entities.new_coroutine_object(self, closure_object, self.vm.config.max_frame_count, self.vm.config.stack_size);
+                    const coroutine = try Entities.new_coroutine_object(self, closure_object, self.vm.config.frame_capacity, self.vm.config.stack_size);
 
                     const prev_execution_state = self.current;
                     self.current = &coroutine.execution_state;
@@ -945,7 +960,7 @@ pub const Isolate = struct {
 
                 .OP_RESUME => {
                     const resume_value = try self.pop_value();
-                    const coroutine_value = try self.pop_value();
+                    const coroutine_value = try self.peek_value(0); // keep the coroutine on the stack
                     const coroutine_object: *Entities.ObjectCoroutine = switch (coroutine_value) {
                         .object => |obj| switch (obj.object_type) {
                             .ObjectCoroutine => @ptrCast(obj),
@@ -971,6 +986,7 @@ pub const Isolate = struct {
 
                     const result = self.execution_loop(); // resume execution where you left off
                     self.current = prev_execution_state;
+                    _ = try self.pop_value(); // the executed coroutine
 
                     switch (try result) {
                         .Ok => |value| {
