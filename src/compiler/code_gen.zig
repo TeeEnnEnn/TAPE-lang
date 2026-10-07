@@ -5,7 +5,8 @@
 const std = @import("std");
 const Entities = @import("../runtime/entities.zig");
 const BindingResolver = @import("binding_resolver.zig");
-const Runtime = @import("../runtime/vm.zig");
+const VM = @import("../runtime/vm.zig").VM;
+const Isolate = @import("../runtime/isolate.zig").Isolate;
 const AST = @import("ast.zig");
 const TypeRegistry = @import("type_registry.zig");
 const Chunk = @import("../runtime/chunk.zig").Chunk;
@@ -88,7 +89,7 @@ pub const CodeGenerator = struct {
     /// base allocator - not for runtime managed entities
     allocator: std.mem.Allocator,
     /// The isolate to allocate runtime managed entities
-    isolate: *Runtime.Isolate,
+    isolate: *Isolate,
     /// The binding resolution for the module currently being compiled
     binding_resolution: *const BindingResolver.BindingResolution,
     /// Shared type registry from type checking.
@@ -106,7 +107,7 @@ pub const CodeGenerator = struct {
 
     pub fn init(
         allocator: std.mem.Allocator,
-        isolate: *Runtime.Isolate,
+        isolate: *Isolate,
         binding_resolution: *const BindingResolver.BindingResolution,
         registry: *TypeRegistry.TypeRegistry,
         node: *AST.ASTNode,

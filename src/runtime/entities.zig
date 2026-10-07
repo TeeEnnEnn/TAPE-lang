@@ -3,7 +3,7 @@
 
 const std = @import("std");
 const Chunk = @import("chunk.zig").Chunk;
-const Isolate = @import("vm.zig").Isolate;
+const Isolate = @import("isolate.zig").Isolate;
 const AST = @import("../compiler/ast.zig");
 const BasicGarbageCollector = @import("../memory/basic_garbage_collector.zig");
 const basic_gc = BasicGarbageCollector.BasicGarbageCollector;
