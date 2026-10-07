@@ -1,7 +1,6 @@
 const std = @import("std");
 const AST = @import("ast.zig");
 const helpers = @import("../cli/cli.zig");
-const options = @import("TAPE_lang_build_options");
 const Parser = @import("parser.zig").Parser;
 const TypeChecker = @import("type_checker.zig").TypeChecker;
 const TypeRegistry = @import("type_registry.zig").TypeRegistry;
