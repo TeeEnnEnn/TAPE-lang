@@ -302,6 +302,7 @@ pub const Workspace = struct {
         self.vm = vm;
         // first isolate
         const first_isolate = try vm.new_isolate();
+        first_isolate.gc.deactivate_collector();
 
         // emit Bytecode
         for (sorted_modules) |module| {
@@ -325,17 +326,12 @@ pub const Workspace = struct {
         const entrypoint_closure = try Entities.new_closure_object(first_isolate, entrypoint_module.function);
         first_isolate.isolate_closure = entrypoint_closure;
 
+        first_isolate.gc.activate_collector();
         if (compile_options.debug.pipeline) std.debug.print("Executing...\n", .{});
         _ = first_isolate.execute() catch |err| {
-            try self.diagnostics.add_diagnostic(.{
-                .column = 0,
-                .line = first_isolate.current_line() orelse 0,
-                .stage = .Execution,
-                .severity = .Error,
-                .message = runtime_panic_message(err),
-                .hint = runtime_panic_hint(err),
-                .file_path = entrypoint_module.filepath,
-            });
+            if (err != error.Panic) {
+                first_isolate.print_stack_trace(null, err);
+            }
             return false;
         };
         if (compile_options.debug.pipeline) std.debug.print("Execution completed.\n", .{});
@@ -422,7 +418,14 @@ pub const Workspace = struct {
             param.workspace.diagnostics_mutex.lock(param.io) catch {};
             defer param.workspace.diagnostics_mutex.unlock(param.io);
 
-            param.workspace.diagnostics.add_diagnostic(.{ .column = 0, .line = 0, .stage = .Parser, .severity = .Error, .message = "Failed to create parser", .file_path = param.module.filepath }) catch {};
+            param.workspace.diagnostics.add_diagnostic(.{
+                .column = 0,
+                .line = 0,
+                .stage = .Parser,
+                .severity = .Error,
+                .message = "Failed to create parser",
+                .file_path = param.module.filepath,
+            }) catch {};
 
             param.module.mutex.lock(param.io) catch {};
             param.module.state = .Parsed;
@@ -438,7 +441,16 @@ pub const Workspace = struct {
             param.workspace.diagnostics_mutex.lock(param.io) catch {};
             defer param.workspace.diagnostics_mutex.unlock(param.io);
 
-            param.workspace.diagnostics.add_diagnostic(.{ .column = 0, .line = 0, .stage = .Parser, .severity = .Error, .message = "Failed to parse due to parser error.", .file_path = param.module.filepath }) catch {};
+            if (!param.workspace.diagnostics.has_errors) {
+                param.workspace.diagnostics.add_diagnostic(.{
+                    .column = 0,
+                    .line = 0,
+                    .stage = .Parser,
+                    .severity = .Error,
+                    .message = "Failed to parse due to parser error.",
+                    .file_path = param.module.filepath,
+                }) catch {};
+            }
 
             param.module.mutex.lock(param.io) catch {};
             param.module.state = .Parsed;

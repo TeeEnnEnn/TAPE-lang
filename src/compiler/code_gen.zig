@@ -120,7 +120,7 @@ pub const CodeGenerator = struct {
             .binding_resolution = binding_resolution,
             .registry = registry,
             .node = node,
-            .current = try FunctionCompiler.init(allocator, try Entities.new_function_object(isolate), null, 0),
+            .current = try FunctionCompiler.init(allocator, try Entities.new_function_object(isolate, module.filepath), null, 0),
             .diagnostics = diagnostics,
             .module = module,
         };
@@ -446,7 +446,7 @@ pub const CodeGenerator = struct {
             return CodeGeneratorError.MissingBinding;
         };
 
-        const function_object = try Entities.new_function_object(self.isolate);
+        const function_object = try Entities.new_function_object(self.isolate, self.module.filepath);
         // Start nested function with its own parameter count:
         const new_function = try FunctionCompiler.init(self.allocator, function_object, self.current, binding.param_count);
         const enclosing = self.current;
@@ -1202,7 +1202,7 @@ pub const CodeGenerator = struct {
             return CodeGeneratorError.MissingBinding;
         };
 
-        const function_object = try Entities.new_function_object(self.isolate);
+        const function_object = try Entities.new_function_object(self.isolate, self.module.filepath);
         const new_function = try FunctionCompiler.init(self.allocator, function_object, self.current, binding.param_count);
         const enclosing = self.current;
         self.current = new_function;

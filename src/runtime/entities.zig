@@ -553,9 +553,10 @@ pub fn new_tuple_object(isolate: *Isolate, length: usize) !*ObjectTuple {
     return tuple;
 }
 
-pub fn new_function_object(isolate: *Isolate) !*ObjectFunction {
+pub fn new_function_object(isolate: *Isolate, file_path: []const u8) !*ObjectFunction {
     const func: *ObjectFunction = try isolate.gc.allocate_object(ObjectFunction, .ObjectFunction);
     func.chunk = Chunk.init(isolate.gc.managed_allocator.allocator());
+    func.chunk.file_path = file_path;
     func.upvalue_count = 0;
     func.arity = 0;
     func.name = null;

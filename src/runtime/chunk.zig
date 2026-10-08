@@ -133,6 +133,8 @@ pub const Chunk = struct {
     code: std.ArrayList(u8),
     /// Line numbers corresponding to each opcode.
     line_numbers: std.ArrayList(usize),
+    /// file path of the file that owns this chunk
+    file_path: []const u8 = "",
 
     /// Initializes a new chunk with the given allocator.
     pub fn init(allocator: std.mem.Allocator) Chunk {
@@ -141,6 +143,7 @@ pub const Chunk = struct {
             .constants = .empty,
             .code = .empty,
             .line_numbers = .empty,
+            .file_path = "",
         };
     }
 

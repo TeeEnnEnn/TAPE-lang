@@ -226,7 +226,29 @@ pub const Isolate = struct {
         if (self.current.frame_count == 0) return null;
         const frame = &self.current.frames[self.current.frame_count - 1];
         if (frame.ip == 0) return null;
+        if (frame.ip - 1 >= frame.closure.function.chunk.line_numbers.items.len) return null;
         return frame.closure.function.chunk.line_numbers.items[frame.ip - 1];
+    }
+
+    pub fn print_stack_trace(self: *Isolate, with_value: ?TapeValue, error_type: RuntimePanic) void {
+        var frame_count = self.current.frame_count;
+
+        std.debug.print("TAPE panic --- Unhandled {s}\n" ++ "with value: ", .{@errorName(error_type)});
+        if (with_value) |v| {
+            Entities.print_value(v);
+        }
+        std.debug.print("\n", .{});
+
+        std.debug.print("Stack Trace: \n", .{});
+
+        while (frame_count > 0) : (frame_count -= 1) {
+            const call_frame = &self.current.frames[frame_count - 1];
+            if (call_frame.ip == 0) continue;
+            if (call_frame.ip - 1 >= call_frame.closure.function.chunk.line_numbers.items.len) continue;
+            const callable_name = if (call_frame.closure.function.name) |name| name.chars else if (frame_count - 1 == 0) "main" else "anonymous";
+            const line = call_frame.closure.function.chunk.line_numbers.items[call_frame.ip - 1];
+            std.debug.print("  at {s}() [{s}:{d}]\n", .{ callable_name, call_frame.closure.function.chunk.file_path, line });
+        }
     }
 
     pub fn execution_loop(self: *Isolate) RuntimePanic!ExecutionResult {
@@ -1014,11 +1036,8 @@ pub const Isolate = struct {
                 },
 
                 .OP_PANIC => {
-                    _ = try self.pop_value();
-                    if (self.vm.config.debug_execution) {
-                        std.debug.print("PANIC: ", .{});
-                        std.debug.print("\n", .{});
-                    }
+                    const with_value = try self.pop_value();
+                    self.print_stack_trace(with_value, RuntimePanic.Panic);
                     return RuntimePanic.Panic;
                 },
 

@@ -2,7 +2,31 @@
 
 set -e
 
-zig build
+while getopts "sl" opt; do
+    echo $opt;
+    case ${opt} in
+        s)
+            gc_stress=1
+            ;;
+        l)
+            gc_log=1
+            ;;
+        \?)
+            echo "Invalid option: -$OPTARG">&2
+            exit 1
+            ;;
+    esac
+done
+
+if [[ $gc_stress -eq 1 ]]  && [[ $gc_log -eq 1 ]]; then
+    zig build -Dstress_gc=true -Dlog_gc=true
+elif [[ $gc_stress -eq 1 ]]; then
+    zig build -Dstress_gc=true
+elif [[ $gc_log -eq 1 ]]; then
+   zig build -Dlog_gc=true
+else
+    zig build
+fi
 
 for f in examples/basics/*; do
 	if [ -f "$f" ]; then

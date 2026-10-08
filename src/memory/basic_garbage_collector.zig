@@ -25,6 +25,8 @@ pub const BasicGarbageCollector = struct {
     clean_string_intern: CleanStringIntern,
     collections: usize = 0,
 
+    is_active: bool = true,
+
     const slab_capacity: usize = 1024;
     const stress_gc = options.stress_gc;
     const log_gc = options.log_gc;
@@ -55,6 +57,7 @@ pub const BasicGarbageCollector = struct {
             .isolate_ptr = isolate_ptr,
             .mark_roots_fn = mark_roots_fn,
             .clean_string_intern = clean_string_intern,
+            .is_active = true,
         };
 
         if (BasicGarbageCollector.log_gc) {
@@ -140,7 +143,18 @@ pub const BasicGarbageCollector = struct {
         return ptr;
     }
 
+    pub inline fn activate_collector(self: *BasicGarbageCollector) void {
+        self.is_active = true;
+    }
+
+    pub inline fn deactivate_collector(self: *BasicGarbageCollector) void {
+        self.is_active = false;
+    }
+
     pub fn collect(self: *BasicGarbageCollector) !void {
+        if (!self.is_active) {
+            return;
+        }
         const start_bytes = self.managed_allocator.bytes_allocated;
         const start_count = if (BasicGarbageCollector.log_gc) self.count_objects() else 0;
         const start_ms = if (BasicGarbageCollector.log_gc) current_time() else 0;
