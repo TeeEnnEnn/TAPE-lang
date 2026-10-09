@@ -76,6 +76,8 @@ pub const BindingResolution = struct {
     function_infos: std.AutoHashMap(*AST.ASTNode, FunctionInfo),
     scope_pop_counts: std.AutoHashMap(*AST.ASTNode, u16),
     member_infos: std.AutoHashMap(*AST.ASTNode, MemberInfo),
+    function_constants_count: u16,
+    globals_count: u16,
 
     pub fn init(allocator: std.mem.Allocator) BindingResolution {
         return .{
@@ -85,6 +87,8 @@ pub const BindingResolution = struct {
             .function_infos = std.AutoHashMap(*AST.ASTNode, FunctionInfo).init(allocator),
             .scope_pop_counts = std.AutoHashMap(*AST.ASTNode, u16).init(allocator),
             .member_infos = std.AutoHashMap(*AST.ASTNode, MemberInfo).init(allocator),
+            .function_constants_count = 0,
+            .globals_count = 0,
         };
     }
 
@@ -181,8 +185,10 @@ pub const BindingResolver = struct {
 
         try resolver.resolveProgram(root);
 
-        const result = resolver.result;
+        var result = resolver.result;
         resolver.result = BindingResolution.init(allocator);
+        result.globals_count = resolver.next_global_slot;
+        result.function_constants_count = resolver.next_function_constant_slot;
         resolver.deinit();
         return result;
     }

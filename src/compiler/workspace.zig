@@ -301,7 +301,7 @@ pub const Workspace = struct {
         var vm = try Runtime.VM.init(.{ .debug_execution = compile_options.debug.vm }, self, self.allocator);
         self.vm = vm;
         // first isolate
-        const first_isolate = try vm.new_isolate();
+        const first_isolate = try vm.new_isolate(entrypoint_module.binding_resolution.globals_count, entrypoint_module.binding_resolution.function_constants_count);
         first_isolate.gc.deactivate_collector();
 
         // emit Bytecode

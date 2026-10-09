@@ -474,7 +474,7 @@ pub const CodeGenerator = struct {
         switch (decl_binding.kind) {
             .function_constant => {
                 const closure_object = try Entities.new_closure_object(self.isolate, function_object);
-                try self.isolate.function_constants.append(self.isolate.base_allocator, .{ .object = &closure_object.header });
+                self.isolate.function_constants[decl_binding.slot] = .{ .object = &closure_object.header };
             },
             .local => {
                 // Nested function: emit a closure instruction into the enclosing chunk

@@ -8,6 +8,7 @@ const TapeValue = Entities.Value;
 const Opcode = Chunk.Opcode;
 const VM = @import("vm.zig").VM;
 const RuntimePanic = @import("vm.zig").RuntimePanic;
+const object_as = @import("entities.zig").object_as;
 
 pub const ExecutionResult = union(enum) {
     Ok: TapeValue,
@@ -23,9 +24,9 @@ pub const Isolate = struct {
     string_intern: std.StringHashMap(*Entities.ObjectString),
     isolate_closure: *Entities.ObjectClosure,
 
-    function_constants: std.ArrayList(TapeValue),
+    function_constants: [*]TapeValue,
+    function_constants_count: usize,
 
-    // TODO: ideally this should come from the compiler so we don't waste memory
     globals: [*]TapeValue,
     globals_count: usize,
 
@@ -33,7 +34,7 @@ pub const Isolate = struct {
 
     current: *Entities.ExecutionState,
 
-    pub fn init(vm: *VM, base_allocator: std.mem.Allocator) !*Isolate {
+    pub fn init(vm: *VM, base_allocator: std.mem.Allocator, globals_count: usize, function_constants_count: usize) !*Isolate {
         const isolate = try base_allocator.create(Isolate);
         isolate.vm = vm;
         isolate.base_allocator = base_allocator;
@@ -44,9 +45,18 @@ pub const Isolate = struct {
 
         isolate.execution_state = try Entities.ExecutionState.init(isolate.gc.managed_allocator.allocator(), vm.config.frame_capacity, vm.config.stack_size);
 
-        isolate.globals = @ptrCast(@alignCast(try base_allocator.alloc(TapeValue, vm.config.globals_size)));
-        isolate.globals_count = 0;
-        isolate.function_constants = .empty;
+        isolate.globals = @ptrCast(@alignCast(try base_allocator.alloc(TapeValue, globals_count)));
+        isolate.globals_count = globals_count;
+        // initialize globals to nil
+        for (0..globals_count) |index| {
+            isolate.globals[index] = .nil;
+        }
+        isolate.function_constants = @ptrCast(@alignCast(try base_allocator.alloc(TapeValue, function_constants_count)));
+        isolate.function_constants_count = function_constants_count;
+        // initialize function constants to nil
+        for (0..function_constants_count) |index| {
+            isolate.function_constants[index] = .nil;
+        }
 
         isolate.current = &isolate.execution_state;
 
@@ -56,18 +66,30 @@ pub const Isolate = struct {
     pub fn deinit(self: *Isolate) void {
         self.string_intern.deinit();
         self.execution_state.deinit(self.gc.managed_allocator.allocator());
-        self.base_allocator.free(self.globals[0..self.vm.config.globals_size]);
+        self.base_allocator.free(self.globals[0..self.globals_count]);
+        self.base_allocator.free(self.function_constants[0..self.function_constants_count]);
         self.gc.deinit();
-        self.function_constants.deinit(self.base_allocator);
         self.base_allocator.destroy(self);
     }
 
     fn mark_roots(ptr: *anyopaque, gc: *BasicGarbageCollector.BasicGarbageCollector) void {
         const isolate: *Isolate = @ptrCast(@alignCast(ptr));
 
-        for (isolate.execution_state.stack[0..isolate.execution_state.stack_top_index]) |value| {
-            Entities.mark_value(gc, value) catch {
-                isolate.vm.workspace.diagnostics.add_diagnostic(.{ .column = 0, .line = 0, .severity = .Error, .message = "Failed to mark value", .stage = .Execution, .file_path = "", .hint = "This is an internal error. Please report it to the TAPE-lang team." }) catch {};
+        // mark isolate closure
+        gc.mark_object(&isolate.isolate_closure.header) catch {
+            // if we fail to add a to the gray list
+            // this is catastrofic - but keep going.
+        };
+
+        // mark execution states
+        isolate.execution_state.mark_execution_state(gc) catch {
+            // if we fail to add a to the gray list
+            // this is catastrofic - but keep going.
+        };
+        if (isolate.current != &isolate.execution_state) {
+            isolate.current.mark_execution_state(gc) catch {
+                // if we fail to add a to the gray list
+                // this is catastrofic - but keep going.
             };
         }
         // mark globals
@@ -76,17 +98,9 @@ pub const Isolate = struct {
                 isolate.vm.workspace.diagnostics.add_diagnostic(.{ .column = 0, .line = 0, .severity = .Error, .message = "Failed to mark value", .stage = .Execution, .file_path = "", .hint = "This is an internal error. Please report it to the TAPE-lang team." }) catch {};
             };
         }
-        // mark open upvalues
-        var upvalue = isolate.execution_state.open_upvalues;
-        while (upvalue) |uv| {
-            Entities.mark_value(gc, .{ .object = &uv.header }) catch {
-                isolate.vm.workspace.diagnostics.add_diagnostic(.{ .column = 0, .line = 0, .severity = .Error, .message = "Failed to mark value", .stage = .Execution, .file_path = "", .hint = "This is an internal error. Please report it to the TAPE-lang team." }) catch {};
-            };
-            upvalue = uv.next;
-        }
-
-        for (0..isolate.function_constants.items.len) |index| {
-            Entities.mark_value(gc, isolate.function_constants.items[index]) catch {
+        // mark functions
+        for (0..isolate.function_constants_count) |index| {
+            Entities.mark_value(gc, isolate.function_constants[index]) catch {
                 isolate.vm.workspace.diagnostics.add_diagnostic(.{ .column = 0, .line = 0, .severity = .Error, .message = "Failed to mark value", .stage = .Execution, .file_path = "", .hint = "This is an internal error. Please report it to the TAPE-lang team." }) catch {};
             };
         }
@@ -590,11 +604,11 @@ pub const Isolate = struct {
                 },
 
                 .OP_STRING_CONCAT => {
-                    const b = try self.pop_value();
-                    const a = try self.pop_value();
+                    const b = try self.peek_value(0);
+                    const a = try self.peek_value(1);
 
-                    const string_b: *Entities.ObjectString = Entities.object_as(Entities.ObjectString, b.object);
-                    const string_a: *Entities.ObjectString = Entities.object_as(Entities.ObjectString, a.object);
+                    const string_b: *Entities.ObjectString = object_as(Entities.ObjectString, b.object);
+                    const string_a: *Entities.ObjectString = object_as(Entities.ObjectString, a.object);
 
                     const new_length = string_b.byte_length + string_a.byte_length;
                     const new_chars = try self.base_allocator.alloc(u8, new_length);
@@ -604,6 +618,8 @@ pub const Isolate = struct {
                     const new_string = Entities.take_string(self, self.base_allocator, new_chars) catch {
                         return RuntimePanic.OutOfMemory;
                     };
+                    _ = try self.pop_value();
+                    _ = try self.pop_value();
                     try self.push_value(.{ .object = @ptrCast(new_string) });
                 },
 
@@ -714,11 +730,12 @@ pub const Isolate = struct {
 
                     try self.push_value(.{ .object = &tuple_object.header });
                 },
+
                 .OP_TABLE => {
                     const count = frame.read_u16();
                     const table_object = try Entities.new_table_object(self);
                     const table_value = TapeValue{ .object = &table_object.header };
-                    try self.push_value(table_value);
+                    try self.push_value(table_value); // root the table
 
                     const table_literal_start = self.current.stack_top_index - 1 - (@as(usize, count) * 2);
                     for (0..count) |i| {
@@ -733,32 +750,20 @@ pub const Isolate = struct {
                     self.current.stack[table_literal_start] = table_value;
                     self.current.stack_top_index = table_literal_start + 1;
                 },
+
                 .OP_INDEX_ARRAY => {
-                    const index = try self.peek_value(0);
-                    const collection = try self.peek_value(1);
-                    const array: *Entities.ObjectArray = switch (collection) {
-                        .object => |obj| switch (obj.object_type) {
-                            .ObjectArray => @ptrCast(obj),
-                            else => return RuntimePanic.CorruptedState,
-                        },
-                        else => return RuntimePanic.CorruptedState,
-                    };
+                    const index = try self.pop_value();
+                    const collection = try self.pop_value();
+                    const array: *Entities.ObjectArray = object_as(Entities.ObjectArray, collection.object);
                     const idx = try checked_index(index, array.length);
                     const value = array.elements[idx];
-                    _ = try self.pop_value();
-                    _ = try self.pop_value();
                     try self.push_value(value);
                 },
+
                 .OP_INDEX_STRING => {
                     const index = try self.peek_value(0);
                     const collection = try self.peek_value(1);
-                    const string: *Entities.ObjectString = switch (collection) {
-                        .object => |obj| switch (obj.object_type) {
-                            .ObjectString => @ptrCast(obj),
-                            else => return RuntimePanic.CorruptedState,
-                        },
-                        else => return RuntimePanic.CorruptedState,
-                    };
+                    const string: *Entities.ObjectString = object_as(Entities.ObjectString, collection.object);
                     const idx = try checked_index(index, string.code_point_length);
                     const chars = try stringCodePointSlice(string, idx);
                     const result = Entities.copy_string(self, chars) catch |err| switch (err) {
@@ -769,49 +774,31 @@ pub const Isolate = struct {
                     _ = try self.pop_value();
                     try self.push_value(.{ .object = @ptrCast(result) });
                 },
+
                 .OP_INDEX_TABLE => {
-                    const key = try self.peek_value(0);
-                    const collection = try self.peek_value(1);
-                    const table: *Entities.ObjectTable = switch (collection) {
-                        .object => |obj| switch (obj.object_type) {
-                            .ObjectTable => @ptrCast(obj),
-                            else => return RuntimePanic.CorruptedState,
-                        },
-                        else => return RuntimePanic.CorruptedState,
-                    };
+                    const key = try self.pop_value();
+                    const collection = try self.pop_value();
+                    const table: *Entities.ObjectTable = object_as(Entities.ObjectTable, collection.object);
                     const value = (Entities.table_get(table, key) catch |err| switch (err) {
                         error.NonHashableElement => return RuntimePanic.CorruptedState,
                     }) orelse return RuntimePanic.KeyNotFound;
-                    _ = try self.pop_value();
-                    _ = try self.pop_value();
                     try self.push_value(value);
                 },
+
                 .OP_INDEX_TUPLE => {
                     const index = frame.read_u16();
-                    const collection = try self.peek_value(0);
-                    const tuple: *Entities.ObjectTuple = switch (collection) {
-                        .object => |obj| switch (obj.object_type) {
-                            .ObjectTuple => @ptrCast(obj),
-                            else => return RuntimePanic.CorruptedState,
-                        },
-                        else => return RuntimePanic.CorruptedState,
-                    };
+                    const collection = try self.pop_value();
+                    const tuple: *Entities.ObjectTuple = object_as(Entities.ObjectTuple, collection.object);
                     if (index >= tuple.elements.len) return RuntimePanic.IndexOutOfBounds;
                     const value = tuple.elements[index];
-                    _ = try self.pop_value();
                     try self.push_value(value);
                 },
+
                 .OP_SET_INDEX_ARRAY => {
                     const value = try self.peek_value(0);
                     const index = try self.peek_value(1);
                     const collection = try self.peek_value(2);
-                    const array: *Entities.ObjectArray = switch (collection) {
-                        .object => |obj| switch (obj.object_type) {
-                            .ObjectArray => @ptrCast(obj),
-                            else => return RuntimePanic.CorruptedState,
-                        },
-                        else => return RuntimePanic.CorruptedState,
-                    };
+                    const array: *Entities.ObjectArray = object_as(Entities.ObjectArray, collection.object);
                     const idx = try checked_index(index, array.length);
                     array.elements[idx] = value;
                     _ = try self.pop_value();
@@ -819,17 +806,12 @@ pub const Isolate = struct {
                     _ = try self.pop_value();
                     try self.push_value(value);
                 },
+
                 .OP_SET_INDEX_TABLE => {
                     const value = try self.peek_value(0);
                     const key = try self.peek_value(1);
                     const collection = try self.peek_value(2);
-                    const table: *Entities.ObjectTable = switch (collection) {
-                        .object => |obj| switch (obj.object_type) {
-                            .ObjectTable => @ptrCast(obj),
-                            else => return RuntimePanic.CorruptedState,
-                        },
-                        else => return RuntimePanic.CorruptedState,
-                    };
+                    const table: *Entities.ObjectTable = object_as(Entities.ObjectTable, collection.object);
                     _ = Entities.table_set(self, table, key, value) catch |err| switch (err) {
                         error.OutOfMemory => return RuntimePanic.OutOfMemory,
                         error.NonHashableElement => return RuntimePanic.CorruptedState,
@@ -839,19 +821,15 @@ pub const Isolate = struct {
                     _ = try self.pop_value();
                     try self.push_value(value);
                 },
+
                 .OP_CALL => {
                     const arg_count = frame.read_u16();
                     const callee = try self.peek_value(arg_count);
-                    const closure: *Entities.ObjectClosure = switch (callee) {
-                        .object => |obj| switch (obj.object_type) {
-                            .ObjectClosure => @ptrCast(obj),
-                            else => return RuntimePanic.CorruptedState,
-                        },
-                        else => return RuntimePanic.CorruptedState,
-                    };
+                    const closure: *Entities.ObjectClosure = object_as(Entities.ObjectClosure, callee.object);
                     try self.call(closure, arg_count);
                     frame = &self.current.frames[self.current.frame_count - 1]; // re-point at the new frame
                 },
+
                 .OP_CLOSURE => {
                     const function_value = frame.read_constant();
                     const function: *Entities.ObjectFunction = switch (function_value) {
@@ -891,13 +869,7 @@ pub const Isolate = struct {
                 .OP_COROUTINE => {
                     const arg_count = frame.read_u16();
                     const callee = try self.peek_value(arg_count);
-                    const closure_object: *Entities.ObjectClosure = switch (callee) {
-                        .object => |obj| switch (obj.object_type) {
-                            .ObjectClosure => @ptrCast(obj),
-                            else => return RuntimePanic.CorruptedState,
-                        },
-                        else => return RuntimePanic.CorruptedState,
-                    };
+                    const closure_object: *Entities.ObjectClosure = object_as(Entities.ObjectClosure, callee.object);
 
                     // Copy args off the caller's stack - these will be copied to the coroutines stack.
                     var args = try std.ArrayList(TapeValue).initCapacity(self.base_allocator, arg_count);
@@ -925,13 +897,7 @@ pub const Isolate = struct {
                 .OP_RESUME => {
                     const resume_value = try self.pop_value();
                     const coroutine_value = try self.peek_value(0); // keep the coroutine on the stack
-                    const coroutine_object: *Entities.ObjectCoroutine = switch (coroutine_value) {
-                        .object => |obj| switch (obj.object_type) {
-                            .ObjectCoroutine => @ptrCast(obj),
-                            else => return RuntimePanic.CorruptedState,
-                        },
-                        else => return RuntimePanic.CorruptedState,
-                    };
+                    const coroutine_object: *Entities.ObjectCoroutine = object_as(Entities.ObjectCoroutine, coroutine_value.object);
 
                     if (coroutine_object.state == .FINISHED) return RuntimePanic.FinishedCoroutineResumption;
                     if (coroutine_object.state == .RUNNING) return RuntimePanic.CoroutineAlreadyRunning;
@@ -972,13 +938,15 @@ pub const Isolate = struct {
 
                 .OP_LOAD_FUNCTION_CONSTANT => {
                     const index = frame.read_u16();
-                    try self.push_value(self.function_constants.items[index]);
+                    try self.push_value(self.function_constants[index]);
                 },
+
                 .OP_LOAD_UPVALUE => {
                     const index = frame.read_u16();
                     const upvalue = frame.closure.upvalues[index];
                     try self.push_value(if (upvalue.closed) upvalue.closed_value else upvalue.location.*);
                 },
+
                 .OP_STORE_UPVALUE => {
                     const index = frame.read_u16();
                     const upvalue = frame.closure.upvalues[index];
@@ -1009,7 +977,7 @@ pub const Isolate = struct {
                 .OP_GET_FIELD => {
                     const index = frame.read_u16();
                     const struct_val = try self.pop_value();
-                    const instance = Entities.object_as(Entities.ObjectStructInstance, struct_val.object);
+                    const instance = object_as(Entities.ObjectStructInstance, struct_val.object);
 
                     try self.push_value(instance.fields[index]);
                 },
@@ -1018,7 +986,7 @@ pub const Isolate = struct {
                     const index = frame.read_u16();
                     const new_val = try self.pop_value();
                     const struct_val = try self.pop_value();
-                    const instance = Entities.object_as(Entities.ObjectStructInstance, struct_val.object);
+                    const instance = object_as(Entities.ObjectStructInstance, struct_val.object);
 
                     instance.fields[index] = new_val;
                     try self.push_value(new_val); // Assignment expression evaluates to the assigned value
@@ -1058,7 +1026,7 @@ pub const Isolate = struct {
                     const iterator_var = frame.read_u16();
                     const exit_offset = frame.read_u16();
                     const range_val = self.current.stack[frame.slot_start + iterator_var - 1];
-                    const range = Entities.object_as(Entities.ObjectRange, range_val.object);
+                    const range = object_as(Entities.ObjectRange, range_val.object);
 
                     const is_empty = if (range.step > 0) range.start >= range.end else range.start <= range.end;
                     if (is_empty) {
@@ -1072,7 +1040,7 @@ pub const Isolate = struct {
                     const iteratr_var = frame.read_u16();
                     const loop_offset = frame.read_u16();
                     const range_val = self.current.stack[frame.slot_start + iteratr_var - 1];
-                    const range = Entities.object_as(Entities.ObjectRange, range_val.object);
+                    const range = object_as(Entities.ObjectRange, range_val.object);
 
                     var current_i = self.current.stack[frame.slot_start + iteratr_var].int;
                     current_i += range.step;

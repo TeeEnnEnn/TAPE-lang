@@ -57,8 +57,8 @@ pub const VM = struct {
         self.base_allocator.destroy(self);
     }
 
-    pub fn new_isolate(self: *VM) !*Isolate {
-        const isolate = try Isolate.init(self, self.base_allocator);
+    pub fn new_isolate(self: *VM, global_count: u16, function_constants_count: u16) !*Isolate {
+        const isolate = try Isolate.init(self, self.base_allocator, global_count, function_constants_count);
         try self.isolates.append(self.base_allocator, isolate);
         return isolate;
     }

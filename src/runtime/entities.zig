@@ -8,6 +8,7 @@ const AST = @import("../compiler/ast.zig");
 const BasicGarbageCollector = @import("../memory/basic_garbage_collector.zig");
 const basic_gc = BasicGarbageCollector.BasicGarbageCollector;
 const mark_object = basic_gc.mark_object;
+const options = @import("TAPE_lang_build_options");
 
 pub const CallFrame = struct {
     closure: *ObjectClosure,
@@ -170,6 +171,25 @@ pub const ExecutionState = struct {
         allocator.free(self.frames[0..self.frame_capacity]);
         allocator.free(self.stack[0..self.stack_size]);
         self.open_upvalues = null;
+    }
+
+    pub fn mark_execution_state(self: *ExecutionState, garbage_collector: *basic_gc) !void {
+        // mark frame closures
+        for (self.frames[0..self.frame_count]) |frame| {
+            try mark_object(garbage_collector, &frame.closure.header);
+        }
+
+        // mark upvalues
+        var current = self.open_upvalues;
+        while (current) |upvalue| {
+            try mark_object(garbage_collector, &upvalue.header);
+            current = upvalue.next;
+        }
+
+        // mark the stack
+        for (self.stack[0..self.stack_top_index]) |value| {
+            try mark_value(garbage_collector, value);
+        }
     }
 };
 
@@ -628,14 +648,7 @@ pub fn blacken_object(garbage_collector: *basic_gc, obj: *ObjectHeader) !void {
         .ObjectCoroutine => {
             const coroutine: *ObjectCoroutine = @ptrCast(obj);
             try mark_object(garbage_collector, @ptrCast(coroutine.closure));
-            var current = coroutine.execution_state.open_upvalues;
-            while (current) |upvalue| {
-                try mark_object(garbage_collector, @ptrCast(upvalue));
-                current = upvalue.next;
-            }
-            for (coroutine.execution_state.stack[0..coroutine.execution_state.stack_top_index]) |value| {
-                try mark_value(garbage_collector, value);
-            }
+            try coroutine.execution_state.mark_execution_state(garbage_collector);
         },
         .ObjectString => {},
         .ObjectTuple => {
@@ -680,50 +693,80 @@ pub fn free_object(allocator: std.mem.Allocator, obj: *ObjectHeader) void {
     switch (obj.object_type) {
         .ObjectFunction => {
             const func: *ObjectFunction = @ptrCast(obj);
+            if (options.log_gc) {
+                std.debug.print("freed: ObjectFunction {*}\n", .{obj});
+            }
             func.chunk.deinit();
             allocator.destroy(func);
         },
         .ObjectArray => {
             const array: *ObjectArray = @ptrCast(obj);
+            if (options.log_gc) {
+                std.debug.print("freed: ObjectArray {*}\n", .{obj});
+            }
             allocator.free(array.elements);
             allocator.destroy(array);
         },
         .ObjectTuple => {
             const tuple: *ObjectTuple = @ptrCast(obj);
+            if (options.log_gc) {
+                std.debug.print("freed: ObjectTuple {*}\n", .{obj});
+            }
             allocator.free(tuple.elements);
             allocator.destroy(tuple);
         },
         .ObjectTable => {
             const table: *ObjectTable = @ptrCast(obj);
+            if (options.log_gc) {
+                std.debug.print("freed: ObjectTable {*}\n", .{obj});
+            }
             if (table.entries.len > 0) allocator.free(table.entries);
             allocator.destroy(table);
         },
         .ObjectString => {
             const str: *ObjectString = @ptrCast(obj);
+            if (options.log_gc) {
+                std.debug.print("freed: ObjectString {*}\n", .{obj});
+            }
             allocator.free(str.chars);
             allocator.destroy(str);
         },
         .ObjectUpvalue => {
             const up: *ObjectUpvalue = @ptrCast(obj);
+            if (options.log_gc) {
+                std.debug.print("freed: ObjectUpvalue {*}\n", .{obj});
+            }
             allocator.destroy(up);
         },
         .ObjectClosure => {
             const closure: *ObjectClosure = @ptrCast(obj);
+            if (options.log_gc) {
+                std.debug.print("freed: ObjectClosure {*}\n", .{obj});
+            }
             if (closure.upvalues.len > 0) allocator.free(closure.upvalues);
             allocator.destroy(closure);
         },
         .ObjectCoroutine => {
             const coroutine: *ObjectCoroutine = @ptrCast(obj);
+            if (options.log_gc) {
+                std.debug.print("freed: ObjectCoroutine  {*}\n", .{obj});
+            }
             coroutine.execution_state.deinit(allocator);
             allocator.destroy(coroutine);
         },
         .ObjectStructInstance => {
             const struct_instance: *ObjectStructInstance = @ptrCast(obj);
+            if (options.log_gc) {
+                std.debug.print("freed: ObjectStructInstance {*}\n", .{obj});
+            }
             allocator.free(struct_instance.fields);
             allocator.destroy(struct_instance);
         },
         .ObjectRange => {
             const range: *ObjectRange = @ptrCast(obj);
+            if (options.log_gc) {
+                std.debug.print("freed: ObjectRange: {*}\n", .{obj});
+            }
             allocator.destroy(range);
         },
     }
