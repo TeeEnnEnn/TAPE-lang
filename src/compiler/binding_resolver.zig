@@ -6,6 +6,7 @@ const Diagnostics = @import("../diagnostics/diagnostics.zig");
 const DiagnosticReporter = Diagnostics.DiagnosticsReporter;
 const Module = @import("workspace.zig").Module;
 const Workspace = @import("workspace.zig").Workspace;
+const WorkspaceGlobals = @import("workspace.zig").WorkspaceGlobals;
 
 pub const BindingResolverError = error{
     MissingDeclRef,
@@ -148,8 +149,6 @@ pub const BindingResolver = struct {
     result: BindingResolution,
     functions: std.ArrayList(FunctionContext),
     local_owners: std.AutoHashMap(AST.DeclRef, *AST.ASTNode),
-    next_global_slot: u16 = 0,
-    next_function_constant_slot: u16 = 0,
 
     pub fn init(
         allocator: std.mem.Allocator,
@@ -179,7 +178,14 @@ pub const BindingResolver = struct {
         self.result.deinit();
     }
 
-    pub fn resolve(allocator: std.mem.Allocator, registry: *TypeRegistry.TypeRegistry, diagnostics: *DiagnosticReporter, module: *Module, workspace: *Workspace, root: *AST.ASTNode) !BindingResolution {
+    pub fn resolve(
+        allocator: std.mem.Allocator,
+        registry: *TypeRegistry.TypeRegistry,
+        diagnostics: *DiagnosticReporter,
+        module: *Module,
+        workspace: *Workspace,
+        root: *AST.ASTNode,
+    ) !BindingResolution {
         var resolver = BindingResolver.init(allocator, registry, diagnostics, module, workspace);
         errdefer resolver.deinit();
 
@@ -187,8 +193,8 @@ pub const BindingResolver = struct {
 
         var result = resolver.result;
         resolver.result = BindingResolution.init(allocator);
-        result.globals_count = resolver.next_global_slot;
-        result.function_constants_count = resolver.next_function_constant_slot;
+        result.globals_count = resolver.workspace.workspace_globals.next_global_constant_slot;
+        result.function_constants_count = resolver.workspace.workspace_globals.next_function_constant_slot;
         resolver.deinit();
         return result;
     }
@@ -746,16 +752,16 @@ pub const BindingResolver = struct {
     }
 
     fn next_global(self: *BindingResolver) !u16 {
-        const slot = self.next_global_slot;
+        const slot = self.workspace.workspace_globals.next_global_constant_slot;
         if (slot == std.math.maxInt(u16)) return BindingResolverError.TooManyGlobals;
-        self.next_global_slot += 1;
+        self.workspace.workspace_globals.next_global_constant_slot += 1;
         return slot;
     }
 
     fn next_function_constant(self: *BindingResolver) !u16 {
-        const slot = self.next_function_constant_slot;
+        const slot = self.workspace.workspace_globals.next_function_constant_slot;
         if (slot == std.math.maxInt(u16)) return BindingResolverError.TooManyFunctions;
-        self.next_function_constant_slot += 1;
+        self.workspace.workspace_globals.next_function_constant_slot += 1;
         return slot;
     }
 
@@ -829,6 +835,17 @@ pub const BindingResolver = struct {
         }) catch {};
     }
 };
+
+/// Gets the binding info for a variable with the given name in the specified module
+fn find_exported_binding(module: *Module, name: []const u8) ?BindingInfo {
+    var iterator = module.binding_resolution.declaration_bindings.valueIterator();
+    while (iterator.next()) |info| {
+        if (std.mem.eql(u89, info.name, name)) {
+            return info.*;
+        }
+    }
+    return null;
+}
 
 fn resolved_type_of(node: *AST.ASTNode) AST.TypeId {
     return switch (node.*) {

@@ -1104,6 +1104,7 @@ pub const Parser = struct {
         try self.consume(.EQUAL, "Expected '=' to start type annotation.");
 
         const type_expr = try self.parse_type_expression();
+        try self.consume(.SEMICOLON, "Expected ';' to end type declaration.");
         const type_decl = try self.allocator.create(AST.TypeDecl);
         type_decl.* = .{ .modifier_pub = is_pub, .name = name, .type_annotation = type_expr, .line = name.line, .column = name.column };
         const node = try self.allocator.create(AST.ASTNode);

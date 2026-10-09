@@ -134,6 +134,11 @@ const ParserWorkerParam = struct {
     io: std.Io,
 };
 
+pub const WorkspaceGlobals = struct {
+    next_function_constant_slot: u16 = 0,
+    next_global_constant_slot: u16 = 0,
+};
+
 pub const Workspace = struct {
     allocator: std.mem.Allocator,
     modules: std.StringHashMap(*Module),
@@ -143,6 +148,8 @@ pub const Workspace = struct {
     diagnostics: Diagnostics,
     /// Mutex for accessing diagnostics
     diagnostics_mutex: std.Io.Mutex,
+    /// values used between modules
+    workspace_globals: WorkspaceGlobals,
     vm: ?*Runtime.VM,
     debug: DebugOptions,
 
@@ -155,6 +162,7 @@ pub const Workspace = struct {
             .diagnostics = Diagnostics.init(allocator),
             .diagnostics_mutex = std.Io.Mutex.init,
             .vm = null,
+            .workspace_globals = .{ .next_function_constant_slot = 0, .next_global_constant_slot = 0 },
             .debug = .{},
         };
     }
@@ -244,6 +252,7 @@ pub const Workspace = struct {
         var type_registry = try TypeRegistry.init(self.allocator);
         defer type_registry.deinit();
 
+        // type checking
         for (sorted_modules) |module| {
             if (compile_options.debug.pipeline) std.debug.print("Type checking {s}\n", .{module.filepath});
             // each module has its own environment and type checker
@@ -269,6 +278,7 @@ pub const Workspace = struct {
             if (self.diagnostics.has_errors) return false;
             if (compile_options.debug.pipeline) std.debug.print("Type checked {s}\n", .{module.filepath});
         }
+
         // resolve bindings
         if (compile_options.debug.pipeline) std.debug.print("Resolving bindings...\n", .{});
         for (sorted_modules) |module| {

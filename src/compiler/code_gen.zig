@@ -3,26 +3,21 @@
 //! NOTE: This file is mostly AI Generated. I will remove this comment when I am comfortable to take ownership of this file's contents
 
 const std = @import("std");
-const Entities = @import("../runtime/entities.zig");
-const BindingResolver = @import("binding_resolver.zig");
-const VM = @import("../runtime/vm.zig").VM;
-const Isolate = @import("../runtime/isolate.zig").Isolate;
-const AST = @import("ast.zig");
-const TypeRegistry = @import("type_registry.zig");
+
+const DiagnosticReporter = @import("../diagnostics/diagnostics.zig").DiagnosticsReporter;
 const Chunk = @import("../runtime/chunk.zig").Chunk;
 const Opcode = @import("../runtime/chunk.zig").Opcode;
-const DiagnosticReporter = @import("../diagnostics/diagnostics.zig").DiagnosticsReporter;
+const Entities = @import("../runtime/entities.zig");
+const Isolate = @import("../runtime/isolate.zig").Isolate;
+const VM = @import("../runtime/vm.zig").VM;
+const AST = @import("ast.zig");
+const BindingResolver = @import("binding_resolver.zig");
 const Module = @import("workspace.zig").Module;
+const TypeRegistry = @import("type_registry.zig");
 
 const INTERNAL_ERROR_MESSAGE = "This is an internal error. Please write a bug report.";
 
-pub const CodeGeneratorError = error{
-    MissingBinding,
-    UnsupportedNode,
-    UnsupportedOperator,
-    UnsupportedOperandType,
-    LoopSizeTooLarge,
-} || std.mem.Allocator.Error || error{
+pub const CodeGeneratorError = error{ MissingBinding, UnsupportedNode, UnsupportedOperator, UnsupportedOperandType, LoopSizeTooLarge, InvalidPosition } || std.mem.Allocator.Error || error{
     Utf8InvalidStartByte,
     TruncatedInput,
     Utf8ExpectedContinuation,
@@ -197,6 +192,28 @@ pub const CodeGenerator = struct {
             },
             .struct_decl => |decl| {
                 try self.generate_struct_decl(node, decl);
+            },
+            .use_decl => |decl| {
+                const ref: AST.DeclRef = .{ .node = node };
+                const binding_info = self.binding_resolution.declaration_bindings.get(ref) orelse {
+                    self.fail("use declaration has no binding in binding resolution." ++ INTERNAL_ERROR_MESSAGE, null, decl.line, decl.column);
+                    return CodeGeneratorError.MissingBinding;
+                };
+                switch (binding_info.kind) {
+                    .imported_global => |binding| {
+                        _ = binding;
+                        // use name from "path";
+                        // we need to look for the location of name in the the path's module table
+                        // add it yo our globals
+                        for (decl.items) |item| {
+                            _ = item;
+                        }
+                    },
+                    else => {
+                        self.fail("Use Declaration has non use binding." ++ INTERNAL_ERROR_MESSAGE, null, decl.line, decl.column);
+                        return CodeGeneratorError.InvalidPosition;
+                    },
+                }
             },
             .enum_decl => {
                 // nothing to do - fully comptime
@@ -373,7 +390,7 @@ pub const CodeGenerator = struct {
             .continue_stmt => |stmt| {
                 const loop_context = self.current_loop orelse {
                     self.fail("`continue` statement outside of loop", null, stmt.line, stmt.column);
-                    return CodeGeneratorError.UnsupportedNode;
+                    return CodeGeneratorError.InvalidPosition;
                 };
 
                 const locals_to_pop = self.current.current_locals_count - loop_context.scope_local_floor;
@@ -1005,7 +1022,7 @@ pub const CodeGenerator = struct {
             return CodeGeneratorError.MissingBinding;
         };
         switch (binding.kind) {
-            .global => {
+            .global, .imported_global => {
                 try self.current.chunk().write_opcode(.OP_LOAD_GLOBAL, expr.line);
                 try self.current.chunk().write_u16(binding.slot, expr.line);
             },
@@ -1021,10 +1038,11 @@ pub const CodeGenerator = struct {
                 try self.current.chunk().write_opcode(.OP_LOAD_UPVALUE, expr.line);
                 try self.current.chunk().write_u16(binding.slot, expr.line);
             },
+
             else => {
                 self.fail("Unsupported identifier binding kind for code generation.", null, expr.line, expr.column);
                 return CodeGeneratorError.UnsupportedNode;
-            }, // method, comptime_type, imported_global
+            }, // method, comptime_type,
         }
     }
 
@@ -1174,7 +1192,14 @@ pub const CodeGenerator = struct {
         return CodeGeneratorError.UnsupportedOperator;
     }
 
-    fn arith(left: TypeRegistry.TypeId, right: TypeRegistry.TypeId, int_op: Opcode, float_op: Opcode, int_float_op: Opcode, float_int_op: Opcode) Opcode {
+    fn arith(
+        left: TypeRegistry.TypeId,
+        right: TypeRegistry.TypeId,
+        int_op: Opcode,
+        float_op: Opcode,
+        int_float_op: Opcode,
+        float_int_op: Opcode,
+    ) Opcode {
         return switch (left) {
             @intFromEnum(TypeRegistry.PrimitiveType.Int) => switch (right) {
                 @intFromEnum(TypeRegistry.PrimitiveType.Int) => int_op,

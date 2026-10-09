@@ -2,10 +2,9 @@
 
 // panic "test";
 
-// TODO: this crashes because the anonymous function is at the declaration position
-
-// fn () -> Nil {
-// };
+// (fn () -> Nil {
+//     panic "test";
+// })();
 
 // fn one() -> Nil {
 //     fn two() -> Nil {
