@@ -39,7 +39,7 @@ fn generateSource(allocator: std.mem.Allocator, source: []const u8) ![]const u8 
 
     const vm = try VM.init(.{}, &workspace, allocator);
     defer vm.deinit();
-    const isolate = try vm.new_isolate();
+    const isolate = try vm.new_isolate(mod.binding_resolution.globals_count, mod.binding_resolution.function_constants_count);
 
     var codeGenerator = try CodeGenerator.init(allocator, isolate, &mod.binding_resolution, &registry, mod.ast, &workspace.diagnostics, mod);
     const function = codeGenerator.generate() orelse return error.CodeGenerationFailed;

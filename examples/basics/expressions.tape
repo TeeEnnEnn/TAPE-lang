@@ -1,9 +1,9 @@
 const integer = 123;
 const floating = 123.123;
 const string = "hello world";
-const arr = [1, 2, 3];
-const tab = {1: "one", 2: "two", 3: "three"};
-const tup = (1, "two", 12.3);
+var arr = [1, 2, 3];
+var tab = {1: "one", 2: "two", 3: "three"};
+var tup = (1, "two", 12.3);
 
 if (integer != 123) { panic "integer"; }
 if (floating != 123.123) { panic "floating"; }

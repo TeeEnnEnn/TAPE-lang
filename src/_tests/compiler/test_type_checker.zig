@@ -821,3 +821,18 @@ test "Type Checker - non-boolean conditions" {
     try std.testing.expectError(TypeCheckerError.NonBooleanCondition, checkSource(allocator, "if (1) { var x = 0; }"));
     try std.testing.expectError(TypeCheckerError.TypeMismatch, checkSource(allocator, "while (1) { break; }"));
 }
+
+test "Type Checker - fn reading module var is rejected" {
+    const allocator = std.testing.allocator;
+    try std.testing.expectError(TypeCheckerError.MutableGlobalStateCaptureAttempt, checkSource(allocator, "var counter = 0; fn f() -> Int { return counter; }"));
+}
+
+test "Type Checker - anonymous fn reading module var is rejected" {
+    const allocator = std.testing.allocator;
+    try std.testing.expectError(TypeCheckerError.MutableGlobalStateCaptureAttempt, checkSource(allocator, "var counter = 0; var f = fn () -> Int { return counter; };"));
+}
+
+test "Type Checker - non-literal module const is rejected" {
+    const allocator = std.testing.allocator;
+    try std.testing.expectError(TypeCheckerError.NonConstantExport, checkSource(allocator, "var a = 5; const b = a + 1;"));
+}

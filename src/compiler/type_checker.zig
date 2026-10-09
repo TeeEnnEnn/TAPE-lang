@@ -11,6 +11,7 @@ const StructMethod = TypeRegistry.StructMethod;
 const StructField = TypeRegistry.StructField;
 const Module = @import("workspace.zig").Module;
 const Workspace = @import("workspace.zig").Workspace;
+const ConstValue = @import("const_value.zig").ConstValue;
 
 pub const TypeCheckerError = error{
     /// The type of an expression does not match the expected type.
@@ -121,6 +122,11 @@ pub const TypeChecker = struct {
         return co_id;
     }
 
+    fn export_symbol(self: *TypeChecker, name: []const u8, type_id: AST.TypeId, node: *AST.ASTNode) !void {
+        try self.module.exports.put(name, type_id);
+        try self.module.export_nodes.put(name, node);
+    }
+
     fn hoist(self: *TypeChecker, node: *AST.ASTNode) TypeCheckerError!void {
         switch (node.*) {
             .program => |program| for (program.declarations) |decl| try self.hoist(decl),
@@ -142,17 +148,31 @@ pub const TypeChecker = struct {
             .fn_decl => |decl| {
                 const fn_id = try self.fn_hoist(node, decl);
                 if (decl.modifier_pub) {
-                    try self.module.exports.put(decl.name.lexeme, fn_id);
+                    try self.export_symbol(decl.name.lexeme, fn_id, node);
                 }
             },
             .co_decl => |decl| {
                 const co_id = try self.co_hoist(node, decl);
 
                 if (decl.modifier_pub) {
-                    try self.module.exports.put(decl.name.lexeme, co_id);
+                    try self.export_symbol(decl.name.lexeme, co_id, node);
                 }
             },
             .struct_decl => |decl| {
+                if (decl.modifier_pub) {
+                    for (decl.fields) |field| {
+                        if (field.is_static) {
+                            try self.fail("Exported structs cannot have static fields.", "Static fields are module-level state and are only initialized when the module's top-level code runs.", field.name.line, field.name.column);
+                            return TypeCheckerError.NonConstantExport;
+                        }
+                        if (field.default_value) |def| {
+                            if (ConstValue.from_literal(def) == null) {
+                                try self.fail("Exported struct defaults must be literals.", "The default is inlined into the importing module.", field.name.line, field.name.column);
+                                return TypeCheckerError.NonConstantExport;
+                            }
+                        }
+                    }
+                }
                 var field_types: std.ArrayList(StructField) = .empty;
                 defer field_types.deinit(self.allocator);
 
@@ -180,7 +200,7 @@ pub const TypeChecker = struct {
 
                 try self.environment.define_binding(decl.name.lexeme, struct_id, .{ .node = node }, true);
                 if (decl.modifier_pub) {
-                    try self.module.exports.put(decl.name.lexeme, struct_id);
+                    try self.export_symbol(decl.name.lexeme, struct_id, node);
                 }
             },
             .type_decl => |decl| {
@@ -188,7 +208,7 @@ pub const TypeChecker = struct {
                 const type_id = try self.registry.add_type_type(decl.name.lexeme, type_annot_id, self.module.filepath);
                 try self.environment.define_binding(decl.name.lexeme, type_id, .{ .node = node }, true);
                 if (decl.modifier_pub) {
-                    try self.module.exports.put(decl.name.lexeme, type_id);
+                    try self.export_symbol(decl.name.lexeme, type_id, node);
                 }
             },
             .enum_decl => |decl| {
@@ -200,7 +220,7 @@ pub const TypeChecker = struct {
                 const enum_id = try self.registry.add_enum_type(decl.name.lexeme, try variants.toOwnedSlice(self.allocator), self.module.filepath);
                 try self.environment.define_binding(decl.name.lexeme, enum_id, .{ .node = node }, true);
                 if (decl.modifier_pub) {
-                    try self.module.exports.put(decl.name.lexeme, enum_id);
+                    try self.export_symbol(decl.name.lexeme, enum_id, node);
                 }
             },
             .error_decl => |decl| {
@@ -212,7 +232,7 @@ pub const TypeChecker = struct {
                 const error_id = try self.registry.add_error_type(decl.name.lexeme, try variants.toOwnedSlice(self.allocator), self.module.filepath);
                 try self.environment.define_binding(decl.name.lexeme, error_id, .{ .node = node }, true);
                 if (decl.modifier_pub) {
-                    try self.module.exports.put(decl.name.lexeme, error_id);
+                    try self.export_symbol(decl.name.lexeme, error_id, node);
                 }
             },
             else => {},
@@ -247,12 +267,17 @@ pub const TypeChecker = struct {
 
                 try self.environment.define_binding(decl.name.lexeme, target_type, .{ .node = node }, decl.is_const);
 
+                if (self.environment.parent == null and decl.is_const and ConstValue.from_literal(decl.initializer) == null) {
+                    try self.fail("Module-level constants must be literals.", "Use a number, string, bool or nil literal. Compile-time evaluation is not supported yet.", decl.line, decl.column);
+                    return TypeCheckerError.NonConstantExport;
+                }
+
                 if (decl.modifier_pub) {
-                    if (!is_constant_literal(decl.initializer)) {
-                        try self.fail("Exported constants must be initialized with a literal value.", "Only literals (numbers, strings, booleans, nil, and their negation) are allowed for exported constants.", decl.line, decl.column);
+                    if (!decl.is_const) {
+                        try self.fail("Exported variables must be `const`.", "A `pub var` is shared mutable state.", decl.line, decl.column);
                         return TypeCheckerError.NonConstantExport;
                     }
-                    try self.module.exports.put(decl.name.lexeme, target_type);
+                    try self.export_symbol(decl.name.lexeme, target_type, node);
                 }
 
                 return .{};
@@ -1117,6 +1142,13 @@ pub const TypeChecker = struct {
                         }
                         for (_struct.fields) |field| {
                             if (std.mem.eql(u8, field.name, expr.member.lexeme) and field.is_static) {
+                                // Static fields only initialize when their own module's
+                                // top-level code runs, so a function in another module
+                                // must not read them. Same-module reads keep working.
+                                if ((self.in_function or self.in_coroutine) and !std.mem.eql(u8, _struct.source_file, self.module.filepath)) {
+                                    try self.fail("Functions cannot access global state", "Static fields are module-level state.", expr.line, expr.column);
+                                    return TypeCheckerError.MutableGlobalStateCaptureAttempt;
+                                }
                                 expr.resolved_type = field.type;
                                 return field.type;
                             }
@@ -1368,6 +1400,10 @@ pub const TypeChecker = struct {
                 self.expected_return_type = ret_typeid;
                 defer self.expected_return_type = prev_ret;
 
+                const prev_in_func = self.in_function;
+                self.in_function = true;
+                defer self.in_function = prev_in_func;
+
                 const body_term = try self.check(expr.body);
                 const needs_return = ret_typeid != @intFromEnum(PrimitiveType.Nil) and ret_typeid != @intFromEnum(PrimitiveType.Never);
                 if (needs_return and !body_term.return_ and !body_term.panics) {
@@ -1414,6 +1450,10 @@ pub const TypeChecker = struct {
                 for (expr.params, arg_types.items, 0..) |param, param_id, index| {
                     try self.environment.define_binding(param.name.lexeme, param_id, .{ .param = .{ .func = node, .index = @as(u32, @intCast(index)) } }, false);
                 }
+
+                const prev_in_co = self.in_coroutine;
+                self.in_coroutine = true;
+                defer self.in_coroutine = prev_in_co;
 
                 const body_term = try self.check(expr.body);
                 const needs_return = ret_typeid != @intFromEnum(PrimitiveType.Nil) and ret_typeid != @intFromEnum(PrimitiveType.Never);
@@ -1631,17 +1671,6 @@ pub const TypeChecker = struct {
                 return (try self.is_compatible(u.left, source)) or (try self.is_compatible(u.right, source));
             },
             else => return false,
-        };
-    }
-
-    fn is_constant_literal(node: *AST.ASTNode) bool {
-        return switch (node.*) {
-            .int_lit, .float_lit, .str_lit, .bool_lit, .nil_lit => true,
-            .unary_expr => |expr| switch (expr.expr.*) {
-                .int_lit, .float_lit => std.mem.eql(u8, expr.operator.lexeme, "-") or std.mem.eql(u8, expr.operator.lexeme, "~"),
-                else => false,
-            },
-            else => false,
         };
     }
 

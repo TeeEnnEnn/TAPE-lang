@@ -1,5 +1,5 @@
 pub const a = 32;
-const b = 12 + 31;
+const b = 43;
 if (a != 32) { panic "pub const a"; }
 if (b != 43) { panic "b"; }
 {
@@ -16,7 +16,7 @@ if (a != 32) { panic "outer a unchanged"; }
 const c = 100;
 if (c != 100) { panic "c"; }
 
-const sum = a + b;
+const sum = 75;
 if (sum != 75) { panic "sum const"; }
 
 const str = "hello";

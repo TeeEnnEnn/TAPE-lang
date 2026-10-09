@@ -82,6 +82,8 @@ pub const Module = struct {
     ast: *AST.ASTNode,
     binding_resolution: BindingResolution,
     exports: std.StringHashMap(AST.TypeId),
+    /// Declaration node of each exported name, so importers can copy the exporter's binding
+    export_nodes: std.StringHashMap(*AST.ASTNode),
     file_contents: []const u8,
     mutex: std.Io.Mutex,
     dependencies: std.ArrayList(*Module),
@@ -98,6 +100,7 @@ pub const Module = struct {
             .ast = undefined,
             .binding_resolution = BindingResolution.init(allocator),
             .exports = std.StringHashMap(AST.TypeId).init(allocator),
+            .export_nodes = std.StringHashMap(*AST.ASTNode).init(allocator),
             .file_contents = file_contents,
             .mutex = std.Io.Mutex.init,
             .dependencies = .empty,
@@ -109,6 +112,7 @@ pub const Module = struct {
 
     pub fn deinit(self: *Module) void {
         self.exports.deinit();
+        self.export_nodes.deinit();
         self.dependencies.deinit(self.allocator);
         self.binding_resolution.deinit();
         self.arena.deinit();
@@ -310,8 +314,9 @@ pub const Workspace = struct {
         if (compile_options.debug.pipeline) std.debug.print("Generating code ...\n", .{});
         var vm = try Runtime.VM.init(.{ .debug_execution = compile_options.debug.vm }, self, self.allocator);
         self.vm = vm;
-        // first isolate
-        const first_isolate = try vm.new_isolate(entrypoint_module.binding_resolution.globals_count, entrypoint_module.binding_resolution.function_constants_count);
+        // first isolate. Slots are unique program-wide, so size it from the
+        // workspace totals after every module has been resolved.
+        const first_isolate = try vm.new_isolate(self.workspace_globals.next_global_constant_slot, self.workspace_globals.next_function_constant_slot);
         first_isolate.gc.deactivate_collector();
 
         // emit Bytecode
@@ -404,15 +409,55 @@ pub const Workspace = struct {
         }
     }
 
+    /// Lexically normalizes a path, collapsing `.`, `..` and duplicate
+    /// separators. Joined import paths accumulate `./` segments (the
+    /// importer's dirname already ends in one), so without this the same
+    /// file registers as two different modules and its types get
+    /// duplicate ids.
+    fn normalize_path(allocator: std.mem.Allocator, path: []const u8) ![]u8 {
+        const is_absolute = std.fs.path.isAbsolute(path);
+        var parts: std.ArrayList([]const u8) = .empty;
+        defer parts.deinit(allocator);
+        var it = std.mem.splitScalar(u8, path, '/');
+        while (it.next()) |seg| {
+            if (seg.len == 0 or std.mem.eql(u8, seg, ".")) continue;
+            if (std.mem.eql(u8, seg, "..")) {
+                if (parts.items.len > 0 and !std.mem.eql(u8, parts.items[parts.items.len - 1], "..")) {
+                    _ = parts.pop();
+                    continue;
+                }
+                // Relative paths may escape; absolute paths clamp at root.
+                if (!is_absolute) try parts.append(allocator, seg);
+                continue;
+            }
+            try parts.append(allocator, seg);
+        }
+        var out: std.ArrayList(u8) = .empty;
+        errdefer out.deinit(allocator);
+        if (is_absolute) try out.append(allocator, '/');
+        for (parts.items, 0..) |part, i| {
+            if (i > 0) try out.append(allocator, '/');
+            try out.appendSlice(allocator, part);
+        }
+        if (out.items.len == 0) try out.appendSlice(allocator, ".");
+        return out.toOwnedSlice(allocator);
+    }
+
     pub fn resolve_path(self: *Workspace, importer_filepath: []const u8, import_path: []const u8) ![]const u8 {
         if (std.fs.path.isAbsolute(import_path)) {
-            return try self.allocator.dupe(u8, import_path);
+            const duped = try self.allocator.dupe(u8, import_path);
+            defer self.allocator.free(duped);
+            return try normalize_path(self.allocator, duped);
         }
         const dirname = std.fs.path.dirname(importer_filepath) orelse "";
         if (dirname.len == 0) {
-            return try self.allocator.dupe(u8, import_path);
+            const duped = try self.allocator.dupe(u8, import_path);
+            defer self.allocator.free(duped);
+            return try normalize_path(self.allocator, duped);
         }
-        return try std.fs.path.join(self.allocator, &[_][]const u8{ dirname, import_path });
+        const joined = try std.fs.path.join(self.allocator, &[_][]const u8{ dirname, import_path });
+        defer self.allocator.free(joined);
+        return try normalize_path(self.allocator, joined);
     }
 
     pub fn get_module(self: *Workspace, filepath: []const u8) !?*Module {

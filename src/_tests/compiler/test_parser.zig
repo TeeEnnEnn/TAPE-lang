@@ -1,5 +1,6 @@
 const std = @import("std");
 const Parser = @import("../../compiler/parser.zig").Parser;
+const ParserError = @import("../../compiler/parser.zig").ParserError;
 const AST = @import("../../compiler/ast.zig");
 const Workspace = @import("../../compiler/workspace.zig").Workspace;
 const Module = @import("../../compiler/workspace.zig").Module;
@@ -356,4 +357,17 @@ test "Parser can parse use declaration with multiple imports" {
     try std.testing.expectEqual(@as(usize, 2), use_decl.items.len);
     try std.testing.expectEqualStrings("foo", use_decl.items[0].name.lexeme);
     try std.testing.expectEqualStrings("bar", use_decl.items[1].name.lexeme);
+}
+
+test "Parser rejects pub var" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const allocator = arena.allocator();
+    const io = std.testing.io;
+    var group = std.Io.Group.init;
+    var workspace = Workspace.init(allocator, io);
+    defer workspace.deinit();
+    const mod = try Module.init("test", "pub var x = 10;", allocator);
+    var p = try Parser.init(allocator, &workspace, mod, io, &group);
+    try std.testing.expectError(ParserError.UnexpectedToken, p.parse());
 }

@@ -14,6 +14,7 @@ const AST = @import("ast.zig");
 const BindingResolver = @import("binding_resolver.zig");
 const Module = @import("workspace.zig").Module;
 const TypeRegistry = @import("type_registry.zig");
+const ConstValue = @import("const_value.zig").ConstValue;
 
 const INTERNAL_ERROR_MESSAGE = "This is an internal error. Please write a bug report.";
 
@@ -193,27 +194,9 @@ pub const CodeGenerator = struct {
             .struct_decl => |decl| {
                 try self.generate_struct_decl(node, decl);
             },
-            .use_decl => |decl| {
-                const ref: AST.DeclRef = .{ .node = node };
-                const binding_info = self.binding_resolution.declaration_bindings.get(ref) orelse {
-                    self.fail("use declaration has no binding in binding resolution." ++ INTERNAL_ERROR_MESSAGE, null, decl.line, decl.column);
-                    return CodeGeneratorError.MissingBinding;
-                };
-                switch (binding_info.kind) {
-                    .imported_global => |binding| {
-                        _ = binding;
-                        // use name from "path";
-                        // we need to look for the location of name in the the path's module table
-                        // add it yo our globals
-                        for (decl.items) |item| {
-                            _ = item;
-                        }
-                    },
-                    else => {
-                        self.fail("Use Declaration has non use binding." ++ INTERNAL_ERROR_MESSAGE, null, decl.line, decl.column);
-                        return CodeGeneratorError.InvalidPosition;
-                    },
-                }
+            .use_decl => {
+                // Imports need no codegen: each import item already carries the
+                // exporter's resolved binding (slot or inlined constant value).
             },
             .enum_decl => {
                 // nothing to do - fully comptime
@@ -512,14 +495,30 @@ pub const CodeGenerator = struct {
         }
     }
 
-    fn generate_var_decl(self: *CodeGenerator, node: *AST.ASTNode, decl: *AST.VarDecl) CodeGeneratorError!void {
-        try self.generate_expression(decl.initializer);
+    fn emit_const_value(self: *CodeGenerator, value: ConstValue, line: usize) CodeGeneratorError!void {
+        switch (value) {
+            .int => |v| try self.current.chunk().emit_constant(.{ .int = v }, line),
+            .float => |v| try self.current.chunk().emit_constant(.{ .float = v }, line),
+            .bool => |v| try self.current.chunk().write_opcode(if (v) .OP_TRUE else .OP_FALSE, line),
+            .nil => try self.current.chunk().write_opcode(.OP_NIL, line),
+            .string => |s| {
+                const obj = try Entities.copy_string(self.isolate, s);
+                try self.current.chunk().emit_constant(.{ .object = @ptrCast(obj) }, line);
+            },
+        }
+    }
 
+    fn generate_var_decl(self: *CodeGenerator, node: *AST.ASTNode, decl: *AST.VarDecl) CodeGeneratorError!void {
         const ref: AST.DeclRef = .{ .node = node };
         const binding = self.binding_resolution.declaration_bindings.get(ref) orelse {
             self.fail("Variable declaration has no binding in binding resolution." ++ INTERNAL_ERROR_MESSAGE, null, decl.line, decl.column);
             return CodeGeneratorError.MissingBinding;
         };
+
+        // inlined at each use, so the declaration emits nothing
+        if (binding.kind == .constant) return;
+
+        try self.generate_expression(decl.initializer);
 
         switch (binding.kind) {
             .local => {
@@ -1022,6 +1021,13 @@ pub const CodeGenerator = struct {
             return CodeGeneratorError.MissingBinding;
         };
         switch (binding.kind) {
+            .constant => {
+                const value = binding.const_value orelse {
+                    self.fail("Constant binding has no value." ++ INTERNAL_ERROR_MESSAGE, null, expr.line, expr.column);
+                    return CodeGeneratorError.MissingBinding;
+                };
+                try self.emit_const_value(value, expr.line);
+            },
             .global, .imported_global => {
                 try self.current.chunk().write_opcode(.OP_LOAD_GLOBAL, expr.line);
                 try self.current.chunk().write_u16(binding.slot, expr.line);

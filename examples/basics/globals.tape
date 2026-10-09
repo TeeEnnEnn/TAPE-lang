@@ -12,7 +12,7 @@ var a = 1;
 var b = a + 41;
 if (b != 42) { panic "b"; }
 
-const z = y + x;
+const z = 142;
 if (z != 142) { panic "z"; }
 
 pub const pub_const = 456;

@@ -7,7 +7,10 @@ Things I need to do:
 
 [ ] - 2026/10/09: multi module projects
 
-[ ] - 2026/10/07: allow anonymous functions at declaration position
+[ ] - 2026/10/09: catch expression test script
+
+~~[ ] - 2026/10/07: allow anonymous functions at declaration position~~
+Will not be adding this. use (anon_fn)(); at the declaration position instead.
 
 [ ] - Remove the ability for functions to capture global scope
 	[ ] - Remove the ability for functions to capture global mutable state - allow constant state iff that state has the same visibility of the function
