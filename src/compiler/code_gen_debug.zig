@@ -41,14 +41,14 @@ pub const ChunkDisassembler = struct {
     }
 
     fn disassemble_simple_instruction(chunk: *Chunk, offset: usize) usize {
-        const opcode: Opcode = @enumFromInt(chunk.code.items[offset]);
+        const opcode: Opcode = @fromBackingInt(@intCast(chunk.code.items[offset]));
         std.debug.print("{s}\n", .{@tagName(opcode)});
         return offset + 1;
     }
 
     fn disassemble_constant_instruction(chunk: *Chunk, offset: usize) usize {
         const index = read_u16(chunk, offset + 1);
-        const opcode: Opcode = @enumFromInt(chunk.code.items[offset]);
+        const opcode: Opcode = @fromBackingInt(@intCast(chunk.code.items[offset]));
         const value = chunk.constants.items[index];
         std.debug.print("{s}  ", .{@tagName(opcode)});
         print_value_for_disassembly(value);
@@ -57,21 +57,21 @@ pub const ChunkDisassembler = struct {
     }
 
     fn disassemble_call_instruction(chunk: *Chunk, offset: usize) usize {
-        const opcode: Opcode = @enumFromInt(chunk.code.items[offset]);
+        const opcode: Opcode = @fromBackingInt(@intCast(chunk.code.items[offset]));
         const param_count = read_u16(chunk, offset + 1);
         std.debug.print("{s} - {d} param(s)\n", .{ @tagName(opcode), param_count });
         return offset + 1 + 2; // +1 for opcode +2 for u16 param_count
     }
 
     fn disassemble_jump_instruction(chunk: *Chunk, offset: usize, direction: JumpDirection) usize {
-        const opcode: Opcode = @enumFromInt(chunk.code.items[offset]);
+        const opcode: Opcode = @fromBackingInt(@intCast(chunk.code.items[offset]));
         const jump_amount = read_u16(chunk, offset + 1);
         std.debug.print("{s}  {s} {}\n", .{ @tagName(opcode), @tagName(direction), jump_amount });
         return offset + 3;
     }
 
     fn disassemble_closure_instruction(chunk: *Chunk, offset: usize) usize {
-        const opcode: Opcode = @enumFromInt(chunk.code.items[offset]);
+        const opcode: Opcode = @fromBackingInt(@intCast(chunk.code.items[offset]));
         const index = read_u16(chunk, offset + 1);
         std.debug.print("{s}  {d}", .{ @tagName(opcode), index });
         if (index < chunk.constants.items.len) {
@@ -99,14 +99,14 @@ pub const ChunkDisassembler = struct {
     }
 
     fn disassemble_load_store_instruction(chunk: *Chunk, offset: usize) usize {
-        const opcode: Opcode = @enumFromInt(chunk.code.items[offset]);
+        const opcode: Opcode = @fromBackingInt(@intCast(chunk.code.items[offset]));
         const index = read_u16(chunk, offset + 1);
         std.debug.print("{s}  {}\n", .{ @tagName(opcode), index });
         return offset + 3;
     }
 
     fn disassemble_object_inline_arg_instruction(chunk: *Chunk, offset: usize) usize {
-        const opcode: Opcode = @enumFromInt(chunk.code.items[offset]);
+        const opcode: Opcode = @fromBackingInt(@intCast(chunk.code.items[offset]));
         const arg_count = read_u16(chunk, offset + 1);
         std.debug.print("{s}  {} args\n", .{ @tagName(opcode), arg_count });
         return offset + 3;
@@ -114,7 +114,7 @@ pub const ChunkDisassembler = struct {
 
     fn disassemble_struct_instruction(chunk: *Chunk, offset: usize) usize {
         // opcode, typeid, field_count
-        const opcode: Opcode = @enumFromInt(chunk.code.items[offset]);
+        const opcode: Opcode = @fromBackingInt(@intCast(chunk.code.items[offset]));
         const type_id = read_u32(chunk, offset + 1);
         const arg_count = read_u16(chunk, offset + 5);
         std.debug.print("{s} - type_id: {d} - {} args\n", .{ @tagName(opcode), type_id, arg_count });
@@ -122,7 +122,7 @@ pub const ChunkDisassembler = struct {
     }
 
     fn disassemble_for_instruction(chunk: *Chunk, offset: usize) usize {
-        const opcode: Opcode = @enumFromInt(chunk.code.items[offset]);
+        const opcode: Opcode = @fromBackingInt(@intCast(chunk.code.items[offset]));
         const slot = read_u16(chunk, offset + 1);
         // this may be the loop offset or the exit offset
         const jump_offset = read_u16(chunk, offset + 3);
@@ -139,7 +139,7 @@ pub const ChunkDisassembler = struct {
             std.debug.print("{:3}  ", .{chunk.line_numbers.items[offset]});
         }
 
-        const opcode: Opcode = @enumFromInt(chunk.code.items[offset]);
+        const opcode: Opcode = @fromBackingInt(@intCast(chunk.code.items[offset]));
 
         switch (opcode) {
             .OP_ADD_FLOAT,
