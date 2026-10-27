@@ -14,7 +14,7 @@ test "Can write opcode" {
     defer chunk.deinit();
     try chunk.write_opcode(Opcode.OP_JUMP, 0);
     const code = chunk.code.items;
-    std.debug.assert(code[0] == @intFromEnum(Opcode.OP_JUMP));
+    std.debug.assert(code[0] == @backingInt(Opcode.OP_JUMP));
 }
 
 test "Can write constant" {
@@ -32,7 +32,7 @@ test "Can emit constants" {
     defer chunk.deinit();
     try chunk.emit_constant(.{ .int = 42 }, 0);
     const code = chunk.code.items;
-    std.debug.assert(code[0] == @intFromEnum(Opcode.OP_CONSTANT));
+    std.debug.assert(code[0] == @backingInt(Opcode.OP_CONSTANT));
     const constants = chunk.constants.items;
     std.debug.assert(constants[0].int == 42);
 }

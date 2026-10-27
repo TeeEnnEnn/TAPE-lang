@@ -52,7 +52,7 @@ fn expectOpcode(source: []const u8, opcode: Opcode) !void {
 
     const code = try generateSource(arena.allocator(), source);
     for (code) |byte| {
-        if (byte == @intFromEnum(opcode)) return;
+        if (byte == @backingInt(opcode)) return;
     }
 
     return error.ExpectedOpcodeNotFound;

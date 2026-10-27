@@ -4,7 +4,7 @@ program         ::= declaration* EOF
 declaration     ::= modifier* ( var_decl | fn_decl | type_decl | struct_decl | enum_decl | co_decl | error_decl  | use_decl)
                   | statement
 
-modifier        ::= 'pub' | 'static'
+modifier        ::= 'pub' 
 
 use_decl        ::= 'use' import_item (',' import_item)* 'from' STRING ';'
 
@@ -90,7 +90,6 @@ postfix         ::= primary (
                       '(' arguments? ')'            /* Call */
                     | '[' expression ']'            /* Index */
                     | '.' IDENTIFIER                /* Instance member access */
-                    | '::' IDENTIFIER               /* Static member access */
                   )*
 
 primary         ::= IDENTIFIER

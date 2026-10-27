@@ -174,7 +174,7 @@ pub const Chunk = struct {
 
     /// Writes an opcode to the chunk.
     pub fn write_opcode(self: *Chunk, opcode: Opcode, line: usize) !void {
-        try self.write_u8(@intFromEnum(opcode), line);
+        try self.write_u8(@backingInt(opcode), line);
     }
 
     pub fn write_constant(self: *Chunk, value: Entities.Value) !u16 {

@@ -287,17 +287,6 @@ test "Parser can parse for statement with var iterator" {
     try std.testing.expectEqualStrings("..", node.for_stmt.iterator_expr.binary_expr.operator.lexeme);
 }
 
-test "Parser can parse Color::Red expression" {
-    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
-    defer arena.deinit();
-    const allocator = arena.allocator();
-
-    const node = try parseFirstDecl(allocator, "Color::Red;");
-    try std.testing.expect(node.* == .expr_stmt);
-    try std.testing.expect(node.expr_stmt.expr.* == .static_member_expr);
-    try std.testing.expectEqualStrings("Red", node.expr_stmt.expr.static_member_expr.member.lexeme);
-}
-
 test "Parser can parse struct methods" {
     var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
     defer arena.deinit();

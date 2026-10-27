@@ -32,22 +32,22 @@ if (MAX_TASKS != 8) { panic "max tasks"; }
 if (SEED_TASKS != 5) { panic "seed tasks"; }
 
 // --- Status model ---
-var st = Status::Doing;
+var st = Status.Doing;
 if (status_code(st) != 1) { panic "status code"; }
-if (status_label(Status::Todo) != "todo") { panic "status label"; }
-if (status_code(Status::Done) != DONE_CODE) { panic "done code"; }
+if (status_label(Status.Todo) != "todo") { panic "status label"; }
+if (status_code(Status.Done) != DONE_CODE) { panic "done code"; }
 
 // --- Priority model ---
-var pr = Priority::Urgent;
+var pr = Priority.Urgent;
 if (priority_rank(pr) != 3) { panic "priority rank"; }
-if (priority_label(Priority::Low) != "low") { panic "priority label"; }
+if (priority_label(Priority.Low) != "low") { panic "priority label"; }
 if (URGENT_CODE != 3) { panic "urgent code"; }
 if (HIGH_CODE != 2) { panic "high code"; }
 if (LOW_CODE != 0) { panic "low code"; }
 
 // --- Errors ---
-if (task_error_name(TaskError::NotFound) != "not-found") { panic "err name"; }
-if (task_error_name(TaskError::AlreadyDone) != "already-done") { panic "err done"; }
+if (task_error_name(TaskError.NotFound) != "not-found") { panic "err name"; }
+if (task_error_name(TaskError.AlreadyDone) != "already-done") { panic "err done"; }
 
 // --- Math / strings / flags / validators ---
 if (clamp_int(99, 1, 40) != 40) { panic "clamp hi"; }
@@ -156,13 +156,13 @@ var want_closed_2: Int | TaskError = 2;
 if (close_task(store, 2) != want_closed_2) { panic "close 2"; }
 var want_closed_4: Int | TaskError = 4;
 if (close_task(store, 4) != want_closed_4) { panic "close 4"; }
-var want_dup: Int | TaskError = TaskError::AlreadyDone;
+var want_dup: Int | TaskError = TaskError.AlreadyDone;
 if (close_task(store, 2) != want_dup) { panic "double close"; }
 var close_missing = match (close_task(store, 99)) {
-    TaskError::NotFound => give "gone";,
-    TaskError::StoreFull => give "full";,
-    TaskError::InvalidInput => give "bad";,
-    TaskError::AlreadyDone => give "dup";,
+    TaskError.NotFound => give "gone";,
+    TaskError.StoreFull => give "full";,
+    TaskError.InvalidInput => give "bad";,
+    TaskError.AlreadyDone => give "dup";,
     default => give "closed";
 };
 if (close_missing != "gone") { panic "close missing"; }
@@ -177,20 +177,20 @@ var want_reopened: Int | TaskError = 2;
 if (reopen_task(store, 2) != want_reopened) { panic "reopen 2"; }
 if (close_task(store, 2) != want_closed_2) { panic "reclose 2"; }
 var reopen_open = match (reopen_task(store, 1)) {
-    TaskError::NotFound => give "gone";,
-    TaskError::StoreFull => give "full";,
-    TaskError::InvalidInput => give "bad";,
-    TaskError::AlreadyDone => give "dup";,
+    TaskError.NotFound => give "gone";,
+    TaskError.StoreFull => give "full";,
+    TaskError.InvalidInput => give "bad";,
+    TaskError.AlreadyDone => give "dup";,
     default => give "reopened";
 };
 if (reopen_open != "bad") { panic "reopen open"; }
 var want_close_name: String | TaskError = "Fix parser";
 if (close_task_name(2) != want_close_name) { panic "close name"; }
 var close_name_missing = match (close_task_name(7)) {
-    TaskError::NotFound => give "gone";,
-    TaskError::StoreFull => give "full";,
-    TaskError::InvalidInput => give "bad";,
-    TaskError::AlreadyDone => give "dup";,
+    TaskError.NotFound => give "gone";,
+    TaskError.StoreFull => give "full";,
+    TaskError.InvalidInput => give "bad";,
+    TaskError.AlreadyDone => give "dup";,
     default => give "named";
 };
 if (close_name_missing != "gone") { panic "close name missing"; }
@@ -243,10 +243,10 @@ if (range_sum != 10) { panic "range sum"; }
 // --- Second store: empty + error paths ---
 var probe = make_task_store();
 var probe_open = match (first_open_slot(probe)) {
-    TaskError::NotFound => give "empty";,
-    TaskError::StoreFull => give "full";,
-    TaskError::InvalidInput => give "bad";,
-    TaskError::AlreadyDone => give "dup";,
+    TaskError.NotFound => give "empty";,
+    TaskError.StoreFull => give "full";,
+    TaskError.InvalidInput => give "bad";,
+    TaskError.AlreadyDone => give "dup";,
     default => give "found";
 };
 if (probe_open != "empty") { panic "probe empty"; }
@@ -254,10 +254,10 @@ var probe_extremes = min_max_estimate(probe);
 if (probe_extremes.0 != 0) { panic "probe min"; }
 if (completion_percent(probe) != 0) { panic "probe pct"; }
 var bad_add = match (store_add(probe, "Nope", "ada", 0, TODO_CODE, LOW_CODE, 0)) {
-    TaskError::NotFound => give "gone";,
-    TaskError::StoreFull => give "full";,
-    TaskError::InvalidInput => give "bad";,
-    TaskError::AlreadyDone => give "dup";,
+    TaskError.NotFound => give "gone";,
+    TaskError.StoreFull => give "full";,
+    TaskError.InvalidInput => give "bad";,
+    TaskError.AlreadyDone => give "dup";,
     default => give "added";
 };
 if (bad_add != "bad") { panic "bad estimate"; }
@@ -271,18 +271,18 @@ var f7 = store_add(probe, "Extra G", "ada", 7, TODO_CODE, LOW_CODE, 0);
 var f8 = store_add(probe, "Extra H", "ada", 8, TODO_CODE, LOW_CODE, 0);
 if (store_count(probe) != 8) { panic "probe full"; }
 var overflow = match (store_add(probe, "Extra I", "ada", 1, TODO_CODE, LOW_CODE, 0)) {
-    TaskError::NotFound => give "gone";,
-    TaskError::StoreFull => give "full";,
-    TaskError::InvalidInput => give "bad";,
-    TaskError::AlreadyDone => give "dup";,
+    TaskError.NotFound => give "gone";,
+    TaskError.StoreFull => give "full";,
+    TaskError.InvalidInput => give "bad";,
+    TaskError.AlreadyDone => give "dup";,
     default => give "added";
 };
 if (overflow != "full") { panic "overflow"; }
 var missing_title = match (store_title_at(probe, 9)) {
-    TaskError::NotFound => give "gone";,
-    TaskError::StoreFull => give "full";,
-    TaskError::InvalidInput => give "bad";,
-    TaskError::AlreadyDone => give "dup";,
+    TaskError.NotFound => give "gone";,
+    TaskError.StoreFull => give "full";,
+    TaskError.InvalidInput => give "bad";,
+    TaskError.AlreadyDone => give "dup";,
     default => give "titled";
 };
 if (missing_title != "gone") { panic "missing title"; }

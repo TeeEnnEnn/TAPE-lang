@@ -9,9 +9,9 @@ pub error TaskError {
 
 pub fn task_error_name(e: TaskError) -> String {
     return match (e) {
-        TaskError::NotFound => give "not-found";,
-        TaskError::StoreFull => give "store-full";,
-        TaskError::InvalidInput => give "invalid-input";,
-        TaskError::AlreadyDone => give "already-done";
+        TaskError.NotFound => give "not-found";,
+        TaskError.StoreFull => give "store-full";,
+        TaskError.InvalidInput => give "invalid-input";,
+        TaskError.AlreadyDone => give "already-done";
     };
 }

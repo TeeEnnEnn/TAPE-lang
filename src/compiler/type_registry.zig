@@ -6,7 +6,6 @@ pub const TypeId = AST.TypeId;
 pub const StructField = struct {
     name: []const u8,
     type: TypeId,
-    is_static: bool,
     is_pub: bool,
     default_value: ?*AST.ASTNode,
 };
@@ -14,7 +13,6 @@ pub const StructField = struct {
 pub const StructMethod = struct {
     name: []const u8,
     type: TypeId,
-    is_static: bool,
     is_pub: bool,
     method_node: *AST.ASTNode,
 };
@@ -102,12 +100,12 @@ pub const TypeRegistry = struct {
     /// - `Allocator.Error`: The type could not be resolved due to an allocator error.
     pub fn resolve(self: *TypeRegistry, type_node: *AST.ASTNode) TypeRegistryError!TypeId {
         return switch (type_node.*) {
-            .nil_type => @intFromEnum(PrimitiveType.Nil),
-            .int_type => @intFromEnum(PrimitiveType.Int),
-            .float_type => @intFromEnum(PrimitiveType.Float),
-            .string_type => @intFromEnum(PrimitiveType.String),
-            .bool_type => @intFromEnum(PrimitiveType.Bool),
-            .never_type => @intFromEnum(PrimitiveType.Never),
+            .nil_type => @backingInt(PrimitiveType.Nil),
+            .int_type => @backingInt(PrimitiveType.Int),
+            .float_type => @backingInt(PrimitiveType.Float),
+            .string_type => @backingInt(PrimitiveType.String),
+            .bool_type => @backingInt(PrimitiveType.Bool),
+            .never_type => @backingInt(PrimitiveType.Never),
 
             .array_type => |array| {
                 const element_id = try self.resolve(array.element_type);

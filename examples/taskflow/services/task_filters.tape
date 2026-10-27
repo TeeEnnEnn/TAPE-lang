@@ -54,5 +54,5 @@ pub fn first_open_slot(s: TaskStore) -> Int | TaskError {
         }
         i += 1;
     }
-    return TaskError::NotFound;
+    return TaskError.NotFound;
 }

@@ -15,17 +15,17 @@ pub enum TaskStatus {
 
 pub fn status_code(s: TaskStatus) -> Int {
     return match (s) {
-        TaskStatus::Todo => give 0;,
-        TaskStatus::Doing => give 1;,
-        TaskStatus::Done => give 2;
+        TaskStatus.Todo => give 0;,
+        TaskStatus.Doing => give 1;,
+        TaskStatus.Done => give 2;
     };
 }
 
 pub fn status_label(s: TaskStatus) -> String {
     return match (s) {
-        TaskStatus::Todo => give "todo";,
-        TaskStatus::Doing => give "doing";,
-        TaskStatus::Done => give "done";
+        TaskStatus.Todo => give "todo";,
+        TaskStatus.Doing => give "doing";,
+        TaskStatus.Done => give "done";
     };
 }
 
@@ -44,5 +44,5 @@ pub fn is_done_code(code: Int) -> Bool {
 }
 
 pub fn is_done_status(s: TaskStatus) -> Bool {
-    return s == TaskStatus::Done;
+    return s == TaskStatus.Done;
 }

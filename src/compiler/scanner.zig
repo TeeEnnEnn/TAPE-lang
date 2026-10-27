@@ -84,8 +84,6 @@ pub const TokenType = enum {
     SLASH_EQUAL,
     /// '%='
     PERCENT_EQUAL,
-    /// '::'
-    COLON_COLON,
     /// A sequence of alphanumeric characters (e.g. `foo`, `bar`) starting with a letter or underscore
     IDENTIFIER,
     /// A string literal which may start with a single or double quote
@@ -160,8 +158,6 @@ pub const TokenType = enum {
     STRUCT,
     /// 'type'
     TYPE,
-    /// 'static'
-    STATIC,
     /// 'co'
     CO,
     /// 'enum'
@@ -404,7 +400,6 @@ pub const Scanner = struct {
             } else .IDENTIFIER,
             's' => if (len > 1) switch (source[1]) {
                 't' => if (len > 2) switch (source[2]) {
-                    'a' => self.check_keyword(3, "tic", .STATIC),
                     'r' => self.check_keyword(3, "uct", .STRUCT),
                     else => .IDENTIFIER,
                 } else .IDENTIFIER,
@@ -496,7 +491,7 @@ pub const Scanner = struct {
             ']' => self.make_token(.RIGHT_SQUARE),
             ';' => self.make_token(.SEMICOLON),
             ',' => self.make_token(.COMMA),
-            ':' => self.make_token(if (self.match(':')) .COLON_COLON else .COLON),
+            ':' => self.make_token(.COLON),
             '.' => self.make_token(if (self.match('.')) .DOT_DOT else .DOT),
             '-' => if (self.match('>'))
                 self.make_token(.ARROW)

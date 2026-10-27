@@ -14,19 +14,19 @@ pub enum Priority {
 
 pub fn priority_rank(p: Priority) -> Int {
     return match (p) {
-        Priority::Low => give 0;,
-        Priority::Medium => give 1;,
-        Priority::High => give 2;,
-        Priority::Urgent => give 3;
+        Priority.Low => give 0;,
+        Priority.Medium => give 1;,
+        Priority.High => give 2;,
+        Priority.Urgent => give 3;
     };
 }
 
 pub fn priority_label(p: Priority) -> String {
     return match (p) {
-        Priority::Low => give "low";,
-        Priority::Medium => give "medium";,
-        Priority::High => give "high";,
-        Priority::Urgent => give "urgent";
+        Priority.Low => give "low";,
+        Priority.Medium => give "medium";,
+        Priority.High => give "high";,
+        Priority.Urgent => give "urgent";
     };
 }
 

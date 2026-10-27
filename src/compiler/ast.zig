@@ -12,7 +12,6 @@ pub const DeclRef = union(enum) {
     // not AST nodes themselves but "sub-elements" of other AST nodes
     param: struct { func: *ASTNode, index: u32 },
     import: struct { use_decl: *ASTNode, index: u32 },
-    static_field: struct { type_id: TypeId, index: u32 },
 };
 
 /// A Abstract Syntax Tree Node
@@ -68,7 +67,6 @@ pub const ASTNode = union(enum) {
     call_expr: *CallExpr, // ()
     index_expr: *IndexExpr, // []
     dot_expr: *DotExpr, // .
-    static_member_expr: *StaticMemberExpr, // ::
 
     // unary
     try_expr: *TryExpr, // try
@@ -151,7 +149,6 @@ pub const VarDecl = struct {
 /// ```
 pub const FnDecl = struct {
     modifier_pub: bool,
-    modifier_static: bool,
     name: Token,
     params: []*TypedNamedField,
     return_type_annotation: *ASTNode,
@@ -169,7 +166,6 @@ pub const FnDecl = struct {
 /// ```
 pub const CoDecl = struct {
     modifier_pub: bool,
-    modifier_static: bool,
     name: Token,
     params: []*TypedNamedField,
     return_type_annotation: *ASTNode,
@@ -495,19 +491,6 @@ pub const DotExpr = struct {
     column: usize,
 };
 
-/// Static member expression node.
-///
-/// ```
-/// expr::member
-/// ```
-pub const StaticMemberExpr = struct {
-    expr: *ASTNode,
-    member: Token,
-    resolved_type: TypeId = 0,
-    line: usize,
-    column: usize,
-};
-
 /// Group expression node.
 ///
 /// ```
@@ -631,7 +614,6 @@ pub const TypedNamedField = struct {
 pub const TypedNamedStructField = struct {
     name: Token,
     type_annotation: *ASTNode,
-    is_static: bool,
     is_pub: bool,
     has_default: bool,
     default_value: ?*ASTNode,
@@ -640,7 +622,6 @@ pub const TypedNamedStructField = struct {
 pub const StructMethodField = struct {
     name: Token,
     method: *ASTNode,
-    is_static: bool, // is accessible from the struct itself
     is_pub: bool, // is accessible from outside the struct
 };
 

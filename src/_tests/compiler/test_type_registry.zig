@@ -29,13 +29,13 @@ test "TypeRegistry - Primitive Types" {
     defer registry.deinit();
 
     const int_id = try resolveType(allocator, &registry, "Int");
-    try std.testing.expectEqual(@intFromEnum(PrimitiveType.Int), int_id);
+    try std.testing.expectEqual(@backingInt(PrimitiveType.Int), int_id);
 
     const string_id = try resolveType(allocator, &registry, "String");
-    try std.testing.expectEqual(@intFromEnum(PrimitiveType.String), string_id);
+    try std.testing.expectEqual(@backingInt(PrimitiveType.String), string_id);
 
     const float_id = try resolveType(allocator, &registry, "Float");
-    try std.testing.expectEqual(@intFromEnum(PrimitiveType.Float), float_id);
+    try std.testing.expectEqual(@backingInt(PrimitiveType.Float), float_id);
 }
 
 test "TypeRegistry - Array Types" {

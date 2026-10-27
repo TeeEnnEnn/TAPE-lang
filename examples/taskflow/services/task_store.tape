@@ -37,10 +37,10 @@ pub fn store_count(s: TaskStore) -> Int {
 
 pub fn store_add(s: TaskStore, title: String, owner: String, estimate: Int, status: Int, priority: Int, flag_bits: Int) -> Int | TaskError {
     if (s.count >= MAX_TASKS) {
-        return TaskError::StoreFull;
+        return TaskError.StoreFull;
     }
     if (valid_estimate(estimate) != true) {
-        return TaskError::InvalidInput;
+        return TaskError.InvalidInput;
     }
     s.titles[s.count] = title;
     s.owners[s.count] = owner;
@@ -55,11 +55,11 @@ pub fn store_add(s: TaskStore, title: String, owner: String, estimate: Int, stat
 
 pub fn store_slot_open(s: TaskStore, id: Int) -> Int | TaskError {
     if (valid_task_id(id) != true) {
-        return TaskError::NotFound;
+        return TaskError.NotFound;
     }
     var slot = id - 1;
     if (slot >= s.count) {
-        return TaskError::NotFound;
+        return TaskError.NotFound;
     }
     return slot;
 }

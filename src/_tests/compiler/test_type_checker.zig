@@ -104,7 +104,7 @@ test "Type Checker - checks typed variable declaration" {
     defer result.env.deinit();
     defer result.registry.deinit();
 
-    try std.testing.expectEqual(@intFromEnum(PrimitiveType.Int), try result.env.lookup("x"));
+    try std.testing.expectEqual(@backingInt(PrimitiveType.Int), try result.env.lookup("x"));
 }
 
 test "Type Checker - rejects mismatched variable declaration" {
@@ -141,8 +141,8 @@ test "Type Checker - checks function declaration and return type" {
     const fn_type = result.registry.get_type_info(try result.env.lookup("id"));
     try std.testing.expect(fn_type == .function);
     try std.testing.expectEqual(@as(usize, 1), fn_type.function.args.len);
-    try std.testing.expectEqual(@intFromEnum(PrimitiveType.Int), fn_type.function.args[0]);
-    try std.testing.expectEqual(@intFromEnum(PrimitiveType.Int), fn_type.function.ret);
+    try std.testing.expectEqual(@backingInt(PrimitiveType.Int), fn_type.function.args[0]);
+    try std.testing.expectEqual(@backingInt(PrimitiveType.Int), fn_type.function.ret);
 }
 
 test "Type Checker - rejects function return mismatch" {
@@ -159,15 +159,15 @@ test "Type Checker - match exhaustiveness" {
     const allocator = arena.allocator();
 
     // valid: exhaustive match on enum with returns
-    _ = try checkSource(allocator, "enum Color { Red, Green, Blue } fn f(c: Color) -> Int { match (c) { Color::Red => { return 1; }, Color::Green => { return 2; }, Color::Blue => { return 3; }, }; }");
+    _ = try checkSource(allocator, "enum Color { Red, Green, Blue } fn f(c: Color) -> Int { match (c) { Color.Red => { return 1; }, Color.Green => { return 2; }, Color.Blue => { return 3; }, }; }");
     // valid: match on primitive requires default (now exhaustive)
     _ = try checkSource(allocator, "fn f(x: Int) -> Int { match (x) { 1 => { return 10; }, default => { return 20; }, }; }");
 
     // invalid: non-exhaustive match on enum
-    try std.testing.expectError(TypeCheckerError.NonExhaustiveMatch, checkSource(allocator, "enum Color { Red, Green, Blue } fn f(c: Color) -> Int { match (c) { Color::Red => { return 1; }, Color::Green => { return 2; }, }; }"));
+    try std.testing.expectError(TypeCheckerError.NonExhaustiveMatch, checkSource(allocator, "enum Color { Red, Green, Blue } fn f(c: Color) -> Int { match (c) { Color.Red => { return 1; }, Color.Green => { return 2; }, }; }"));
 
     // invalid: non-exhaustive match on error
-    try std.testing.expectError(TypeCheckerError.NonExhaustiveMatch, checkSource(allocator, "error HttpError { NotFound, Unauthorized } fn f(e: HttpError) -> Int { match (e) { HttpError::NotFound => { return 404; }, }; }"));
+    try std.testing.expectError(TypeCheckerError.NonExhaustiveMatch, checkSource(allocator, "error HttpError { NotFound, Unauthorized } fn f(e: HttpError) -> Int { match (e) { HttpError.NotFound => { return 404; }, }; }"));
 
     // valid: nested match with give — context isolation
     _ = try checkSource(allocator,
@@ -175,13 +175,13 @@ test "Type Checker - match exhaustiveness" {
         \\enum Outer { X, Y }
         \\fn f(o: Outer) -> Int {
         \\  match (o) {
-        \\    Outer::X => {
-        \\      match (Inner::A) {
-        \\        Inner::A => { give 1; },
-        \\        Inner::B => { give 2; },
+        \\    Outer.X => {
+        \\      match (Inner.A) {
+        \\        Inner.A => { give 1; },
+        \\        Inner.B => { give 2; },
         \\      };
         \\    },
-        \\    Outer::Y => { return 3; },
+        \\    Outer.Y => { return 3; },
         \\  };
         \\  return 0;
         \\}
@@ -267,7 +267,7 @@ test "Type Checker - checks struct construction and member access" {
     defer result.env.deinit();
     defer result.registry.deinit();
 
-    try std.testing.expectEqual(@intFromEnum(PrimitiveType.Int), try result.env.lookup("px"));
+    try std.testing.expectEqual(@backingInt(PrimitiveType.Int), try result.env.lookup("px"));
 }
 
 test "Type Checker - use declaration validation" {
@@ -311,7 +311,7 @@ test "Type Checker - panic as return" {
     // valid: if-else with panic in one branch and return in the other
     _ = try checkSource(allocator, "fn f(x: Bool) -> Int { if (x) { return 1; } else { panic \"no\"; } }");
     // valid: match with panic cases
-    _ = try checkSource(allocator, "enum Color { Red, Green } fn f(c: Color) -> Int { match (c) { Color::Red => { panic \"bad\"; }, Color::Green => { panic \"bad\"; }, }; }");
+    _ = try checkSource(allocator, "enum Color { Red, Green } fn f(c: Color) -> Int { match (c) { Color.Red => { panic \"bad\"; }, Color.Green => { panic \"bad\"; }, }; }");
 }
 
 test "Type Checker - if-else return completeness" {
@@ -340,14 +340,14 @@ test "Type Checker - match return completeness" {
     const allocator = arena.allocator();
 
     // valid: exhaustive match on enum with all returning
-    _ = try checkSource(allocator, "enum Color { Red, Green, Blue } fn f(c: Color) -> Int { match (c) { Color::Red => { return 1; }, Color::Green => { return 2; }, Color::Blue => { return 3; }, }; }");
+    _ = try checkSource(allocator, "enum Color { Red, Green, Blue } fn f(c: Color) -> Int { match (c) { Color.Red => { return 1; }, Color.Green => { return 2; }, Color.Blue => { return 3; }, }; }");
     // valid: match with one case panicking
-    _ = try checkSource(allocator, "enum Color { Red, Green } fn f(c: Color) -> Int { match (c) { Color::Red => { return 1; }, Color::Green => { panic \"no\"; }, }; }");
+    _ = try checkSource(allocator, "enum Color { Red, Green } fn f(c: Color) -> Int { match (c) { Color.Red => { return 1; }, Color.Green => { panic \"no\"; }, }; }");
     // valid: primitive match with default
     _ = try checkSource(allocator, "fn f(x: Int) -> Int { match (x) { 1 => { return 10; }, default => { return 20; }, }; return 0; }");
 
     // invalid: match case uses give not return — function missing return
-    try std.testing.expectError(TypeCheckerError.MissingReturn, checkSource(allocator, "enum Color { Red, Green } fn f(c: Color) -> Int { match (c) { Color::Red => { give 1; }, Color::Green => { give 2; }, }; }"));
+    try std.testing.expectError(TypeCheckerError.MissingReturn, checkSource(allocator, "enum Color { Red, Green } fn f(c: Color) -> Int { match (c) { Color.Red => { give 1; }, Color.Green => { give 2; }, }; }"));
 }
 
 test "Type Checker - block termination" {
@@ -386,7 +386,7 @@ test "Type Checker - pub const is exported" {
 
     const export_entry = mod.exports.get("x");
     try std.testing.expect(export_entry != null);
-    try std.testing.expectEqual(@intFromEnum(PrimitiveType.Int), export_entry.?);
+    try std.testing.expectEqual(@backingInt(PrimitiveType.Int), export_entry.?);
 }
 
 test "Type Checker - pub fn is exported and importable" {
@@ -518,7 +518,7 @@ test "Type Checker - pub const import via use_decl hoist looks up from exports m
 
     // Verify the pub var was exported
     try std.testing.expect(lib_mod.exports.contains("x"));
-    try std.testing.expectEqual(@intFromEnum(PrimitiveType.Int), lib_mod.exports.get("x").?);
+    try std.testing.expectEqual(@backingInt(PrimitiveType.Int), lib_mod.exports.get("x").?);
 
     // Now simulate what use_decl hoist does: look up from lib's exports
     // and define in the importing module's environment
@@ -536,7 +536,7 @@ test "Type Checker - pub const import via use_decl hoist looks up from exports m
     }
 
     // Verify the imported symbol is usable (its type ID is correct)
-    try std.testing.expectEqual(@intFromEnum(PrimitiveType.Int), try import_env.lookup("x"));
+    try std.testing.expectEqual(@backingInt(PrimitiveType.Int), try import_env.lookup("x"));
 }
 
 test "Functions cannot read global mutable state" {
@@ -593,10 +593,10 @@ test "Type Checker - coroutine declaration creates coroutine type" {
     const co_type = result.registry.get_type_info(try result.env.lookup("add"));
     try std.testing.expect(co_type == .coroutine);
     try std.testing.expectEqual(@as(usize, 2), co_type.coroutine.args.len);
-    try std.testing.expectEqual(@intFromEnum(PrimitiveType.Int), co_type.coroutine.args[0]);
-    try std.testing.expectEqual(@intFromEnum(PrimitiveType.Int), co_type.coroutine.args[1]);
-    try std.testing.expectEqual(@intFromEnum(PrimitiveType.Int), co_type.coroutine.yield);
-    try std.testing.expectEqual(@intFromEnum(PrimitiveType.Int), co_type.coroutine.ret);
+    try std.testing.expectEqual(@backingInt(PrimitiveType.Int), co_type.coroutine.args[0]);
+    try std.testing.expectEqual(@backingInt(PrimitiveType.Int), co_type.coroutine.args[1]);
+    try std.testing.expectEqual(@backingInt(PrimitiveType.Int), co_type.coroutine.yield);
+    try std.testing.expectEqual(@backingInt(PrimitiveType.Int), co_type.coroutine.ret);
 }
 
 test "Type Checker - coroutine yield and return combinations" {
@@ -699,8 +699,8 @@ test "Type Checker - resume result is union of yield and return" {
     const v_type = try result.env.lookup("v");
     const info = result.registry.get_type_info(v_type);
     try std.testing.expect(info == ._union);
-    try std.testing.expectEqual(@intFromEnum(PrimitiveType.Int), info._union.left);
-    try std.testing.expectEqual(@intFromEnum(PrimitiveType.String), info._union.right);
+    try std.testing.expectEqual(@backingInt(PrimitiveType.Int), info._union.left);
+    try std.testing.expectEqual(@backingInt(PrimitiveType.String), info._union.right);
 }
 
 test "Type Checker - coroutine member access" {
@@ -717,9 +717,9 @@ test "Type Checker - coroutine member access" {
     );
     defer result.env.deinit();
     defer result.registry.deinit();
-    try std.testing.expectEqual(@intFromEnum(PrimitiveType.Bool), try result.env.lookup("a"));
-    try std.testing.expectEqual(@intFromEnum(PrimitiveType.Bool), try result.env.lookup("b"));
-    try std.testing.expectEqual(@intFromEnum(PrimitiveType.Bool), try result.env.lookup("d"));
+    try std.testing.expectEqual(@backingInt(PrimitiveType.Bool), try result.env.lookup("a"));
+    try std.testing.expectEqual(@backingInt(PrimitiveType.Bool), try result.env.lookup("b"));
+    try std.testing.expectEqual(@backingInt(PrimitiveType.Bool), try result.env.lookup("d"));
 
     // unknown member
     try std.testing.expectError(TypeCheckerError.InvalidMemberAccess, checkSource(allocator, "co f() -> (Int, Nil, Nil) { yield 1; } var c = f(); var x = c.nope;"));
@@ -757,9 +757,9 @@ test "Type Checker - coroutine type carries yield, resume_with, return" {
 
     const co_type = result.registry.get_type_info(try result.env.lookup("add"));
     try std.testing.expect(co_type == .coroutine);
-    try std.testing.expectEqual(@intFromEnum(PrimitiveType.Int), co_type.coroutine.yield);
-    try std.testing.expectEqual(@intFromEnum(PrimitiveType.String), co_type.coroutine.resume_with);
-    try std.testing.expectEqual(@intFromEnum(PrimitiveType.Int), co_type.coroutine.ret);
+    try std.testing.expectEqual(@backingInt(PrimitiveType.Int), co_type.coroutine.yield);
+    try std.testing.expectEqual(@backingInt(PrimitiveType.String), co_type.coroutine.resume_with);
+    try std.testing.expectEqual(@backingInt(PrimitiveType.Int), co_type.coroutine.ret);
 }
 
 test "Type Checker - yield expression has the resume_with type" {

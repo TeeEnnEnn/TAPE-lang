@@ -9,7 +9,7 @@ use FLAG_BLOCKED, set_task_flag, clear_task_flag from "../utils/task_flags.tape"
 pub fn close_task(s: TaskStore, id: Int) -> Int | TaskError {
     var cur = try store_status_at(s, id);
     if (cur == DONE_CODE) {
-        return TaskError::AlreadyDone;
+        return TaskError.AlreadyDone;
     }
     return try store_set_status(s, id, DONE_CODE);
 }
@@ -17,7 +17,7 @@ pub fn close_task(s: TaskStore, id: Int) -> Int | TaskError {
 pub fn reopen_task(s: TaskStore, id: Int) -> Int | TaskError {
     var cur = try store_status_at(s, id);
     if (cur != DONE_CODE) {
-        return TaskError::InvalidInput;
+        return TaskError.InvalidInput;
     }
     return try store_set_status(s, id, DOING_CODE);
 }
@@ -36,5 +36,5 @@ pub fn close_task_name(id: Int) -> String | TaskError {
     if (id == 2) {
         return "Fix parser";
     }
-    return TaskError::NotFound;
+    return TaskError.NotFound;
 }

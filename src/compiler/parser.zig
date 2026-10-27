@@ -453,20 +453,10 @@ pub const Parser = struct {
                 }
                 const member = self.previous;
 
-                const inst_expr = try self.allocator.create(AST.DotExpr);
-                inst_expr.* = .{ .expr = expr, .member = member, .line = member.line, .column = member.column };
+                const dot_expr = try self.allocator.create(AST.DotExpr);
+                dot_expr.* = .{ .expr = expr, .member = member, .line = member.line, .column = member.column };
                 const node = try self.allocator.create(AST.ASTNode);
-                node.* = .{ .dot_expr = inst_expr };
-                expr = node;
-            } else if (try self.match(.COLON_COLON)) {
-                // Static Member
-                try self.consume(.IDENTIFIER, "Expected identifier after '::'");
-                const member = self.previous;
-
-                const static_expr = try self.allocator.create(AST.StaticMemberExpr);
-                static_expr.* = .{ .expr = expr, .member = member, .line = member.line, .column = member.column };
-                const node = try self.allocator.create(AST.ASTNode);
-                node.* = .{ .static_member_expr = static_expr };
+                node.* = .{ .dot_expr = dot_expr };
                 expr = node;
             } else {
                 break;
@@ -737,7 +727,7 @@ pub const Parser = struct {
         return named_field;
     }
 
-    fn parse_struct_field(self: *Parser, is_public: bool, is_static: bool) ParserError!*AST.TypedNamedStructField {
+    fn parse_struct_field(self: *Parser, is_public: bool) ParserError!*AST.TypedNamedStructField {
         try self.consume(.IDENTIFIER, "Expected identifier for struct field.");
         const token = self.previous;
         try self.consume(.COLON, "Expected ':' to separate identifier from type annotation.");
@@ -749,7 +739,7 @@ pub const Parser = struct {
             has_default = true;
         }
         const field = try self.allocator.create(AST.TypedNamedStructField);
-        field.* = .{ .name = token, .type_annotation = type_, .default_value = default_value, .has_default = has_default, .is_pub = is_public, .is_static = is_static };
+        field.* = .{ .name = token, .type_annotation = type_, .default_value = default_value, .has_default = has_default, .is_pub = is_public };
         return field;
     }
 
@@ -1014,7 +1004,7 @@ pub const Parser = struct {
         return node;
     }
 
-    fn parse_function_declaration(self: *Parser, is_pub: bool, is_static: bool) ParserError!*AST.ASTNode {
+    fn parse_function_declaration(self: *Parser, is_pub: bool) ParserError!*AST.ASTNode {
         try self.consume(.IDENTIFIER, "Expected identifier for function declaration.");
         const name = self.previous;
 
@@ -1038,7 +1028,6 @@ pub const Parser = struct {
         const fn_decl = try self.allocator.create(AST.FnDecl);
         fn_decl.* = .{
             .modifier_pub = is_pub,
-            .modifier_static = is_static,
             .name = name,
             .params = try params.toOwnedSlice(self.allocator),
             .return_type_annotation = return_type,
@@ -1053,7 +1042,7 @@ pub const Parser = struct {
         return node;
     }
 
-    fn parse_coroutine_declaration(self: *Parser, is_pub: bool, is_static: bool) ParserError!*AST.ASTNode {
+    fn parse_coroutine_declaration(self: *Parser, is_pub: bool) ParserError!*AST.ASTNode {
         try self.consume(.IDENTIFIER, "Expected identifier for coroutine declaration.");
         const name = self.previous;
 
@@ -1085,7 +1074,6 @@ pub const Parser = struct {
             .modifier_pub = is_pub,
             .name = name,
             .params = params.items,
-            .modifier_static = is_static,
             .yield_type_annotation = yield_type,
             .resume_with_type_annotation = resume_with_type,
             .return_type_annotation = return_type,
@@ -1351,40 +1339,30 @@ pub const Parser = struct {
         var methods: std.ArrayList(*AST.StructMethodField) = .empty;
 
         while (!self.check(.RIGHT_BRACE) and !self.check(.EOF)) {
-            var is_static = false;
             var is_public = false;
 
             if (try self.match(.PUB)) {
                 is_public = true;
             }
 
-            if (try self.match(.STATIC)) {
-                is_static = true;
-            }
-
-            if (is_public and is_static) {
-                try self.fail("Attempting redundant keyword usage", "'pub static' / 'static pub' is not allowed. Use 'static' or 'pub' alone instead.");
-                return ParserError.UnexpectedToken;
-            }
-
             if (try self.match(.CO)) {
-                const method = try self.parse_coroutine_declaration(is_public, is_static);
+                const method = try self.parse_coroutine_declaration(is_public);
                 const struct_method = try self.allocator.create(AST.StructMethodField);
-                struct_method.* = .{ .is_static = is_static, .method = method, .is_pub = is_public, .name = method.co_decl.name };
+                struct_method.* = .{ .method = method, .is_pub = is_public, .name = method.co_decl.name };
                 try methods.append(self.allocator, struct_method);
                 _ = try self.match(.COMMA);
                 continue;
             }
             if (try self.match(.FN)) {
-                const method = try self.parse_function_declaration(is_public, is_static);
+                const method = try self.parse_function_declaration(is_public);
                 const struct_method = try self.allocator.create(AST.StructMethodField);
-                struct_method.* = .{ .is_static = is_static, .method = method, .is_pub = is_public, .name = method.fn_decl.name };
+                struct_method.* = .{ .method = method, .is_pub = is_public, .name = method.fn_decl.name };
                 try methods.append(self.allocator, struct_method);
                 _ = try self.match(.COMMA);
                 continue;
             }
 
-            const field = try self.parse_struct_field(is_public, is_static);
+            const field = try self.parse_struct_field(is_public);
             try fields.append(self.allocator, field);
             if (self.check(.RIGHT_BRACE)) {
                 break;
@@ -1496,7 +1474,6 @@ pub const Parser = struct {
                     if (depth > 0) depth -= 1;
                 },
                 .COLON => if (depth == 0) return true,
-                .COLON_COLON => {},
                 .SEMICOLON, .COMMA => if (depth == 0) return false,
                 else => {},
             }
@@ -1541,9 +1518,9 @@ pub const Parser = struct {
         } else if (try self.match(.CONST)) {
             return try self.parse_var_declaration(is_pub, true);
         } else if (try self.match(.FN)) {
-            return try self.parse_function_declaration(is_pub, false);
+            return try self.parse_function_declaration(is_pub);
         } else if (try self.match(.CO)) {
-            return try self.parse_coroutine_declaration(is_pub, false);
+            return try self.parse_coroutine_declaration(is_pub);
         } else if (try self.match(.STRUCT)) {
             return try self.parse_struct_declaration(is_pub);
         } else if (try self.match(.TYPE)) {

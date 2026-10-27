@@ -5,11 +5,11 @@ enum Color {
 }
 
 // 1. Value-producing match on Enums with `give`
-var c = Color::Green;
+var c = Color.Green;
 var code = match (c) {
-    Color::Red => give 1;,
-    Color::Green => give 2;,
-    Color::Blue => give 3;,
+    Color.Red => give 1;,
+    Color.Green => give 2;,
+    Color.Blue => give 3;,
     default => give 0;
 };
 
@@ -53,9 +53,9 @@ if (test_return(5) != 0) { panic "default return in match failed"; }
 
 // 5. Exhaustive enum without default (should be exhaustive)
 var code_exhaustive = match (c) {
-    Color::Red => give 10;,
-    Color::Green => give 20;,
-    Color::Blue => give 30;
+    Color.Red => give 10;,
+    Color.Green => give 20;,
+    Color.Blue => give 30;
 };
 if (code_exhaustive != 20) { panic "exhaustive enum no default failed"; }
 
@@ -65,17 +65,17 @@ error MyErr {
     BadInput,
     NotFound
 }
-var e = MyErr::Oops;
+var e = MyErr.Oops;
 var err_code = match (e) {
-    MyErr::Oops => give 1;,
-    MyErr::BadInput => give 2;,
-    MyErr::NotFound => give 3;
+    MyErr.Oops => give 1;,
+    MyErr.BadInput => give 2;,
+    MyErr.NotFound => give 3;
 };
 if (err_code != 1) { panic "exhaustive error no default failed"; }
 
 // 7. Error with default and union handling
 var err_with_default = match (e) {
-    MyErr::Oops => give 100;,
+    MyErr.Oops => give 100;,
     default => give 0;
 };
 if (err_with_default != 100) { panic "error with default failed"; }
@@ -123,7 +123,7 @@ if (def_middle != 888) { panic "default middle failed"; }
 var union_val: Int | MyErr = 1;
 var union_match = match (union_val) {
     1 => give 10;,
-    MyErr::Oops => give 20;,
+    MyErr.Oops => give 20;,
     default => give 0;
 };
 if (union_match != 10) { panic "union match failed"; }
@@ -148,13 +148,13 @@ if (deep_give != 200) { panic "deep give failed"; }
 
 // 12. Nested match with give isolation (inner String, outer Int) - tests OP_GIVE_POP
 var nested = match (c) {
-    Color::Red => give 1;,
+    Color.Red => give 1;,
     default => {
-        var inner_e = MyErr::BadInput;
+        var inner_e = MyErr.BadInput;
         var inner = match (inner_e) {
-            MyErr::Oops => give "oops";,
-            MyErr::BadInput => give "bad";,
-            MyErr::NotFound => give "notfound";
+            MyErr.Oops => give "oops";,
+            MyErr.BadInput => give "bad";,
+            MyErr.NotFound => give "notfound";
         };
         if (inner != "bad") { panic "nested inner failed"; }
         give 42;
@@ -207,22 +207,22 @@ fn never_match(x: Never) -> Int {
     return 42;
 }
 var empty_enum_check = match (c) {
-    Color::Red => give 1;,
-    Color::Green => give 2;,
-    Color::Blue => give 3;
+    Color.Red => give 1;,
+    Color.Green => give 2;,
+    Color.Blue => give 3;
 };
 if (empty_enum_check != 2) { panic "empty check failed"; }
 
 // 16. Match with panic arms satisfies completeness
 fn with_panic(c: Color) -> Int {
     match (c) {
-        Color::Red => panic "red panic";,
-        Color::Green => return 2;,
-        Color::Blue => return 3;,
+        Color.Red => panic "red panic";,
+        Color.Green => return 2;,
+        Color.Blue => return 3;,
         default => return 0;
     };
 }
-if (with_panic(Color::Green) != 2) { panic "panic arm failed"; }
+if (with_panic(Color.Green) != 2) { panic "panic arm failed"; }
 
 // 17. Match inside coroutine with yield
 co match_in_co(x: Int) -> (Int, Nil, Int) {

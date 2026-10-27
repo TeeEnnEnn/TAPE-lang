@@ -161,10 +161,6 @@ pub const TypeChecker = struct {
             .struct_decl => |decl| {
                 if (decl.modifier_pub) {
                     for (decl.fields) |field| {
-                        if (field.is_static) {
-                            try self.fail("Exported structs cannot have static fields.", "Static fields are module-level state and are only initialized when the module's top-level code runs.", field.name.line, field.name.column);
-                            return TypeCheckerError.NonConstantExport;
-                        }
                         if (field.default_value) |def| {
                             if (ConstValue.from_literal(def) == null) {
                                 try self.fail("Exported struct defaults must be literals.", "The default is inlined into the importing module.", field.name.line, field.name.column);
@@ -179,7 +175,7 @@ pub const TypeChecker = struct {
                 for (decl.fields) |field| {
                     const field_type = try self.registry.resolve(field.type_annotation);
                     // store the default value if there is one
-                    try field_types.append(self.allocator, .{ .name = field.name.lexeme, .type = field_type, .is_static = field.is_static, .is_pub = field.is_pub, .default_value = field.default_value });
+                    try field_types.append(self.allocator, .{ .name = field.name.lexeme, .type = field_type, .is_pub = field.is_pub, .default_value = field.default_value });
                 }
 
                 // Create struct with empty methods first to get its type_id for self
@@ -189,10 +185,10 @@ pub const TypeChecker = struct {
                 defer method_types.deinit(self.allocator);
 
                 for (decl.methods) |method| {
-                    const self_type: ?AST.TypeId = if (method.is_static) null else struct_id;
+                    const self_type: ?AST.TypeId = struct_id;
                     const method_type = try self.check_declaration_type(method.method, self_type);
                     // store the node with the method definition
-                    try method_types.append(self.allocator, .{ .name = method.name.lexeme, .type = method_type, .is_static = method.is_static, .is_pub = method.is_pub, .method_node = method.method });
+                    try method_types.append(self.allocator, .{ .name = method.name.lexeme, .type = method_type, .is_pub = method.is_pub, .method_node = method.method });
                 }
 
                 // Update the struct with actual methods
@@ -328,7 +324,7 @@ pub const TypeChecker = struct {
                 defer self.in_function = prev_in_func;
                 const body_term = try self.check(decl.body);
 
-                const needs_return = type_info.function.ret != @intFromEnum(PrimitiveType.Nil) and type_info.function.ret != @intFromEnum(PrimitiveType.Never);
+                const needs_return = type_info.function.ret != @backingInt(PrimitiveType.Nil) and type_info.function.ret != @backingInt(PrimitiveType.Never);
 
                 if (needs_return and !body_term.return_ and !body_term.panics) {
                     try self.fail("Missing return", "Function is missing a `return` statement.", decl.name.line, decl.name.column);
@@ -430,8 +426,8 @@ pub const TypeChecker = struct {
                 self.in_coroutine = true;
                 defer self.in_coroutine = prev_in_coroutine;
                 const body_term = try self.check(decl.body);
-                const needs_return = type_info.coroutine.ret != @intFromEnum(PrimitiveType.Nil) and type_info.coroutine.ret != @intFromEnum(PrimitiveType.Never);
-                const needs_yield = type_info.coroutine.yield != @intFromEnum(PrimitiveType.Nil);
+                const needs_return = type_info.coroutine.ret != @backingInt(PrimitiveType.Nil) and type_info.coroutine.ret != @backingInt(PrimitiveType.Never);
+                const needs_yield = type_info.coroutine.yield != @backingInt(PrimitiveType.Nil);
                 if (needs_return and !body_term.return_ and !body_term.panics) {
                     try self.fail("Missing return", "Coroutine is missing a return statement.", decl.name.line, decl.name.column);
                     return TypeCheckerError.MissingReturn;
@@ -493,7 +489,7 @@ pub const TypeChecker = struct {
                 return last;
             },
             .return_stmt => |stmt| {
-                var provided_type = @intFromEnum(PrimitiveType.Nil);
+                var provided_type = @backingInt(PrimitiveType.Nil);
                 if (stmt.expr) |v| {
                     provided_type = try self.check_expression(v);
                 }
@@ -525,7 +521,7 @@ pub const TypeChecker = struct {
             },
             .while_stmt => |stmt| {
                 const condition_type = try self.check_expression(stmt.condition);
-                if (condition_type != @intFromEnum(PrimitiveType.Bool)) {
+                if (condition_type != @backingInt(PrimitiveType.Bool)) {
                     try self.fail("Type Mismatch", "While condition must be a boolean.", stmt.line, stmt.column);
                     return TypeCheckerError.TypeMismatch;
                 }
@@ -555,7 +551,7 @@ pub const TypeChecker = struct {
                 self.environment = &local_env;
                 defer self.environment = prev_env;
 
-                try self.environment.define_binding(stmt.iterator_name.lexeme, @intFromEnum(PrimitiveType.Int), .{ .node = node }, true);
+                try self.environment.define_binding(stmt.iterator_name.lexeme, @backingInt(PrimitiveType.Int), .{ .node = node }, true);
                 const prev_loop = self.in_loop;
                 self.in_loop = true;
                 const body_term = try self.check(stmt.body);
@@ -565,7 +561,7 @@ pub const TypeChecker = struct {
             },
             .if_stmt => |stmt| {
                 const condition_type = try self.check_expression(stmt.condition);
-                if (condition_type != @intFromEnum(PrimitiveType.Bool)) {
+                if (condition_type != @backingInt(PrimitiveType.Bool)) {
                     try self.fail("Non-boolean condition", "If condition must be a boolean.", stmt.line, stmt.column);
                     return TypeCheckerError.NonBooleanCondition;
                 }
@@ -688,7 +684,7 @@ pub const TypeChecker = struct {
 
                 // Only mutable l-values can be assigned. Arrays and tables are
                 // mutable through an index; strings and tuples are not.
-                if (expr.left.* == .identifier_expr or expr.left.* == .dot_expr or expr.left.* == .static_member_expr or expr.left.* == .index_expr) {
+                if (expr.left.* == .identifier_expr or expr.left.* == .dot_expr or expr.left.* == .index_expr) {
                     const left_type = try self.check_expression(expr.left);
                     if (expr.left.* == .index_expr) {
                         const collection_type = try self.check_expression(expr.left.index_expr.expr);
@@ -707,7 +703,7 @@ pub const TypeChecker = struct {
 
                     const op = expr.operator.lexeme;
                     if (!std.mem.eql(u8, op, "=")) {
-                        const is_numeric = left_type == @intFromEnum(PrimitiveType.Int) or left_type == @intFromEnum(PrimitiveType.Float);
+                        const is_numeric = left_type == @backingInt(PrimitiveType.Int) or left_type == @backingInt(PrimitiveType.Float);
 
                         if (std.mem.eql(u8, op, "-=") or std.mem.eql(u8, op, "*=") or std.mem.eql(u8, op, "/=") or std.mem.eql(u8, op, "+=") or std.mem.eql(u8, op, "%=") or std.mem.eql(u8, op, "**=")) {
                             if (!is_numeric) {
@@ -717,7 +713,7 @@ pub const TypeChecker = struct {
                         }
 
                         if (std.mem.eql(u8, op, "++=")) {
-                            if (!(left_type == @intFromEnum(PrimitiveType.String) and right_type == @intFromEnum(PrimitiveType.String))) {
+                            if (!(left_type == @backingInt(PrimitiveType.String) and right_type == @backingInt(PrimitiveType.String))) {
                                 // ++= can only be used for strings
                                 try self.fail("Invalid Operation", "`++=` can only be used to concatenate strings.", expr.line, expr.column);
                                 return TypeCheckerError.InvalidOperation;
@@ -748,21 +744,21 @@ pub const TypeChecker = struct {
                 const token = expr.operator;
                 const expr_type = try self.check_expression(expr.expr);
                 if (std.mem.eql(u8, token.lexeme, "-")) {
-                    if (expr_type == @intFromEnum(PrimitiveType.Float) or expr_type == @intFromEnum(PrimitiveType.Int)) {
+                    if (expr_type == @backingInt(PrimitiveType.Float) or expr_type == @backingInt(PrimitiveType.Int)) {
                         expr.resolved_type = expr_type;
                         return expr_type;
                     }
                     try self.fail("Invalid Operation", "Unary `-` requires a numeric operand.", expr.line, expr.column);
                     return TypeCheckerError.InvalidOperation;
                 } else if (std.mem.eql(u8, token.lexeme, "~")) {
-                    if (expr_type == @intFromEnum(PrimitiveType.Int)) {
+                    if (expr_type == @backingInt(PrimitiveType.Int)) {
                         expr.resolved_type = expr_type;
                         return expr_type;
                     }
                     try self.fail("Invalid Operation", "Unary `~` requires an integer operand.", expr.line, expr.column);
                     return TypeCheckerError.InvalidOperation;
                 } else if (std.mem.eql(u8, token.lexeme, "not")) {
-                    if (expr_type == @intFromEnum(PrimitiveType.Bool)) {
+                    if (expr_type == @backingInt(PrimitiveType.Bool)) {
                         expr.resolved_type = expr_type;
                         return expr_type;
                     }
@@ -783,7 +779,7 @@ pub const TypeChecker = struct {
                 // The value passed in (`resume co with V`) becomes the yield
                 // expression's value, so it must match the resume_with type.
                 // Omitting `with V` passes nil.
-                var resume_value_type = @intFromEnum(PrimitiveType.Nil);
+                var resume_value_type = @backingInt(PrimitiveType.Nil);
                 if (expr.arg) |arg| {
                     resume_value_type = try self.check_expression(arg);
                 }
@@ -826,15 +822,15 @@ pub const TypeChecker = struct {
                 const op = expr.operator.lexeme;
 
                 if (std.mem.eql(u8, op, "+") or std.mem.eql(u8, op, "-") or std.mem.eql(u8, op, "*") or std.mem.eql(u8, op, "**") or std.mem.eql(u8, op, "/") or std.mem.eql(u8, op, "%")) {
-                    const is_int = left_type == @intFromEnum(PrimitiveType.Int) and right_type == @intFromEnum(PrimitiveType.Int);
-                    const is_float = (left_type == @intFromEnum(PrimitiveType.Float) or left_type == @intFromEnum(PrimitiveType.Int)) and
-                        (right_type == @intFromEnum(PrimitiveType.Float) or right_type == @intFromEnum(PrimitiveType.Int));
+                    const is_int = left_type == @backingInt(PrimitiveType.Int) and right_type == @backingInt(PrimitiveType.Int);
+                    const is_float = (left_type == @backingInt(PrimitiveType.Float) or left_type == @backingInt(PrimitiveType.Int)) and
+                        (right_type == @backingInt(PrimitiveType.Float) or right_type == @backingInt(PrimitiveType.Int));
 
                     if (is_int) {
-                        expr.resolved_type = @intFromEnum(PrimitiveType.Int);
+                        expr.resolved_type = @backingInt(PrimitiveType.Int);
                         return expr.resolved_type;
                     } else if (is_float) {
-                        expr.resolved_type = @intFromEnum(PrimitiveType.Float);
+                        expr.resolved_type = @backingInt(PrimitiveType.Float);
                         return expr.resolved_type;
                     }
                     try self.fail("Invalid Operation", "Arithmetic operators require numeric operands.", expr.line, expr.column);
@@ -844,24 +840,24 @@ pub const TypeChecker = struct {
                         try self.fail("Type Mismatch", "Comparison operators require operands of the same type.", expr.line, expr.column);
                         return TypeCheckerError.TypeMismatch;
                     }
-                    expr.resolved_type = @intFromEnum(PrimitiveType.Bool);
+                    expr.resolved_type = @backingInt(PrimitiveType.Bool);
                     return expr.resolved_type;
                 } else if (std.mem.eql(u8, op, "and") or std.mem.eql(u8, op, "or")) {
-                    if (left_type != @intFromEnum(PrimitiveType.Bool) or right_type != @intFromEnum(PrimitiveType.Bool)) {
+                    if (left_type != @backingInt(PrimitiveType.Bool) or right_type != @backingInt(PrimitiveType.Bool)) {
                         try self.fail("Type Mismatch", "`and` and `or` require boolean operands.", expr.line, expr.column);
                         return TypeCheckerError.TypeMismatch;
                     }
-                    expr.resolved_type = @intFromEnum(PrimitiveType.Bool);
+                    expr.resolved_type = @backingInt(PrimitiveType.Bool);
                     return expr.resolved_type;
                 } else if (std.mem.eql(u8, op, "++")) { // string concatenation
-                    if (left_type != @intFromEnum(PrimitiveType.String) or right_type != @intFromEnum(PrimitiveType.String)) {
+                    if (left_type != @backingInt(PrimitiveType.String) or right_type != @backingInt(PrimitiveType.String)) {
                         try self.fail("Type Mismatch", "`++` can only concatenate strings.", expr.line, expr.column);
                         return TypeCheckerError.TypeMismatch;
                     }
-                    expr.resolved_type = @intFromEnum(PrimitiveType.String);
+                    expr.resolved_type = @backingInt(PrimitiveType.String);
                     return expr.resolved_type;
                 } else if (std.mem.eql(u8, op, "..")) { // range expression
-                    if (left_type != @intFromEnum(PrimitiveType.Int) or right_type != @intFromEnum(PrimitiveType.Int)) {
+                    if (left_type != @backingInt(PrimitiveType.Int) or right_type != @backingInt(PrimitiveType.Int)) {
                         try self.fail("Type Mismatch", "Range operator `..` requires integer operands.", expr.line, expr.column);
                         return TypeCheckerError.TypeMismatch;
                     }
@@ -870,11 +866,11 @@ pub const TypeChecker = struct {
                     expr.resolved_type = range_type;
                     return expr.resolved_type;
                 } else if (std.mem.eql(u8, op, ">>") or std.mem.eql(u8, op, "<<") or std.mem.eql(u8, op, "|") or std.mem.eql(u8, op, "&") or std.mem.eql(u8, op, "^")) {
-                    if (left_type != @intFromEnum(PrimitiveType.Int) or right_type != @intFromEnum(PrimitiveType.Int)) {
+                    if (left_type != @backingInt(PrimitiveType.Int) or right_type != @backingInt(PrimitiveType.Int)) {
                         try self.fail("Type Mismatch", "Bitwise operators require integer operands.", expr.line, expr.column);
                         return TypeCheckerError.TypeMismatch;
                     }
-                    expr.resolved_type = @intFromEnum(PrimitiveType.Int);
+                    expr.resolved_type = @backingInt(PrimitiveType.Int);
                     return expr.resolved_type;
                 } else if (std.mem.eql(u8, op, "orelse")) {
                     // a orelse b
@@ -888,11 +884,11 @@ pub const TypeChecker = struct {
                         return TypeCheckerError.InvalidOperation;
                     }
 
-                    if (!((left_info._union.left == @intFromEnum(PrimitiveType.Nil) and left_info._union.right != @intFromEnum(PrimitiveType.Nil)) or (left_info._union.left != @intFromEnum(PrimitiveType.Nil) and left_info._union.right == @intFromEnum(PrimitiveType.Nil)))) {
+                    if (!((left_info._union.left == @backingInt(PrimitiveType.Nil) and left_info._union.right != @backingInt(PrimitiveType.Nil)) or (left_info._union.left != @backingInt(PrimitiveType.Nil) and left_info._union.right == @backingInt(PrimitiveType.Nil)))) {
                         try self.fail("Invalid Operation", "`orelse` requires exactly one side of the union to be Nil.", expr.line, expr.column);
                         return TypeCheckerError.InvalidOperation;
                     }
-                    const non_nil_side = if (left_info._union.left == @intFromEnum(PrimitiveType.Nil)) left_info._union.right else left_info._union.left;
+                    const non_nil_side = if (left_info._union.left == @backingInt(PrimitiveType.Nil)) left_info._union.right else left_info._union.left;
                     const result_union = try self.registry.add_union_type(non_nil_side, right_type);
                     expr.resolved_type = result_union;
                     return expr.resolved_type;
@@ -933,7 +929,7 @@ pub const TypeChecker = struct {
 
                     if (receiver_info == ._struct) {
                         for (receiver_info._struct.methods) |method| {
-                            if (!method.is_static and std.mem.eql(u8, method.name, dot.member.lexeme)) {
+                            if (std.mem.eql(u8, method.name, dot.member.lexeme)) {
                                 const method_info = self.registry.get_type_info(method.type);
                                 const args = switch (method_info) {
                                     .function => |f| f.args,
@@ -1016,7 +1012,7 @@ pub const TypeChecker = struct {
 
                 switch (expr_info) {
                     .array => |arr_info| {
-                        if (index_type != @intFromEnum(PrimitiveType.Int)) {
+                        if (index_type != @backingInt(PrimitiveType.Int)) {
                             try self.fail("Type Mismatch", "Array index must be an integer.", expr.line, expr.column);
                             return TypeCheckerError.TypeMismatch;
                         }
@@ -1034,12 +1030,12 @@ pub const TypeChecker = struct {
                     .primitive => |prim| {
                         switch (prim) {
                             .String => {
-                                if (index_type != @intFromEnum(PrimitiveType.Int)) {
+                                if (index_type != @backingInt(PrimitiveType.Int)) {
                                     try self.fail("Type Mismatch", "String index must be an integer.", expr.line, expr.column);
                                     return TypeCheckerError.TypeMismatch;
                                 }
-                                expr.resolved_type = @intFromEnum(PrimitiveType.String);
-                                return @intFromEnum(PrimitiveType.String);
+                                expr.resolved_type = @backingInt(PrimitiveType.String);
+                                return @backingInt(PrimitiveType.String);
                             },
                             else => {
                                 try self.fail("Type Mismatch", "This primitive type cannot be indexed.", expr.line, expr.column);
@@ -1092,13 +1088,13 @@ pub const TypeChecker = struct {
                     },
                     ._struct => |_struct| {
                         for (_struct.fields) |field| {
-                            if (std.mem.eql(u8, field.name, expr.member.lexeme) and !field.is_static) {
+                            if (std.mem.eql(u8, field.name, expr.member.lexeme)) {
                                 expr.resolved_type = field.type;
                                 return field.type;
                             }
                         }
                         for (_struct.methods) |method| {
-                            if (std.mem.eql(u8, method.name, expr.member.lexeme) and !method.is_static) {
+                            if (std.mem.eql(u8, method.name, expr.member.lexeme)) {
                                 const method_type = self.registry.get_type_info(method.type);
                                 if (method_type != .function and method_type != .coroutine) {
                                     try self.fail("Invalid Member Access", "Member is not a callable method.", expr.line, expr.column);
@@ -1108,53 +1104,18 @@ pub const TypeChecker = struct {
                                 return method.type;
                             }
                         }
-                        try self.fail("Invalid Member Access", "Struct has no non-static member with this name.", expr.line, expr.column);
+                        try self.fail("Invalid Member Access", "Struct has no member with this name.", expr.line, expr.column);
                         return TypeCheckerError.InvalidMemberAccess;
                     },
                     .coroutine => {
                         // corotines have suspended, finished, and running members - which are boolean values
                         if (std.mem.eql(u8, expr.member.lexeme, "suspended") or std.mem.eql(u8, expr.member.lexeme, "finished") or std.mem.eql(u8, expr.member.lexeme, "running") or std.mem.eql(u8, expr.member.lexeme, "started")) {
-                            expr.resolved_type = @intFromEnum(PrimitiveType.Bool);
-                            return @intFromEnum(PrimitiveType.Bool);
+                            expr.resolved_type = @backingInt(PrimitiveType.Bool);
+                            return @backingInt(PrimitiveType.Bool);
                         } else {
                             try self.fail("Invalid Member Access", "Coroutines only expose `started`, `suspended`, `finished`, and `running` members.", expr.line, expr.column);
                             return TypeCheckerError.InvalidMemberAccess;
                         }
-                    },
-                    else => {
-                        try self.fail("Invalid Member Access", "Type does not support member access.", expr.line, expr.column);
-                        return TypeCheckerError.InvalidMemberAccess;
-                    },
-                }
-                return TypeCheckerError.InvalidMemberAccess;
-            },
-            .static_member_expr => |expr| {
-                const obj_type = try self.check_expression(expr.expr);
-                const type_info = self.registry.get_type_info(obj_type);
-
-                switch (type_info) {
-                    ._struct => |_struct| {
-                        for (_struct.methods) |method| {
-                            if (std.mem.eql(u8, method.name, expr.member.lexeme) and method.is_static) {
-                                expr.resolved_type = method.type;
-                                return method.type;
-                            }
-                        }
-                        for (_struct.fields) |field| {
-                            if (std.mem.eql(u8, field.name, expr.member.lexeme) and field.is_static) {
-                                // Static fields only initialize when their own module's
-                                // top-level code runs, so a function in another module
-                                // must not read them. Same-module reads keep working.
-                                if ((self.in_function or self.in_coroutine) and !std.mem.eql(u8, _struct.source_file, self.module.filepath)) {
-                                    try self.fail("Functions cannot access global state", "Static fields are module-level state.", expr.line, expr.column);
-                                    return TypeCheckerError.MutableGlobalStateCaptureAttempt;
-                                }
-                                expr.resolved_type = field.type;
-                                return field.type;
-                            }
-                        }
-                        try self.fail("Struct has no static member with this name.", null, expr.line, expr.column);
-                        return TypeCheckerError.InvalidMemberAccess;
                     },
                     ._error => |existing_error| {
                         for (existing_error.variants) |variant| {
@@ -1177,10 +1138,11 @@ pub const TypeChecker = struct {
                         return TypeCheckerError.InvalidMemberAccess;
                     },
                     else => {
-                        try self.fail("Type does not support static member access.", null, expr.line, expr.column);
+                        try self.fail("Invalid Member Access", "Type does not support member access.", expr.line, expr.column);
                         return TypeCheckerError.InvalidMemberAccess;
                     },
                 }
+                return TypeCheckerError.InvalidMemberAccess;
             },
             .array_expr => |expr| {
                 var current_id: ?AST.TypeId = null;
@@ -1197,7 +1159,7 @@ pub const TypeChecker = struct {
                 // if this array has no initial values it is Array[Never]
                 // Array[Never] is compatible with anything
                 if (current_id == null) {
-                    current_id = @intFromEnum(PrimitiveType.Never);
+                    current_id = @backingInt(PrimitiveType.Never);
                 }
                 const array_type = try self.registry.add_array_type(current_id.?);
                 expr.resolved_type = array_type;
@@ -1252,8 +1214,8 @@ pub const TypeChecker = struct {
                 // Table[Never, Never] is compatible with anything
                 if (key_type == null or value_type == null) {
                     table_type = try self.registry.add_table_type(
-                        @intFromEnum(PrimitiveType.Never),
-                        @intFromEnum(PrimitiveType.Never),
+                        @backingInt(PrimitiveType.Never),
+                        @backingInt(PrimitiveType.Never),
                     );
                     expr.resolved_type = table_type;
                 } else {
@@ -1278,8 +1240,6 @@ pub const TypeChecker = struct {
                 const struct_fields = type_info._struct.fields;
 
                 for (struct_fields) |struct_field| {
-                    if (struct_field.is_static) continue; // static fields should not appear in the `new` construction - error will come
-
                     if (struct_field.default_value == null) {
                         var found = false;
                         for (expr.fields) |provided| {
@@ -1305,10 +1265,6 @@ pub const TypeChecker = struct {
                     var matched = false;
                     for (struct_fields) |struct_field| {
                         if (std.mem.eql(u8, struct_field.name, provided_field.name.lexeme)) {
-                            if (struct_field.is_static) {
-                                try self.fail("Invalid Field", "Cannot initialize static field in struct instance constructor.", expr.line, expr.column);
-                                return TypeCheckerError.InvalidMemberAccess;
-                            }
                             if (!try self.is_compatible(struct_field.type, val_type)) {
                                 try self.fail("Type Mismatch", "Field value type does not match the struct field type.", expr.line, expr.column);
                                 return TypeCheckerError.TypeMismatch;
@@ -1365,8 +1321,8 @@ pub const TypeChecker = struct {
                     return typeid;
                 } else {
                     // there was not a give type, so we return nil
-                    expr.resolved_type = @intFromEnum(PrimitiveType.Nil);
-                    return @intFromEnum(PrimitiveType.Nil);
+                    expr.resolved_type = @backingInt(PrimitiveType.Nil);
+                    return @backingInt(PrimitiveType.Nil);
                 }
             },
             .anon_fn_expr => |expr| {
@@ -1405,7 +1361,7 @@ pub const TypeChecker = struct {
                 defer self.in_function = prev_in_func;
 
                 const body_term = try self.check(expr.body);
-                const needs_return = ret_typeid != @intFromEnum(PrimitiveType.Nil) and ret_typeid != @intFromEnum(PrimitiveType.Never);
+                const needs_return = ret_typeid != @backingInt(PrimitiveType.Nil) and ret_typeid != @backingInt(PrimitiveType.Never);
                 if (needs_return and !body_term.return_ and !body_term.panics) {
                     try self.fail("Missing return", "Anonymous function is missing a return statement.", expr.line, expr.column);
                     return TypeCheckerError.MissingReturn;
@@ -1456,8 +1412,8 @@ pub const TypeChecker = struct {
                 defer self.in_coroutine = prev_in_co;
 
                 const body_term = try self.check(expr.body);
-                const needs_return = ret_typeid != @intFromEnum(PrimitiveType.Nil) and ret_typeid != @intFromEnum(PrimitiveType.Never);
-                const needs_yield = yield_typeid != @intFromEnum(PrimitiveType.Nil);
+                const needs_return = ret_typeid != @backingInt(PrimitiveType.Nil) and ret_typeid != @backingInt(PrimitiveType.Never);
+                const needs_yield = yield_typeid != @backingInt(PrimitiveType.Nil);
                 if (needs_return and !body_term.return_ and !body_term.panics) {
                     try self.fail("Missing return", "Coroutine is missing a return statement.", expr.line, expr.column);
                     return TypeCheckerError.MissingReturn;
@@ -1470,23 +1426,23 @@ pub const TypeChecker = struct {
                 return coroutine_typeid;
             },
             .int_lit => |lit| {
-                lit.resolved_type = @intFromEnum(PrimitiveType.Int);
+                lit.resolved_type = @backingInt(PrimitiveType.Int);
                 return lit.resolved_type;
             },
             .float_lit => |lit| {
-                lit.resolved_type = @intFromEnum(PrimitiveType.Float);
+                lit.resolved_type = @backingInt(PrimitiveType.Float);
                 return lit.resolved_type;
             },
             .str_lit => |lit| {
-                lit.resolved_type = @intFromEnum(PrimitiveType.String);
+                lit.resolved_type = @backingInt(PrimitiveType.String);
                 return lit.resolved_type;
             },
             .bool_lit => |lit| {
-                lit.resolved_type = @intFromEnum(PrimitiveType.Bool);
+                lit.resolved_type = @backingInt(PrimitiveType.Bool);
                 return lit.resolved_type;
             },
             .nil_lit => |lit| {
-                lit.resolved_type = @intFromEnum(PrimitiveType.Nil);
+                lit.resolved_type = @backingInt(PrimitiveType.Nil);
                 return lit.resolved_type;
             },
             else => {
@@ -1504,7 +1460,7 @@ pub const TypeChecker = struct {
     }
 
     fn isPrimitiveTypeId(self: *TypeChecker, id: AST.TypeId) bool {
-        if (id == @intFromEnum(PrimitiveType.Never)) return false;
+        if (id == @backingInt(PrimitiveType.Never)) return false;
         const info = self.registry.get_type_info(id);
         return switch (info) {
             .primitive => true,
@@ -1523,7 +1479,7 @@ pub const TypeChecker = struct {
 
     fn isNeverTypeId(self: *TypeChecker, id: AST.TypeId) bool {
         _ = self;
-        return id == @intFromEnum(PrimitiveType.Never);
+        return id == @backingInt(PrimitiveType.Never);
     }
 
     fn check_match_exhaustiveness(self: *TypeChecker, matched_type: AST.TypeId, expr: *AST.MatchExpr) TypeCheckerError!void {
@@ -1544,7 +1500,7 @@ pub const TypeChecker = struct {
         if (has_default) return; // default covers remaining values, anywhere
 
         // Bool and Nil are finite - check exhaustive without default
-        if (matched_type == @intFromEnum(PrimitiveType.Bool)) {
+        if (matched_type == @backingInt(PrimitiveType.Bool)) {
             var has_true = false;
             var has_false = false;
             for (expr.cases) |case| {
@@ -1556,7 +1512,7 @@ pub const TypeChecker = struct {
             try self.fail("Non-exhaustive match", "Bool match must cover `true` and `false` or have `default`.", expr.line, expr.column);
             return TypeCheckerError.NonExhaustiveMatch;
         }
-        if (matched_type == @intFromEnum(PrimitiveType.Nil)) {
+        if (matched_type == @backingInt(PrimitiveType.Nil)) {
             var has_nil = false;
             for (expr.cases) |case| {
                 if (case.pattern.* == .nil_lit) has_nil = true;
@@ -1614,14 +1570,13 @@ pub const TypeChecker = struct {
         var covered = std.ArrayList([]const u8).empty;
         defer covered.deinit(self.allocator);
         for (expr.cases) |case| {
-            if (case.pattern.* == .static_member_expr) {
-                try covered.append(self.allocator, case.pattern.static_member_expr.member.lexeme);
-            } else if (case.pattern.* == .default_pat) {
-                // already handled has_default
-            } else {
-                // Non-static pattern (e.g., literal 1 on enum) does not count as covering;
-                // type mismatch already reported via is_compatible check, but for exhaustiveness
-                // we treat it as not covering any variant (needs default which we don't have)
+            // TODO: NEW
+            if (case.pattern.* == .dot_expr) {
+                // get the target expression
+                // check if it evaluates to an enum or an error
+
+                // add to covered
+                try covered.append(self.allocator, case.pattern.dot_expr.member.lexeme);
             }
         }
 
@@ -1652,7 +1607,7 @@ pub const TypeChecker = struct {
 
         //  Array[Never] matches Array[T] for any T
         if (target_info == .array and source_info == .array) {
-            if (source_info.array == @intFromEnum(PrimitiveType.Never)) {
+            if (source_info.array == @backingInt(PrimitiveType.Never)) {
                 return true;
             }
             return try self.is_compatible(target_info.array, source_info.array);
@@ -1660,8 +1615,8 @@ pub const TypeChecker = struct {
 
         // Table[Never, Never] matches Table[K, V] for any K, V
         if (target_info == .table and source_info == .table) {
-            const key_compat = (source_info.table.key == @intFromEnum(PrimitiveType.Never)) or (try self.is_compatible(target_info.table.key, source_info.table.key));
-            const val_compat = (source_info.table.value == @intFromEnum(PrimitiveType.Never)) or (try self.is_compatible(target_info.table.value, source_info.table.value));
+            const key_compat = (source_info.table.key == @backingInt(PrimitiveType.Never)) or (try self.is_compatible(target_info.table.key, source_info.table.key));
+            const val_compat = (source_info.table.value == @backingInt(PrimitiveType.Never)) or (try self.is_compatible(target_info.table.value, source_info.table.value));
             return key_compat and val_compat;
         }
 

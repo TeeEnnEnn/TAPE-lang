@@ -67,8 +67,6 @@ pub const MemberInfo = union(enum) {
     field: struct { index: u16, type_id: AST.TypeId },
     method: struct { index: u16, type_id: AST.TypeId },
     tuple_index: struct { index: u16, type_id: AST.TypeId },
-    static_field: struct { index: u16, type_id: AST.TypeId },
-    static_method: struct { index: u16, type_id: AST.TypeId },
     enum_variant: struct { index: u16, type_id: AST.TypeId },
     error_variant: struct { index: u16, type_id: AST.TypeId },
     struct_init: struct { type_id: AST.TypeId, field_indexes: []u16 },
@@ -240,29 +238,9 @@ pub const BindingResolver = struct {
                 .struct_decl => |decl| {
                     // structs are pre hoisted
                     // This allows structs to reference other structs
-                    // We also pre hoist the static methods and static variables so we can use those out of order
-                    // static fields are treated the same a globals and are assigned a slot in the globals array
-                    // static method are treated like regular functions and are given a slot in the function_constants array
 
                     const struct_type_id = try self.named_typeid(decl.name.lexeme, decl_node);
                     try self.registerComptimeNode(decl_node, decl.name.lexeme, struct_type_id);
-
-                    // pre hoist static fields (allocating global slots)
-                    for (decl.fields, 0..) |field, index| {
-                        if (field.is_static) {
-                            const field_type = try self.registry.resolve(field.type_annotation);
-                            const field_ref: AST.DeclRef = .{ .static_field = .{ .type_id = struct_type_id, .index = @intCast(index) } };
-
-                            try self.putDeclBinding(field_ref, .{
-                                .kind = .global,
-                                .slot = try self.next_global(),
-                                .type_id = field_type,
-                                .decl = field_ref,
-                                .name = field.name.lexeme,
-                                .module_path = self.module.filepath,
-                            });
-                        }
-                    }
 
                     // pre hoist methods (allocating function slots)
                     for (decl.methods) |method| {
@@ -271,7 +249,7 @@ pub const BindingResolver = struct {
                             .decl = ref,
                             .kind = .function_constant,
                             .slot = try self.next_function_constant(),
-                            .type_id = try self.callable_type_id(method.method, if (method.is_static) null else struct_type_id),
+                            .type_id = try self.callable_type_id(method.method, struct_type_id),
                             .name = method.name.lexeme,
                             .module_path = self.module.filepath,
                         });
@@ -333,10 +311,6 @@ pub const BindingResolver = struct {
                 try self.resolveNode(expr.expr, false);
                 try self.resolve_dot_expression(node, expr);
             },
-            .static_member_expr => |expr| {
-                try self.resolveNode(expr.expr, false);
-                try self.resolve_static_member_expression(node, expr);
-            },
             .try_expr => |expr| try self.resolveNode(expr.expr, false),
             .resume_expr => |expr| {
                 try self.resolveNode(expr.expr, false);
@@ -364,7 +338,6 @@ pub const BindingResolver = struct {
     }
 
     fn resolveStructDecl(self: *BindingResolver, node: *AST.ASTNode, decl: *AST.StructDecl) BindingResolverError!void {
-        // TODO: public visibility for static fields/methods - currently ignored
         _ = node;
 
         for (decl.fields) |field| {
@@ -477,10 +450,10 @@ pub const BindingResolver = struct {
 
         // hidden local slot for the ObjectRange
         const range_ref: AST.DeclRef = .{ .node = stmt.iterator_expr };
-        try self.registerLocal(range_ref, "$range", @intFromEnum(PrimitiveType.Never));
+        try self.registerLocal(range_ref, "$range", @backingInt(PrimitiveType.Never));
 
         // user visible iterator variable
-        try self.registerLocal(.{ .node = node }, stmt.iterator_name.lexeme, @intFromEnum(PrimitiveType.Int));
+        try self.registerLocal(.{ .node = node }, stmt.iterator_name.lexeme, @backingInt(PrimitiveType.Int));
 
         try self.resolveNode(stmt.body, false);
         const current = self.current_function();
@@ -530,56 +503,21 @@ pub const BindingResolver = struct {
                 // so the instance_field_index is the index into that array of values at runtime
                 var instance_field_index: u16 = 0;
                 for (info.fields) |field| {
-                    if (!field.is_static) {
-                        if (std.mem.eql(u8, field.name, expr.member.lexeme)) {
-                            try self.result.member_infos.put(node, .{ .field = .{ .index = instance_field_index, .type_id = field.type } });
-                            return;
-                        }
-                        instance_field_index += 1;
+                    if (std.mem.eql(u8, field.name, expr.member.lexeme)) {
+                        try self.result.member_infos.put(node, .{ .field = .{ .index = instance_field_index, .type_id = field.type } });
+                        return;
                     }
+                    instance_field_index += 1;
                 }
 
                 // methods are stored in the function constants array
                 for (info.methods) |method| {
-                    if (!method.is_static and std.mem.eql(u8, method.name, expr.member.lexeme)) {
+                    if (std.mem.eql(u8, method.name, expr.member.lexeme)) {
                         const method_binding = self.find_binding(.{ .node = method.method_node }) orelse {
                             try self.fail("Method binding not found.", null, expr.line, expr.column);
                             return BindingResolverError.MissingBinding;
                         };
                         try self.result.member_infos.put(node, .{ .method = .{ .index = method_binding.slot, .type_id = method.type } });
-                        return;
-                    }
-                }
-            },
-            else => {},
-        }
-    }
-
-    fn resolve_static_member_expression(self: *BindingResolver, node: *AST.ASTNode, expr: *AST.StaticMemberExpr) !void {
-        const obj_type = resolved_type_of(expr.expr);
-        switch (self.registry.get_type_info(obj_type)) {
-            ._struct => |info| {
-                // Check static fields
-                for (info.fields, 0..) |field, field_idx| {
-                    if (field.is_static and std.mem.eql(u8, field.name, expr.member.lexeme)) {
-                        const field_ref: AST.DeclRef = .{ .static_field = .{ .type_id = obj_type, .index = @intCast(field_idx) } };
-                        const binding = self.find_binding(field_ref) orelse {
-                            try self.fail("Static field binding not found.", null, expr.line, expr.column);
-                            return BindingResolverError.MissingBinding;
-                        };
-                        try self.result.member_infos.put(node, .{ .static_field = .{ .index = binding.slot, .type_id = field.type } });
-                        return;
-                    }
-                }
-
-                // Check static methods
-                for (info.methods) |method| {
-                    if (method.is_static and std.mem.eql(u8, method.name, expr.member.lexeme)) {
-                        const method_binding = self.find_binding(.{ .node = method.method_node }) orelse {
-                            try self.fail("Static method binding not found.", null, expr.line, expr.column);
-                            return BindingResolverError.MissingBinding;
-                        };
-                        try self.result.member_infos.put(node, .{ .static_method = .{ .index = method_binding.slot, .type_id = method.type } });
                         return;
                     }
                 }
@@ -872,7 +810,6 @@ fn resolved_type_of(node: *AST.ASTNode) AST.TypeId {
         .index_expr => |v| v.resolved_type,
         .array_expr => |v| v.resolved_type,
         .dot_expr => |v| v.resolved_type,
-        .static_member_expr => |v| v.resolved_type,
         .try_expr => |v| v.resolved_type,
         .resume_expr => |v| v.resolved_type,
         .group_expr => |v| v.resolved_type,
@@ -922,7 +859,6 @@ fn node_position(node: *AST.ASTNode) NodePosition {
         .index_expr => |v| .{ .line = v.line, .column = v.column },
         .array_expr => |v| .{ .line = v.line, .column = v.column },
         .dot_expr => |v| .{ .line = v.line, .column = v.column },
-        .static_member_expr => |v| .{ .line = v.line, .column = v.column },
         .try_expr => |v| .{ .line = v.line, .column = v.column },
         .resume_expr => |v| .{ .line = v.line, .column = v.column },
         .group_expr => |v| .{ .line = v.line, .column = v.column },
