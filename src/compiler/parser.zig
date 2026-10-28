@@ -453,20 +453,10 @@ pub const Parser = struct {
                 }
                 const member = self.previous;
 
-                const inst_expr = try self.allocator.create(AST.DotExpr);
-                inst_expr.* = .{ .expr = expr, .member = member, .line = member.line, .column = member.column };
+                const dot_expr = try self.allocator.create(AST.DotExpr);
+                dot_expr.* = .{ .expr = expr, .member = member, .line = member.line, .column = member.column };
                 const node = try self.allocator.create(AST.ASTNode);
-                node.* = .{ .dot_expr = inst_expr };
-                expr = node;
-            } else if (try self.match(.COLON_COLON)) {
-                // Static Member
-                try self.consume(.IDENTIFIER, "Expected identifier after '::'");
-                const member = self.previous;
-
-                const static_expr = try self.allocator.create(AST.StaticMemberExpr);
-                static_expr.* = .{ .expr = expr, .member = member, .line = member.line, .column = member.column };
-                const node = try self.allocator.create(AST.ASTNode);
-                node.* = .{ .static_member_expr = static_expr };
+                node.* = .{ .dot_expr = dot_expr };
                 expr = node;
             } else {
                 break;
@@ -661,7 +651,7 @@ pub const Parser = struct {
 
         if (!self.check(.RIGHT_PAREN)) {
             while (true) {
-                const param_node = try self.parse_typed_named_field();
+                const param_node = try self.parse_typed_named_field(false);
                 try params.append(self.allocator, param_node);
                 if (!try self.match(.COMMA)) break;
             }
@@ -701,7 +691,7 @@ pub const Parser = struct {
 
         if (!self.check(.RIGHT_PAREN)) {
             while (true) {
-                const param_node = try self.parse_typed_named_field(); // Helper to parse "name: Type"
+                const param_node = try self.parse_typed_named_field(false);
                 try params.append(self.allocator, param_node);
                 if (!try self.match(.COMMA)) break;
             }
@@ -727,17 +717,24 @@ pub const Parser = struct {
         return node;
     }
 
-    fn parse_typed_named_field(self: *Parser) ParserError!*AST.TypedNamedField {
+    /// parses `ident: type`
+    fn parse_typed_named_field(self: *Parser, allow_self: bool) ParserError!*AST.TypedNamedField {
         try self.consume(.IDENTIFIER, "Expected identifier for typed named field.");
         const token = self.previous;
-        try self.consume(.COLON, "Expected ':' to separate identifier from type annotation.");
-        const type_ = try self.parse_type_expression();
+        var type_: *AST.ASTNode = undefined;
+        if (allow_self and std.mem.eql(u8, token.lexeme, "self") and !self.check(.COLON)) {
+            type_ = try self.allocator.create(AST.ASTNode);
+            type_.* = .{ .nil_type = try self.allocator.create(AST.NilType) };
+        } else {
+            try self.consume(.COLON, "Expected ':' to separate identifier from type annotation. Only an untyped first `self` parameter may omit its annotation.");
+            type_ = try self.parse_type_expression();
+        }
         const named_field = try self.allocator.create(AST.TypedNamedField);
         named_field.* = .{ .name = token, .type_annotation = type_ };
         return named_field;
     }
 
-    fn parse_struct_field(self: *Parser, is_public: bool, is_static: bool) ParserError!*AST.TypedNamedStructField {
+    fn parse_struct_field(self: *Parser, is_public: bool) ParserError!*AST.TypedNamedStructField {
         try self.consume(.IDENTIFIER, "Expected identifier for struct field.");
         const token = self.previous;
         try self.consume(.COLON, "Expected ':' to separate identifier from type annotation.");
@@ -749,7 +746,7 @@ pub const Parser = struct {
             has_default = true;
         }
         const field = try self.allocator.create(AST.TypedNamedStructField);
-        field.* = .{ .name = token, .type_annotation = type_, .default_value = default_value, .has_default = has_default, .is_pub = is_public, .is_static = is_static };
+        field.* = .{ .name = token, .type_annotation = type_, .default_value = default_value, .has_default = has_default, .is_pub = is_public };
         return field;
     }
 
@@ -1014,7 +1011,7 @@ pub const Parser = struct {
         return node;
     }
 
-    fn parse_function_declaration(self: *Parser, is_pub: bool, is_static: bool) ParserError!*AST.ASTNode {
+    fn parse_function_declaration(self: *Parser, is_pub: bool, is_method: bool) ParserError!*AST.ASTNode {
         try self.consume(.IDENTIFIER, "Expected identifier for function declaration.");
         const name = self.previous;
 
@@ -1023,7 +1020,7 @@ pub const Parser = struct {
 
         if (!self.check(.RIGHT_PAREN)) {
             while (true) {
-                const param = try self.parse_typed_named_field();
+                const param = try self.parse_typed_named_field(is_method);
                 try params.append(self.allocator, param);
                 if (!try self.match(.COMMA)) break;
             }
@@ -1038,7 +1035,6 @@ pub const Parser = struct {
         const fn_decl = try self.allocator.create(AST.FnDecl);
         fn_decl.* = .{
             .modifier_pub = is_pub,
-            .modifier_static = is_static,
             .name = name,
             .params = try params.toOwnedSlice(self.allocator),
             .return_type_annotation = return_type,
@@ -1053,7 +1049,7 @@ pub const Parser = struct {
         return node;
     }
 
-    fn parse_coroutine_declaration(self: *Parser, is_pub: bool, is_static: bool) ParserError!*AST.ASTNode {
+    fn parse_coroutine_declaration(self: *Parser, is_pub: bool, is_method: bool) ParserError!*AST.ASTNode {
         try self.consume(.IDENTIFIER, "Expected identifier for coroutine declaration.");
         const name = self.previous;
 
@@ -1062,7 +1058,7 @@ pub const Parser = struct {
 
         if (!self.check(.RIGHT_PAREN)) {
             while (true) {
-                const param = try self.parse_typed_named_field();
+                const param = try self.parse_typed_named_field(is_method);
                 try params.append(self.allocator, param);
                 if (!try self.match(.COMMA)) break;
             }
@@ -1085,7 +1081,6 @@ pub const Parser = struct {
             .modifier_pub = is_pub,
             .name = name,
             .params = params.items,
-            .modifier_static = is_static,
             .yield_type_annotation = yield_type,
             .resume_with_type_annotation = resume_with_type,
             .return_type_annotation = return_type,
@@ -1221,7 +1216,7 @@ pub const Parser = struct {
         try self.consume(.LEFT_BRACE, "Expected '{' to start block statement.");
         var statements: std.ArrayList(*AST.ASTNode) = .empty;
         while (!self.check(.RIGHT_BRACE) and !self.check(.EOF)) {
-            const stmt = try self.parse_declaration();
+            const stmt = try self.parse_declaration(false); // statements inside blocks are allowed in every module
             try statements.append(self.allocator, stmt);
         }
 
@@ -1351,40 +1346,30 @@ pub const Parser = struct {
         var methods: std.ArrayList(*AST.StructMethodField) = .empty;
 
         while (!self.check(.RIGHT_BRACE) and !self.check(.EOF)) {
-            var is_static = false;
             var is_public = false;
 
             if (try self.match(.PUB)) {
                 is_public = true;
             }
 
-            if (try self.match(.STATIC)) {
-                is_static = true;
-            }
-
-            if (is_public and is_static) {
-                try self.fail("Attempting redundant keyword usage", "'pub static' / 'static pub' is not allowed. Use 'static' or 'pub' alone instead.");
-                return ParserError.UnexpectedToken;
-            }
-
             if (try self.match(.CO)) {
-                const method = try self.parse_coroutine_declaration(is_public, is_static);
+                const method = try self.parse_coroutine_declaration(is_public, true);
                 const struct_method = try self.allocator.create(AST.StructMethodField);
-                struct_method.* = .{ .is_static = is_static, .method = method, .is_pub = is_public, .name = method.co_decl.name };
+                struct_method.* = .{ .method = method, .is_pub = is_public, .name = method.co_decl.name };
                 try methods.append(self.allocator, struct_method);
                 _ = try self.match(.COMMA);
                 continue;
             }
             if (try self.match(.FN)) {
-                const method = try self.parse_function_declaration(is_public, is_static);
+                const method = try self.parse_function_declaration(is_public, true);
                 const struct_method = try self.allocator.create(AST.StructMethodField);
-                struct_method.* = .{ .is_static = is_static, .method = method, .is_pub = is_public, .name = method.fn_decl.name };
+                struct_method.* = .{ .method = method, .is_pub = is_public, .name = method.fn_decl.name };
                 try methods.append(self.allocator, struct_method);
                 _ = try self.match(.COMMA);
                 continue;
             }
 
-            const field = try self.parse_struct_field(is_public, is_static);
+            const field = try self.parse_struct_field(is_public);
             try fields.append(self.allocator, field);
             if (self.check(.RIGHT_BRACE)) {
                 break;
@@ -1496,7 +1481,6 @@ pub const Parser = struct {
                     if (depth > 0) depth -= 1;
                 },
                 .COLON => if (depth == 0) return true,
-                .COLON_COLON => {},
                 .SEMICOLON, .COMMA => if (depth == 0) return false,
                 else => {},
             }
@@ -1530,13 +1514,27 @@ pub const Parser = struct {
         }
     }
 
-    fn parse_declaration(self: *Parser) ParserError!*AST.ASTNode {
+    /// Parses one program element. `top_level` is true only for the program's
+    /// declaration list; nested blocks (fn bodies, if/while bodies) pass false, so
+    /// statements inside them keep working even in non-entrypoint modules.
+    fn parse_declaration(self: *Parser, top_level: bool) ParserError!*AST.ASTNode {
         var is_pub = false;
         if (try self.match(.PUB)) {
             is_pub = true;
         }
 
         if (try self.match(.VAR)) {
+            if (top_level and !self.module.is_entrypoint) {
+                // A top-level `var` in an imported module is compiled but its
+                // initializer never runs, so the variable stays uninitialized forever.
+                try self.fail_at(
+                    "Top-level `var` in a non-entrypoint module never runs.",
+                    "An imported module is declaration-only (`fn`, `co`, `struct`, `enum`, `error`, `type`, `use`, `pub const`); use a `const` with a literal value, or move the mutable state to the entry module.",
+                    self.previous.line,
+                    self.previous.column,
+                );
+                return ParserError.UnexpectedToken;
+            }
             return try self.parse_var_declaration(is_pub, false);
         } else if (try self.match(.CONST)) {
             return try self.parse_var_declaration(is_pub, true);
@@ -1555,8 +1553,12 @@ pub const Parser = struct {
         } else if (try self.match(.USE)) {
             return try self.parse_use_declaration(is_pub);
         } else {
+            if (top_level and !self.module.is_entrypoint) {
+                try self.fail_at("Unexpected token", "Top level statements are not allowed in a non-entrypoint module.", self.current.line, self.current.column);
+                return ParserError.UnexpectedToken;
+            }
             if (is_pub) {
-                try self.fail("Unexpected token", "`pub` is only allowed inside struct and for top level declarations.");
+                try self.fail_at("Unexpected token", "`pub` is only allowed inside `struct` and for top level declarations.", self.current.line, self.current.column);
                 return ParserError.UnexpectedToken;
             }
             return try self.parse_statement();
@@ -1567,7 +1569,7 @@ pub const Parser = struct {
         const program = try self.allocator.create(AST.Program);
         var declarations: std.ArrayList(*AST.ASTNode) = .empty;
         while (!self.check(.EOF)) {
-            try declarations.append(self.allocator, try self.parse_declaration());
+            try declarations.append(self.allocator, try self.parse_declaration(true));
         }
         program.* = .{ .declarations = try declarations.toOwnedSlice(self.allocator) };
         const node = try self.allocator.create(AST.ASTNode);
@@ -1576,8 +1578,14 @@ pub const Parser = struct {
     }
 
     fn fail(self: *Parser, message: []const u8, hint: ?[]const u8) !void {
+        try self.fail_at(message, hint, self.scanner.line, self.scanner.column());
+    }
+
+    /// Reports a diagnostic at an explicit source position (for cases where the
+    /// scanner has already advanced past the offending token).
+    fn fail_at(self: *Parser, message: []const u8, hint: ?[]const u8, line: usize, column: usize) !void {
         try self.workspace.diagnostics_mutex.lock(self.io);
-        try self.workspace.diagnostics.add_diagnostic(.{ .column = self.scanner.column(), .line = self.scanner.line, .stage = .Parser, .severity = .Error, .message = message, .file_path = self.module.filepath, .hint = hint });
+        try self.workspace.diagnostics.add_diagnostic(.{ .column = column, .line = line, .stage = .Parser, .severity = .Error, .message = message, .file_path = self.module.filepath, .hint = hint });
         self.workspace.diagnostics_mutex.unlock(self.io);
     }
 };

@@ -7,3 +7,5 @@
 3. Side Effects live in main()
 
 4. Compile-time costs are cheaper than runtime costs
+
+5. Reading code is as important as writing code

@@ -14,6 +14,7 @@ const AST = @import("ast.zig");
 const BindingResolver = @import("binding_resolver.zig");
 const Module = @import("workspace.zig").Module;
 const TypeRegistry = @import("type_registry.zig");
+const ConstValue = @import("const_value.zig").ConstValue;
 
 const INTERNAL_ERROR_MESSAGE = "This is an internal error. Please write a bug report.";
 
@@ -156,7 +157,6 @@ pub const CodeGenerator = struct {
             .call_expr => |n| n.resolved_type,
             .index_expr => |n| n.resolved_type,
             .dot_expr => |n| n.resolved_type,
-            .static_member_expr => |n| n.resolved_type,
             .group_expr => |n| n.resolved_type,
             .tuple_expr => |n| n.resolved_type,
             .table_expr => |n| n.resolved_type,
@@ -193,27 +193,9 @@ pub const CodeGenerator = struct {
             .struct_decl => |decl| {
                 try self.generate_struct_decl(node, decl);
             },
-            .use_decl => |decl| {
-                const ref: AST.DeclRef = .{ .node = node };
-                const binding_info = self.binding_resolution.declaration_bindings.get(ref) orelse {
-                    self.fail("use declaration has no binding in binding resolution." ++ INTERNAL_ERROR_MESSAGE, null, decl.line, decl.column);
-                    return CodeGeneratorError.MissingBinding;
-                };
-                switch (binding_info.kind) {
-                    .imported_global => |binding| {
-                        _ = binding;
-                        // use name from "path";
-                        // we need to look for the location of name in the the path's module table
-                        // add it yo our globals
-                        for (decl.items) |item| {
-                            _ = item;
-                        }
-                    },
-                    else => {
-                        self.fail("Use Declaration has non use binding." ++ INTERNAL_ERROR_MESSAGE, null, decl.line, decl.column);
-                        return CodeGeneratorError.InvalidPosition;
-                    },
-                }
+            .use_decl => {
+                // Imports need no codegen: each import item already carries the
+                // exporter's resolved binding (slot or inlined constant value).
             },
             .enum_decl => {
                 // nothing to do - fully comptime
@@ -418,40 +400,14 @@ pub const CodeGenerator = struct {
     }
 
     fn generate_struct_decl(self: *CodeGenerator, node: *AST.ASTNode, decl: *AST.StructDecl) CodeGeneratorError!void {
+        // struct node carries no runtime information
+        _ = node;
         for (decl.methods) |method| {
             switch (method.method.*) {
                 .fn_decl => try self.generate_callable_decl(method.method, @ptrCast(method.method.fn_decl), AST.FnDecl),
                 .co_decl => try self.generate_callable_decl(method.method, @ptrCast(method.method.co_decl), AST.CoDecl),
                 else => return CodeGeneratorError.UnsupportedNode,
             }
-        }
-        // TODO: public visibility for static fields
-        const struct_type = self.binding_resolution.declaration_bindings.get(.{ .node = node }) orelse {
-            // struct itself is comptime, but we need its type id to find static fields
-            // If missing, nothing to init
-            return;
-        };
-
-        const type_id = struct_type.type_id;
-        const type_info = self.registry.get_type_info(type_id);
-
-        if (type_info != ._struct) return;
-
-        // handle static fields -  storing them as globals
-        for (type_info._struct.fields, 0..) |field, idx| {
-            if (!field.is_static) continue;
-            // static fields must always have a default value
-            const default_val = field.default_value orelse continue;
-            // Lookup global slot for this static field
-            const ref: AST.DeclRef = .{ .static_field = .{ .type_id = type_id, .index = @intCast(idx) } };
-            const binding = self.binding_resolution.declaration_bindings.get(ref) orelse {
-                self.fail("Missing binding for static field initializer.", null, decl.line, decl.column);
-                return CodeGeneratorError.MissingBinding;
-            };
-            try self.generate_expression(default_val);
-            try self.current.chunk().write_opcode(.OP_STORE_GLOBAL, decl.line);
-            try self.current.chunk().write_u16(binding.slot, decl.line);
-            try self.current.chunk().write_opcode(.OP_POP, decl.line);
         }
     }
 
@@ -512,14 +468,30 @@ pub const CodeGenerator = struct {
         }
     }
 
-    fn generate_var_decl(self: *CodeGenerator, node: *AST.ASTNode, decl: *AST.VarDecl) CodeGeneratorError!void {
-        try self.generate_expression(decl.initializer);
+    fn emit_const_value(self: *CodeGenerator, value: ConstValue, line: usize) CodeGeneratorError!void {
+        switch (value) {
+            .int => |v| try self.current.chunk().emit_constant(.{ .int = v }, line),
+            .float => |v| try self.current.chunk().emit_constant(.{ .float = v }, line),
+            .bool => |v| try self.current.chunk().write_opcode(if (v) .OP_TRUE else .OP_FALSE, line),
+            .nil => try self.current.chunk().write_opcode(.OP_NIL, line),
+            .string => |s| {
+                const obj = try Entities.copy_string(self.isolate, s);
+                try self.current.chunk().emit_constant(.{ .object = @ptrCast(obj) }, line);
+            },
+        }
+    }
 
+    fn generate_var_decl(self: *CodeGenerator, node: *AST.ASTNode, decl: *AST.VarDecl) CodeGeneratorError!void {
         const ref: AST.DeclRef = .{ .node = node };
         const binding = self.binding_resolution.declaration_bindings.get(ref) orelse {
             self.fail("Variable declaration has no binding in binding resolution." ++ INTERNAL_ERROR_MESSAGE, null, decl.line, decl.column);
             return CodeGeneratorError.MissingBinding;
         };
+
+        // inlined at each use, so the declaration emits nothing
+        if (binding.kind == .constant) return;
+
+        try self.generate_expression(decl.initializer);
 
         switch (binding.kind) {
             .local => {
@@ -648,13 +620,13 @@ pub const CodeGenerator = struct {
                     if (self.binding_resolution.member_infos.get(expr.expr)) |member_info| {
                         if (member_info == .method) {
                             const method_slot = member_info.method.index;
+                            const takes_receiver = member_info.method.takes_receiver;
                             const dot = expr.expr.dot_expr;
 
                             try self.current.chunk().write_opcode(.OP_LOAD_FUNCTION_CONSTANT, expr.line);
                             try self.current.chunk().write_u16(method_slot, expr.line);
 
-                            // Push `self` - evaluate the receiver
-                            try self.generate_expression(dot.expr);
+                            if (takes_receiver) try self.generate_expression(dot.expr);
 
                             for (expr.args) |arg| {
                                 try self.generate_expression(arg);
@@ -667,9 +639,9 @@ pub const CodeGenerator = struct {
                                 else => return CodeGeneratorError.UnsupportedOperandType,
                             };
 
-                            // args + 1 for self
+                            // Include the receiver only for instance methods.
                             try self.current.chunk().write_opcode(opcode, expr.line);
-                            try self.current.chunk().write_u16(@intCast(expr.args.len + 1), expr.line);
+                            try self.current.chunk().write_u16(@intCast(expr.args.len + @as(usize, if (takes_receiver) 1 else 0)), expr.line);
                             return;
                         }
                     }
@@ -720,31 +692,13 @@ pub const CodeGenerator = struct {
                         try self.current.chunk().write_opcode(.OP_GET_FIELD, expr.line);
                         try self.current.chunk().write_u16(field_index.index, expr.line);
                     },
-                    else => return CodeGeneratorError.UnsupportedNode,
-                }
-            },
-            .static_member_expr => |expr| {
-                // Enum::Variant
-                // Error::Variant
-                // Struct::Function
-
-                const member_info = self.binding_resolution.member_infos.get(node) orelse return self.fail("Missing binding for static member.", "This is an internal error, please leave a bug report.", expr.line, expr.column);
-                switch (member_info) {
-                    .static_field => |field| {
-                        try self.current.chunk().write_opcode(.OP_LOAD_GLOBAL, expr.line);
-                        try self.current.chunk().write_u16(field.index, expr.line);
-                    },
-                    .static_method => |method| {
-                        try self.current.chunk().write_opcode(.OP_LOAD_FUNCTION_CONSTANT, expr.line);
-                        try self.current.chunk().write_u16(method.index, expr.line);
-                    },
                     .enum_variant => |variant| {
                         try self.current.chunk().emit_constant(.{ .enum_ = .{ .type_id = variant.type_id, .index = @intCast(variant.index) } }, expr.line);
                     },
                     .error_variant => |variant| {
                         try self.current.chunk().emit_constant(.{ .error_ = .{ .type_id = variant.type_id, .index = @intCast(variant.index) } }, expr.line);
                     },
-                    else => return CodeGeneratorError.UnsupportedOperandType,
+                    else => return CodeGeneratorError.UnsupportedNode,
                 }
             },
 
@@ -754,8 +708,6 @@ pub const CodeGenerator = struct {
                 const type_info = self.registry.get_type_info(struct_init.type_id)._struct;
 
                 for (type_info.fields) |field| {
-                    if (field.is_static) continue; // static fields are already handled
-
                     var provided_expr: ?*AST.ASTNode = null;
                     for (expr.fields) |f| {
                         if (std.mem.eql(u8, f.name.lexeme, field.name)) {
@@ -773,7 +725,8 @@ pub const CodeGenerator = struct {
 
                 var instance_field_count: u16 = 0;
                 for (type_info.fields) |f| {
-                    if (!f.is_static) instance_field_count += 1;
+                    _ = f;
+                    instance_field_count += 1;
                 }
 
                 try self.current.chunk().write_opcode(.OP_STRUCT, expr.line);
@@ -922,29 +875,6 @@ pub const CodeGenerator = struct {
             return;
         }
 
-        // setting a static struct member
-        if (expr.left.* == .static_member_expr) {
-            const member_info = self.binding_resolution.member_infos.get(expr.left) orelse return CodeGeneratorError.MissingBinding;
-            if (member_info != .static_field) return CodeGeneratorError.UnsupportedNode;
-            const field = member_info.static_field;
-            if (std.mem.eql(u8, op, "=")) {
-                try self.generate_expression(expr.right);
-            } else {
-                // compound: load old value, compute, store
-                try self.current.chunk().write_opcode(.OP_LOAD_GLOBAL, expr.line);
-                try self.current.chunk().write_u16(field.index, expr.line);
-                try self.generate_expression(expr.right);
-                const base_op = op[0 .. op.len - 1];
-                const left_kind = resolve_typeof(expr.left);
-                const right_kind = resolve_typeof(expr.right);
-                const opcode = try CodeGenerator.select_opcode(base_op, left_kind, right_kind);
-                try self.current.chunk().write_opcode(opcode, expr.line);
-            }
-            try self.current.chunk().write_opcode(.OP_STORE_GLOBAL, expr.line);
-            try self.current.chunk().write_u16(field.index, expr.line);
-            return;
-        }
-
         // assigning a struct member
         if (expr.left.* == .dot_expr) {
             const dot = expr.left.dot_expr;
@@ -1022,7 +952,14 @@ pub const CodeGenerator = struct {
             return CodeGeneratorError.MissingBinding;
         };
         switch (binding.kind) {
-            .global, .imported_global => {
+            .constant => {
+                const value = binding.const_value orelse {
+                    self.fail("Constant binding has no value." ++ INTERNAL_ERROR_MESSAGE, null, expr.line, expr.column);
+                    return CodeGeneratorError.MissingBinding;
+                };
+                try self.emit_const_value(value, expr.line);
+            },
+            .global => {
                 try self.current.chunk().write_opcode(.OP_LOAD_GLOBAL, expr.line);
                 try self.current.chunk().write_u16(binding.slot, expr.line);
             },
@@ -1061,19 +998,19 @@ pub const CodeGenerator = struct {
         var opcode: ?Opcode = null;
 
         switch (expr.resolved_type) {
-            @intFromEnum(TypeRegistry.PrimitiveType.Bool) => {
+            @backingInt(TypeRegistry.PrimitiveType.Bool) => {
                 if (std.mem.eql(u8, expr.operator.lexeme, "not")) {
                     opcode = .OP_LOGICAL_NOT;
                 }
             },
-            @intFromEnum(TypeRegistry.PrimitiveType.Int) => {
+            @backingInt(TypeRegistry.PrimitiveType.Int) => {
                 if (std.mem.eql(u8, expr.operator.lexeme, "-")) {
                     opcode = .OP_NEGATE_INT;
                 } else if (std.mem.eql(u8, expr.operator.lexeme, "~")) {
                     opcode = .OP_BITWISE_NOT;
                 }
             },
-            @intFromEnum(TypeRegistry.PrimitiveType.Float) => {
+            @backingInt(TypeRegistry.PrimitiveType.Float) => {
                 if (std.mem.eql(u8, expr.operator.lexeme, "-")) {
                     opcode = .OP_NEGATE_FLOAT;
                 }
@@ -1173,7 +1110,7 @@ pub const CodeGenerator = struct {
         if (std.mem.eql(u8, op, ">=")) return arith(left, right, .OP_GREATER_EQUAL_INT, .OP_GREATER_EQUAL_FLOAT, .OP_GREATER_EQUAL_INT_FLOAT, .OP_GREATER_EQUAL_FLOAT_INT);
         if (std.mem.eql(u8, op, "<=")) return arith(left, right, .OP_LESS_EQUAL_INT, .OP_LESS_EQUAL_FLOAT, .OP_LESS_EQUAL_INT_FLOAT, .OP_LESS_EQUAL_FLOAT_INT);
 
-        if (left == @intFromEnum(TypeRegistry.PrimitiveType.Int) and right == @intFromEnum(TypeRegistry.PrimitiveType.Int)) {
+        if (left == @backingInt(TypeRegistry.PrimitiveType.Int) and right == @backingInt(TypeRegistry.PrimitiveType.Int)) {
             if (std.mem.eql(u8, op, "<<")) return .OP_LEFT_SHIFT;
             if (std.mem.eql(u8, op, ">>")) return .OP_RIGHT_SHIFT;
             if (std.mem.eql(u8, op, "|")) return .OP_BITWISE_OR;
@@ -1181,11 +1118,11 @@ pub const CodeGenerator = struct {
             if (std.mem.eql(u8, op, "^")) return .OP_BITWISE_XOR;
         }
 
-        if (left == @intFromEnum(TypeRegistry.PrimitiveType.String) and right == @intFromEnum(TypeRegistry.PrimitiveType.String)) {
+        if (left == @backingInt(TypeRegistry.PrimitiveType.String) and right == @backingInt(TypeRegistry.PrimitiveType.String)) {
             if (std.mem.eql(u8, op, "++")) return .OP_STRING_CONCAT;
         }
 
-        if (left == @intFromEnum(TypeRegistry.PrimitiveType.Int) and right == @intFromEnum(TypeRegistry.PrimitiveType.Int)) {
+        if (left == @backingInt(TypeRegistry.PrimitiveType.Int) and right == @backingInt(TypeRegistry.PrimitiveType.Int)) {
             if (std.mem.eql(u8, op, "..")) return .OP_RANGE;
         }
 
@@ -1201,14 +1138,14 @@ pub const CodeGenerator = struct {
         float_int_op: Opcode,
     ) Opcode {
         return switch (left) {
-            @intFromEnum(TypeRegistry.PrimitiveType.Int) => switch (right) {
-                @intFromEnum(TypeRegistry.PrimitiveType.Int) => int_op,
-                @intFromEnum(TypeRegistry.PrimitiveType.Float) => int_float_op,
+            @backingInt(TypeRegistry.PrimitiveType.Int) => switch (right) {
+                @backingInt(TypeRegistry.PrimitiveType.Int) => int_op,
+                @backingInt(TypeRegistry.PrimitiveType.Float) => int_float_op,
                 else => unreachable,
             },
-            @intFromEnum(TypeRegistry.PrimitiveType.Float) => switch (right) {
-                @intFromEnum(TypeRegistry.PrimitiveType.Int) => float_int_op,
-                @intFromEnum(TypeRegistry.PrimitiveType.Float) => float_op,
+            @backingInt(TypeRegistry.PrimitiveType.Float) => switch (right) {
+                @backingInt(TypeRegistry.PrimitiveType.Int) => float_int_op,
+                @backingInt(TypeRegistry.PrimitiveType.Float) => float_op,
                 else => unreachable,
             },
             else => unreachable,

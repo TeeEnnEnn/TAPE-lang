@@ -16,7 +16,7 @@ fn checkSource(allocator: std.mem.Allocator, source: []const u8) !struct { regis
     var group = std.Io.Group.init;
     var workspace = Workspace.init(allocator, io);
     defer workspace.deinit();
-    const mod = try Module.init("test", source, allocator);
+    const mod = try Module.init("test", source, allocator, true);
     defer {
         mod.deinit();
         allocator.destroy(mod);
@@ -50,9 +50,12 @@ fn checkSourceMulti(allocator: std.mem.Allocator, sources: []const SourceEntry) 
     defer modules.deinit(allocator);
 
     for (sources) |entry| {
-        const mod = try Module.init(entry.name, entry.source, allocator);
+        const source = try allocator.dupe(u8, entry.source);
+        const filepath = try allocator.dupe(u8, if (std.mem.eql(u8, entry.name, "main")) "main" else "/lib");
+        const module_key = try allocator.dupe(u8, filepath);
+        const mod = try Module.init(filepath, source, allocator, true);
         try modules.append(allocator, mod);
-        try workspace.modules.put(entry.name, mod);
+        try workspace.modules.put(module_key, mod);
 
         var parser = try Parser.init(mod.arena.allocator(), &workspace, mod, io, &group);
         mod.ast = try parser.parse();
@@ -82,7 +85,7 @@ test "Type Checker - Init works" {
     var workspace = Workspace.init(arena_allocator, io);
     defer workspace.deinit();
 
-    const mod = try Module.init("test", "", arena_allocator);
+    const mod = try Module.init("test", "", arena_allocator, true);
     defer mod.deinit();
 
     var env = Environment.init(arena_allocator, null);
@@ -104,7 +107,7 @@ test "Type Checker - checks typed variable declaration" {
     defer result.env.deinit();
     defer result.registry.deinit();
 
-    try std.testing.expectEqual(@intFromEnum(PrimitiveType.Int), try result.env.lookup("x"));
+    try std.testing.expectEqual(@backingInt(PrimitiveType.Int), try result.env.lookup("x"));
 }
 
 test "Type Checker - rejects mismatched variable declaration" {
@@ -141,8 +144,8 @@ test "Type Checker - checks function declaration and return type" {
     const fn_type = result.registry.get_type_info(try result.env.lookup("id"));
     try std.testing.expect(fn_type == .function);
     try std.testing.expectEqual(@as(usize, 1), fn_type.function.args.len);
-    try std.testing.expectEqual(@intFromEnum(PrimitiveType.Int), fn_type.function.args[0]);
-    try std.testing.expectEqual(@intFromEnum(PrimitiveType.Int), fn_type.function.ret);
+    try std.testing.expectEqual(@backingInt(PrimitiveType.Int), fn_type.function.args[0]);
+    try std.testing.expectEqual(@backingInt(PrimitiveType.Int), fn_type.function.ret);
 }
 
 test "Type Checker - rejects function return mismatch" {
@@ -159,15 +162,15 @@ test "Type Checker - match exhaustiveness" {
     const allocator = arena.allocator();
 
     // valid: exhaustive match on enum with returns
-    _ = try checkSource(allocator, "enum Color { Red, Green, Blue } fn f(c: Color) -> Int { match (c) { Color::Red => { return 1; }, Color::Green => { return 2; }, Color::Blue => { return 3; }, }; }");
+    _ = try checkSource(allocator, "enum Color { Red, Green, Blue } fn f(c: Color) -> Int { match (c) { Color.Red => { return 1; }, Color.Green => { return 2; }, Color.Blue => { return 3; }, }; }");
     // valid: match on primitive requires default (now exhaustive)
     _ = try checkSource(allocator, "fn f(x: Int) -> Int { match (x) { 1 => { return 10; }, default => { return 20; }, }; }");
 
     // invalid: non-exhaustive match on enum
-    try std.testing.expectError(TypeCheckerError.NonExhaustiveMatch, checkSource(allocator, "enum Color { Red, Green, Blue } fn f(c: Color) -> Int { match (c) { Color::Red => { return 1; }, Color::Green => { return 2; }, }; }"));
+    try std.testing.expectError(TypeCheckerError.NonExhaustiveMatch, checkSource(allocator, "enum Color { Red, Green, Blue } fn f(c: Color) -> Int { match (c) { Color.Red => { return 1; }, Color.Green => { return 2; }, }; }"));
 
     // invalid: non-exhaustive match on error
-    try std.testing.expectError(TypeCheckerError.NonExhaustiveMatch, checkSource(allocator, "error HttpError { NotFound, Unauthorized } fn f(e: HttpError) -> Int { match (e) { HttpError::NotFound => { return 404; }, }; }"));
+    try std.testing.expectError(TypeCheckerError.NonExhaustiveMatch, checkSource(allocator, "error HttpError { NotFound, Unauthorized } fn f(e: HttpError) -> Int { match (e) { HttpError.NotFound => { return 404; }, }; }"));
 
     // valid: nested match with give — context isolation
     _ = try checkSource(allocator,
@@ -175,13 +178,13 @@ test "Type Checker - match exhaustiveness" {
         \\enum Outer { X, Y }
         \\fn f(o: Outer) -> Int {
         \\  match (o) {
-        \\    Outer::X => {
-        \\      match (Inner::A) {
-        \\        Inner::A => { give 1; },
-        \\        Inner::B => { give 2; },
+        \\    Outer.X => {
+        \\      match (Inner.A) {
+        \\        Inner.A => { give 1; },
+        \\        Inner.B => { give 2; },
         \\      };
         \\    },
-        \\    Outer::Y => { return 3; },
+        \\    Outer.Y => { return 3; },
         \\  };
         \\  return 0;
         \\}
@@ -260,14 +263,14 @@ test "Type Checker - checks struct construction and member access" {
     const allocator = arena.allocator();
 
     var result = try checkSource(allocator,
-        \\struct Point { x: Int, y: Int }
+        \\struct Point { pub x: Int, pub y: Int }
         \\var p = new Point { x = 1, y = 2 };
         \\var px: Int = p.x;
     );
     defer result.env.deinit();
     defer result.registry.deinit();
 
-    try std.testing.expectEqual(@intFromEnum(PrimitiveType.Int), try result.env.lookup("px"));
+    try std.testing.expectEqual(@backingInt(PrimitiveType.Int), try result.env.lookup("px"));
 }
 
 test "Type Checker - use declaration validation" {
@@ -311,7 +314,7 @@ test "Type Checker - panic as return" {
     // valid: if-else with panic in one branch and return in the other
     _ = try checkSource(allocator, "fn f(x: Bool) -> Int { if (x) { return 1; } else { panic \"no\"; } }");
     // valid: match with panic cases
-    _ = try checkSource(allocator, "enum Color { Red, Green } fn f(c: Color) -> Int { match (c) { Color::Red => { panic \"bad\"; }, Color::Green => { panic \"bad\"; }, }; }");
+    _ = try checkSource(allocator, "enum Color { Red, Green } fn f(c: Color) -> Int { match (c) { Color.Red => { panic \"bad\"; }, Color.Green => { panic \"bad\"; }, }; }");
 }
 
 test "Type Checker - if-else return completeness" {
@@ -340,14 +343,14 @@ test "Type Checker - match return completeness" {
     const allocator = arena.allocator();
 
     // valid: exhaustive match on enum with all returning
-    _ = try checkSource(allocator, "enum Color { Red, Green, Blue } fn f(c: Color) -> Int { match (c) { Color::Red => { return 1; }, Color::Green => { return 2; }, Color::Blue => { return 3; }, }; }");
+    _ = try checkSource(allocator, "enum Color { Red, Green, Blue } fn f(c: Color) -> Int { match (c) { Color.Red => { return 1; }, Color.Green => { return 2; }, Color.Blue => { return 3; }, }; }");
     // valid: match with one case panicking
-    _ = try checkSource(allocator, "enum Color { Red, Green } fn f(c: Color) -> Int { match (c) { Color::Red => { return 1; }, Color::Green => { panic \"no\"; }, }; }");
+    _ = try checkSource(allocator, "enum Color { Red, Green } fn f(c: Color) -> Int { match (c) { Color.Red => { return 1; }, Color.Green => { panic \"no\"; }, }; }");
     // valid: primitive match with default
     _ = try checkSource(allocator, "fn f(x: Int) -> Int { match (x) { 1 => { return 10; }, default => { return 20; }, }; return 0; }");
 
     // invalid: match case uses give not return — function missing return
-    try std.testing.expectError(TypeCheckerError.MissingReturn, checkSource(allocator, "enum Color { Red, Green } fn f(c: Color) -> Int { match (c) { Color::Red => { give 1; }, Color::Green => { give 2; }, }; }"));
+    try std.testing.expectError(TypeCheckerError.MissingReturn, checkSource(allocator, "enum Color { Red, Green } fn f(c: Color) -> Int { match (c) { Color.Red => { give 1; }, Color.Green => { give 2; }, }; }"));
 }
 
 test "Type Checker - block termination" {
@@ -372,7 +375,7 @@ test "Type Checker - pub const is exported" {
     var workspace = Workspace.init(allocator, io);
     defer workspace.deinit();
 
-    const mod = try Module.init("test_pub_const", "pub const x: Int = 42;", allocator);
+    const mod = try Module.init("test_pub_const", "pub const x: Int = 42;", allocator, true);
     var parser = try Parser.init(allocator, &workspace, mod, io, &group);
     mod.ast = try parser.parse();
 
@@ -386,7 +389,7 @@ test "Type Checker - pub const is exported" {
 
     const export_entry = mod.exports.get("x");
     try std.testing.expect(export_entry != null);
-    try std.testing.expectEqual(@intFromEnum(PrimitiveType.Int), export_entry.?);
+    try std.testing.expectEqual(@backingInt(PrimitiveType.Int), export_entry.?);
 }
 
 test "Type Checker - pub fn is exported and importable" {
@@ -396,7 +399,7 @@ test "Type Checker - pub fn is exported and importable" {
 
     try checkSourceMulti(allocator, &.{
         SourceEntry{ .name = "lib", .source = "pub fn foo() -> Int { return 1; }" },
-        SourceEntry{ .name = "main", .source = "use foo from \"lib\"; var x = foo();" },
+        SourceEntry{ .name = "main", .source = "use foo from \"/lib\"; var x = foo();" },
     });
 }
 
@@ -409,7 +412,7 @@ test "Type Checker - pub co is exported" {
     var workspace = Workspace.init(allocator, io);
     defer workspace.deinit();
 
-    const mod = try Module.init("test_co", "pub co bar() -> (Int, Nil, Nil) { yield 1; }", allocator);
+    const mod = try Module.init("test_co", "pub co bar() -> (Int, Nil, Nil) { yield 1; }", allocator, true);
     var parser = try Parser.init(allocator, &workspace, mod, io, &group);
     mod.ast = try parser.parse();
 
@@ -434,7 +437,7 @@ test "Type Checker - pub struct is exported" {
     var workspace = Workspace.init(allocator, io);
     defer workspace.deinit();
 
-    const mod = try Module.init("test_struct", "pub struct Point { x: Int, y: Int }", allocator);
+    const mod = try Module.init("test_struct", "pub struct Point { x: Int, y: Int }", allocator, true);
     var parser = try Parser.init(allocator, &workspace, mod, io, &group);
     mod.ast = try parser.parse();
 
@@ -459,7 +462,7 @@ test "Type Checker - pub enum is exported" {
     var workspace = Workspace.init(allocator, io);
     defer workspace.deinit();
 
-    const mod = try Module.init("test_enum", "pub enum Color { Red, Green }", allocator);
+    const mod = try Module.init("test_enum", "pub enum Color { Red, Green }", allocator, true);
     var parser = try Parser.init(allocator, &workspace, mod, io, &group);
     mod.ast = try parser.parse();
 
@@ -482,7 +485,7 @@ test "Type Checker - use_decl errors on non-exported symbol" {
 
     try std.testing.expectError(TypeCheckerError.UndefinedSymbol, checkSourceMulti(allocator, &.{
         SourceEntry{ .name = "lib", .source = "fn secret() -> Int { return 0; }" },
-        SourceEntry{ .name = "main", .source = "use secret from \"lib\"; var x = secret();" },
+        SourceEntry{ .name = "main", .source = "use secret from \"/lib\"; var x = secret();" },
     }));
 }
 
@@ -499,7 +502,7 @@ test "Type Checker - pub const import via use_decl hoist looks up from exports m
     defer workspace.deinit();
 
     // Create and process the "lib" module with a pub var
-    const lib_mod = try Module.init("lib", "pub const x: Int = 42;", allocator);
+    const lib_mod = try Module.init("lib", "pub const x: Int = 42;", allocator, false);
     var group = std.Io.Group.init;
     var parser = try Parser.init(allocator, &workspace, lib_mod, io, &group);
     lib_mod.ast = try parser.parse();
@@ -518,7 +521,7 @@ test "Type Checker - pub const import via use_decl hoist looks up from exports m
 
     // Verify the pub var was exported
     try std.testing.expect(lib_mod.exports.contains("x"));
-    try std.testing.expectEqual(@intFromEnum(PrimitiveType.Int), lib_mod.exports.get("x").?);
+    try std.testing.expectEqual(@backingInt(PrimitiveType.Int), lib_mod.exports.get("x").?);
 
     // Now simulate what use_decl hoist does: look up from lib's exports
     // and define in the importing module's environment
@@ -536,7 +539,7 @@ test "Type Checker - pub const import via use_decl hoist looks up from exports m
     }
 
     // Verify the imported symbol is usable (its type ID is correct)
-    try std.testing.expectEqual(@intFromEnum(PrimitiveType.Int), try import_env.lookup("x"));
+    try std.testing.expectEqual(@backingInt(PrimitiveType.Int), try import_env.lookup("x"));
 }
 
 test "Functions cannot read global mutable state" {
@@ -593,10 +596,10 @@ test "Type Checker - coroutine declaration creates coroutine type" {
     const co_type = result.registry.get_type_info(try result.env.lookup("add"));
     try std.testing.expect(co_type == .coroutine);
     try std.testing.expectEqual(@as(usize, 2), co_type.coroutine.args.len);
-    try std.testing.expectEqual(@intFromEnum(PrimitiveType.Int), co_type.coroutine.args[0]);
-    try std.testing.expectEqual(@intFromEnum(PrimitiveType.Int), co_type.coroutine.args[1]);
-    try std.testing.expectEqual(@intFromEnum(PrimitiveType.Int), co_type.coroutine.yield);
-    try std.testing.expectEqual(@intFromEnum(PrimitiveType.Int), co_type.coroutine.ret);
+    try std.testing.expectEqual(@backingInt(PrimitiveType.Int), co_type.coroutine.args[0]);
+    try std.testing.expectEqual(@backingInt(PrimitiveType.Int), co_type.coroutine.args[1]);
+    try std.testing.expectEqual(@backingInt(PrimitiveType.Int), co_type.coroutine.yield);
+    try std.testing.expectEqual(@backingInt(PrimitiveType.Int), co_type.coroutine.ret);
 }
 
 test "Type Checker - coroutine yield and return combinations" {
@@ -699,8 +702,8 @@ test "Type Checker - resume result is union of yield and return" {
     const v_type = try result.env.lookup("v");
     const info = result.registry.get_type_info(v_type);
     try std.testing.expect(info == ._union);
-    try std.testing.expectEqual(@intFromEnum(PrimitiveType.Int), info._union.left);
-    try std.testing.expectEqual(@intFromEnum(PrimitiveType.String), info._union.right);
+    try std.testing.expectEqual(@backingInt(PrimitiveType.Int), info._union.left);
+    try std.testing.expectEqual(@backingInt(PrimitiveType.String), info._union.right);
 }
 
 test "Type Checker - coroutine member access" {
@@ -717,9 +720,9 @@ test "Type Checker - coroutine member access" {
     );
     defer result.env.deinit();
     defer result.registry.deinit();
-    try std.testing.expectEqual(@intFromEnum(PrimitiveType.Bool), try result.env.lookup("a"));
-    try std.testing.expectEqual(@intFromEnum(PrimitiveType.Bool), try result.env.lookup("b"));
-    try std.testing.expectEqual(@intFromEnum(PrimitiveType.Bool), try result.env.lookup("d"));
+    try std.testing.expectEqual(@backingInt(PrimitiveType.Bool), try result.env.lookup("a"));
+    try std.testing.expectEqual(@backingInt(PrimitiveType.Bool), try result.env.lookup("b"));
+    try std.testing.expectEqual(@backingInt(PrimitiveType.Bool), try result.env.lookup("d"));
 
     // unknown member
     try std.testing.expectError(TypeCheckerError.InvalidMemberAccess, checkSource(allocator, "co f() -> (Int, Nil, Nil) { yield 1; } var c = f(); var x = c.nope;"));
@@ -757,9 +760,9 @@ test "Type Checker - coroutine type carries yield, resume_with, return" {
 
     const co_type = result.registry.get_type_info(try result.env.lookup("add"));
     try std.testing.expect(co_type == .coroutine);
-    try std.testing.expectEqual(@intFromEnum(PrimitiveType.Int), co_type.coroutine.yield);
-    try std.testing.expectEqual(@intFromEnum(PrimitiveType.String), co_type.coroutine.resume_with);
-    try std.testing.expectEqual(@intFromEnum(PrimitiveType.Int), co_type.coroutine.ret);
+    try std.testing.expectEqual(@backingInt(PrimitiveType.Int), co_type.coroutine.yield);
+    try std.testing.expectEqual(@backingInt(PrimitiveType.String), co_type.coroutine.resume_with);
+    try std.testing.expectEqual(@backingInt(PrimitiveType.Int), co_type.coroutine.ret);
 }
 
 test "Type Checker - yield expression has the resume_with type" {
@@ -820,4 +823,200 @@ test "Type Checker - non-boolean conditions" {
 
     try std.testing.expectError(TypeCheckerError.NonBooleanCondition, checkSource(allocator, "if (1) { var x = 0; }"));
     try std.testing.expectError(TypeCheckerError.TypeMismatch, checkSource(allocator, "while (1) { break; }"));
+}
+
+test "Type Checker - fn reading module var is rejected" {
+    const allocator = std.testing.allocator;
+    try std.testing.expectError(TypeCheckerError.MutableGlobalStateCaptureAttempt, checkSource(allocator, "var counter = 0; fn f() -> Int { return counter; }"));
+}
+
+test "Type Checker - anonymous fn reading module var is rejected" {
+    const allocator = std.testing.allocator;
+    try std.testing.expectError(TypeCheckerError.MutableGlobalStateCaptureAttempt, checkSource(allocator, "var counter = 0; var f = fn () -> Int { return counter; };"));
+}
+
+test "Type Checker - non-literal module const is rejected" {
+    const allocator = std.testing.allocator;
+    try std.testing.expectError(TypeCheckerError.NonConstantExport, checkSource(allocator, "var a = 5; const b = a + 1;"));
+}
+
+// --- Variant receiver rules (wave: is_type symbol discrimination) ---
+
+const COLOR_ENUM_LIB = "pub enum Color { Red, Green }";
+
+test "Type Checker - enum variants are only accessible through the type name" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const allocator = arena.allocator();
+
+    try std.testing.expectError(TypeCheckerError.InvalidMemberAccess, checkSourceMulti(allocator, &.{
+        SourceEntry{ .name = "lib", .source = COLOR_ENUM_LIB },
+        SourceEntry{ .name = "main", .source = "use Color from \"/lib\"; var c = Color.Green; var x = c.Red;" },
+    }));
+}
+
+test "Type Checker - call receivers cannot name variants" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const allocator = arena.allocator();
+
+    try std.testing.expectError(TypeCheckerError.InvalidMemberAccess, checkSourceMulti(allocator, &.{
+        SourceEntry{ .name = "lib", .source = COLOR_ENUM_LIB ++ " pub fn make() -> Color { return Color.Red; }" },
+        SourceEntry{ .name = "main", .source = "use Color, make from \"/lib\"; var x = make().Red;" },
+    }));
+}
+
+test "Type Checker - variant access also works across modules (aliased)" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const allocator = arena.allocator();
+
+    const sources = [_]SourceEntry{
+        SourceEntry{ .name = "lib", .source = COLOR_ENUM_LIB },
+        SourceEntry{ .name = "main", .source = "use Color as C from \"/lib\"; var x = C.Red; var y = x == C.Green;" },
+    };
+    try checkSourceMulti(allocator, &sources);
+}
+
+test "Type Checker - type names have no struct members" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const allocator = arena.allocator();
+
+    try std.testing.expectError(TypeCheckerError.InvalidMemberAccess, checkSourceMulti(allocator, &.{
+        SourceEntry{ .name = "lib", .source = "pub struct Point { pub x: Int }" },
+        SourceEntry{ .name = "main", .source = "use Point from \"/lib\"; var n = Point.x;" },
+    }));
+}
+
+test "Type Checker - value-receiver match patterns are not coverage" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const allocator = arena.allocator();
+
+    try std.testing.expectError(TypeCheckerError.InvalidMemberAccess, checkSourceMulti(allocator, &.{
+        SourceEntry{ .name = "lib", .source = "pub enum Weekdays { MON, TUE } pub fn next_day() -> Weekdays { return Weekdays.MON; }" },
+        SourceEntry{ .name = "main", .source = "use Weekdays, next_day from \"/lib\"; var day = next_day(); var r = match (day) { day.MON => give 1;, default => give 0;, };" },
+    }));
+}
+
+// --- Import visibility enforcement ---
+
+test "Type Checker - pub field access across modules works" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const allocator = arena.allocator();
+
+    try checkSourceMulti(allocator, &.{
+        SourceEntry{ .name = "lib", .source = "pub struct Box { pub v: Int } pub fn make() -> Box { return new Box { v = 1 }; }" },
+        SourceEntry{ .name = "main", .source = "use Box, make from \"/lib\"; var b = make(); var t = b.v;" },
+    });
+}
+
+test "Type Checker - private field reads across modules are rejected" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const allocator = arena.allocator();
+
+    const sources = [_]SourceEntry{
+        SourceEntry{ .name = "lib", .source = "pub struct Box { v: Int } pub fn make() -> Box { return new Box { v = 1 }; }" },
+        SourceEntry{ .name = "main", .source = "use Box, make from \"/lib\"; var b = make(); var t = b.v;" },
+    };
+    try std.testing.expectError(TypeCheckerError.InvalidMemberAccess, checkSourceMulti(allocator, &sources));
+}
+
+test "Type Checker - private method calls across modules are rejected" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const allocator = arena.allocator();
+
+    try std.testing.expectError(TypeCheckerError.InvalidMemberAccess, checkSourceMulti(allocator, &.{
+        SourceEntry{ .name = "lib", .source = "pub struct Box { pub v: Int, fn secret(self) -> Int { return self.v; } } pub fn make() -> Box { return new Box { v = 1 }; }" },
+        SourceEntry{ .name = "main", .source = "use Box, make from \"/lib\"; var b = make(); var t = b.secret();" },
+    }));
+}
+
+test "Type Checker - cross-module `new` cannot set private fields" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const allocator = arena.allocator();
+
+    try std.testing.expectError(TypeCheckerError.InvalidMemberAccess, checkSourceMulti(allocator, &.{
+        SourceEntry{ .name = "lib", .source = "pub struct Box { pub visible: Int, hidden: Int } pub fn make() -> Box { return new Box { visible = 1, hidden = 2 }; }" },
+        SourceEntry{ .name = "main", .source = "use Box from \"/lib\"; var b = new Box { visible = 5, hidden = 9 };" },
+    }));
+}
+
+// --- Public signature hygiene ---
+
+test "Type Checker - pub fn signatures must name only public types" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const allocator = arena.allocator();
+
+    try std.testing.expectError(TypeCheckerError.NonPublicTypeExport, checkSourceMulti(allocator, &.{
+        SourceEntry{ .name = "lib", .source = "struct Hidden {} pub fn make() -> Hidden { return new Hidden {}; }" },
+    }));
+}
+
+test "Type Checker - pub fn signatures accept public types" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const allocator = arena.allocator();
+
+    try checkSourceMulti(allocator, &.{
+        SourceEntry{ .name = "lib", .source = "pub struct Point { pub x: Int } pub fn at(p: Point) -> Int { return p.x; }" },
+    });
+}
+
+test "Type Checker - pub methods on private structs are module-local API" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const allocator = arena.allocator();
+
+    _ = try checkSource(allocator, "struct Hidden { pub fn show(self) -> Nil { self; } }");
+}
+
+test "Type Checker - public method calls work across modules" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const allocator = arena.allocator();
+
+    try checkSourceMulti(allocator, &.{
+        SourceEntry{ .name = "lib", .source = "pub struct Box { pub value: Int, pub fn get(self) -> Int { return self.value; } } pub fn make() -> Box { return new Box { value = 7 }; }" },
+        SourceEntry{ .name = "main", .source = "use Box, make from \"/lib\"; var b = make(); var n = b.get();" },
+    });
+}
+
+test "Type Checker - associated functions construct private fields" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const allocator = arena.allocator();
+
+    _ = try checkSource(allocator, "struct Box { secret: Int, pub fn create(value: Int) -> Box { return new Box { secret = value }; } } var b = Box.create(7);");
+}
+
+test "Type Checker - enum comparisons work across modules" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const allocator = arena.allocator();
+
+    const sources = [_]SourceEntry{
+        SourceEntry{ .name = "lib", .source = "pub enum Color { Red, Green }" },
+        SourceEntry{ .name = "main", .source = "use Color as Shade from \"/lib\"; var a = Shade.Red; var b = Shade.Green; var equal = a == b;" },
+    };
+    try checkSourceMulti(allocator, &sources);
+}
+
+test "Workspace rejects an imported name that collides with a local declaration" {
+    const allocator = std.testing.allocator;
+    const io = std.testing.io;
+
+    var workspace = Workspace.init(allocator, io);
+    defer workspace.deinit();
+
+    try std.testing.expect(!try workspace.compile_workspace("src/_tests/compiler/fixtures/import_collision/main.tape", .{}));
+    try std.testing.expect(workspace.diagnostics.has_errors);
+    try std.testing.expectEqual(@as(usize, 1), workspace.diagnostics.diagnostics.items.len);
+    try std.testing.expectEqualStrings("Duplicate symbol", workspace.diagnostics.diagnostics.items[0].message);
 }

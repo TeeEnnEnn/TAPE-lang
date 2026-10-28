@@ -82,14 +82,17 @@ pub const Module = struct {
     ast: *AST.ASTNode,
     binding_resolution: BindingResolution,
     exports: std.StringHashMap(AST.TypeId),
+    /// Declaration node of each exported name, so importers can copy the exporter's binding
+    export_nodes: std.StringHashMap(*AST.ASTNode),
     file_contents: []const u8,
     mutex: std.Io.Mutex,
     dependencies: std.ArrayList(*Module),
     visit_state: ModuleVisitState = .NotVisited,
     function: *Entities.ObjectFunction,
     allocator: std.mem.Allocator,
+    is_entrypoint: bool,
 
-    pub fn init(filepath: []const u8, file_contents: []const u8, allocator: std.mem.Allocator) !*Module {
+    pub fn init(filepath: []const u8, file_contents: []const u8, allocator: std.mem.Allocator, is_entrypoint: bool) !*Module {
         const module = try allocator.create(Module);
         module.* = Module{
             .filepath = filepath,
@@ -98,17 +101,20 @@ pub const Module = struct {
             .ast = undefined,
             .binding_resolution = BindingResolution.init(allocator),
             .exports = std.StringHashMap(AST.TypeId).init(allocator),
+            .export_nodes = std.StringHashMap(*AST.ASTNode).init(allocator),
             .file_contents = file_contents,
             .mutex = std.Io.Mutex.init,
             .dependencies = .empty,
             .function = undefined,
             .allocator = allocator,
+            .is_entrypoint = is_entrypoint,
         };
         return module;
     }
 
     pub fn deinit(self: *Module) void {
         self.exports.deinit();
+        self.export_nodes.deinit();
         self.dependencies.deinit(self.allocator);
         self.binding_resolution.deinit();
         self.arena.deinit();
@@ -212,7 +218,7 @@ pub const Workspace = struct {
             };
         };
 
-        const entrypoint_module = try Module.init(entrypoint_absolute, file_contents, self.allocator);
+        const entrypoint_module = try Module.init(entrypoint_absolute, file_contents, self.allocator, true);
         errdefer {
             self.allocator.free(file_contents);
             self.allocator.free(entrypoint_absolute);
@@ -241,6 +247,7 @@ pub const Workspace = struct {
 
         // sort modules
         const sorted_modules = try self.sort_modules(entrypoint_module);
+        defer self.allocator.free(sorted_modules);
 
         if (compile_options.debug.ast) {
             for (sorted_modules) |module| print_node(module.ast, 0, 4);
@@ -310,8 +317,9 @@ pub const Workspace = struct {
         if (compile_options.debug.pipeline) std.debug.print("Generating code ...\n", .{});
         var vm = try Runtime.VM.init(.{ .debug_execution = compile_options.debug.vm }, self, self.allocator);
         self.vm = vm;
-        // first isolate
-        const first_isolate = try vm.new_isolate(entrypoint_module.binding_resolution.globals_count, entrypoint_module.binding_resolution.function_constants_count);
+        // first isolate. Slots are unique program-wide, so size it from the
+        // workspace totals after every module has been resolved.
+        const first_isolate = try vm.new_isolate(self.workspace_globals.next_global_constant_slot, self.workspace_globals.next_function_constant_slot);
         first_isolate.gc.deactivate_collector();
 
         // emit Bytecode
@@ -383,8 +391,7 @@ pub const Workspace = struct {
                 });
                 return;
             };
-
-            module = try Module.init(resolved_filepath, file_contents, self.allocator);
+            module = try Module.init(resolved_filepath, file_contents, self.allocator, false);
             try self.modules.put(resolved_filepath, module);
             is_new = true;
             // resolved_filepath is now owned by the module and modules HashMap
@@ -404,15 +411,55 @@ pub const Workspace = struct {
         }
     }
 
+    /// Lexically normalizes a path, collapsing `.`, `..` and duplicate
+    /// separators. Joined import paths accumulate `./` segments (the
+    /// importer's dirname already ends in one), so without this the same
+    /// file registers as two different modules and its types get
+    /// duplicate ids.
+    fn normalize_path(allocator: std.mem.Allocator, path: []const u8) ![]u8 {
+        const is_absolute = std.fs.path.isAbsolute(path);
+        var parts: std.ArrayList([]const u8) = .empty;
+        defer parts.deinit(allocator);
+        var it = std.mem.splitScalar(u8, path, '/');
+        while (it.next()) |seg| {
+            if (seg.len == 0 or std.mem.eql(u8, seg, ".")) continue;
+            if (std.mem.eql(u8, seg, "..")) {
+                if (parts.items.len > 0 and !std.mem.eql(u8, parts.items[parts.items.len - 1], "..")) {
+                    _ = parts.pop();
+                    continue;
+                }
+                // Relative paths may escape; absolute paths clamp at root.
+                if (!is_absolute) try parts.append(allocator, seg);
+                continue;
+            }
+            try parts.append(allocator, seg);
+        }
+        var out: std.ArrayList(u8) = .empty;
+        errdefer out.deinit(allocator);
+        if (is_absolute) try out.append(allocator, '/');
+        for (parts.items, 0..) |part, i| {
+            if (i > 0) try out.append(allocator, '/');
+            try out.appendSlice(allocator, part);
+        }
+        if (out.items.len == 0) try out.appendSlice(allocator, ".");
+        return out.toOwnedSlice(allocator);
+    }
+
     pub fn resolve_path(self: *Workspace, importer_filepath: []const u8, import_path: []const u8) ![]const u8 {
         if (std.fs.path.isAbsolute(import_path)) {
-            return try self.allocator.dupe(u8, import_path);
+            const duped = try self.allocator.dupe(u8, import_path);
+            defer self.allocator.free(duped);
+            return try normalize_path(self.allocator, duped);
         }
         const dirname = std.fs.path.dirname(importer_filepath) orelse "";
         if (dirname.len == 0) {
-            return try self.allocator.dupe(u8, import_path);
+            const duped = try self.allocator.dupe(u8, import_path);
+            defer self.allocator.free(duped);
+            return try normalize_path(self.allocator, duped);
         }
-        return try std.fs.path.join(self.allocator, &[_][]const u8{ dirname, import_path });
+        const joined = try std.fs.path.join(self.allocator, &[_][]const u8{ dirname, import_path });
+        defer self.allocator.free(joined);
+        return try normalize_path(self.allocator, joined);
     }
 
     pub fn get_module(self: *Workspace, filepath: []const u8) !?*Module {
@@ -424,7 +471,7 @@ pub const Workspace = struct {
     fn worker_parse_module(param: ParserWorkerParam) void {
         if (param.workspace.debug.pipeline) std.debug.print("Starting parsing {s}\n", .{param.module.filepath});
 
-        var parser = Parser.init(param.module.arena.allocator(), param.workspace, param.module, param.io, param.group) catch {
+        var parser = Parser.init(param.module.arena.allocator(), param.workspace, param.module, param.io, param.group) catch |err| {
             param.workspace.diagnostics_mutex.lock(param.io) catch {};
             defer param.workspace.diagnostics_mutex.unlock(param.io);
 
@@ -435,6 +482,7 @@ pub const Workspace = struct {
                 .severity = .Error,
                 .message = "Failed to create parser",
                 .file_path = param.module.filepath,
+                .hint = @errorName(err),
             }) catch {};
 
             param.module.mutex.lock(param.io) catch {};

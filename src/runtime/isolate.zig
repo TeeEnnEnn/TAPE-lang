@@ -269,7 +269,7 @@ pub const Isolate = struct {
         var frame = &self.current.frames[self.current.frame_count - 1];
 
         while (true) {
-            const instruction: Opcode = @enumFromInt(frame.closure.function.chunk.code.items[frame.ip]);
+            const instruction: Opcode = @fromBackingInt(@intCast(frame.closure.function.chunk.code.items[frame.ip]));
             frame.ip += 1;
 
             switch (instruction) {

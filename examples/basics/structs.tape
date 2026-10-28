@@ -1,16 +1,16 @@
 struct Empty {}
 
 struct Point {
-	x: Int,
-	y: Int,
+	pub x: Int,
+	pub y: Int,
 }
 
 struct Point3D {
-	x: Int,
-	y: Int,
-	z: Int,
+	pub x: Int,
+	pub y: Int,
+	pub z: Int,
 
-	fn print() -> Nil {
+	pub fn print(self) -> Nil {
 		self.x;
 		self.y;
 		self.z;
@@ -18,38 +18,38 @@ struct Point3D {
 }
 
 struct Rect {
-	width: Int,
-	height: Int,
+	pub width: Int,
+	pub height: Int,
 
-	fn area() -> Int {
+	pub fn area(self) -> Int {
 		return self.width * self.height;
 	}
 
-	fn perimeter() -> Int {
+	pub fn perimeter(self) -> Int {
 		return 2 * (self.width + self.height);
 	}
 
-	fn is_square() -> Bool {
+	pub fn is_square(self) -> Bool {
 		return self.width == self.height;
 	}
 
-	fn scale(factor: Int) -> Rect {
+	pub fn scale(self, factor: Int) -> Rect {
 		return new Rect { width = self.width * factor, height = self.height * factor };
 	}
 
-	fn describe() -> Int {
+	pub fn describe(something_else: Int, self) -> Int {
 		return self.area() + self.perimeter();
 	}
 }
 
 struct Line {
-	start: Point,
-	end: Point,
+	pub start: Point,
+	pub end: Point,
 }
 
 struct Label {
-	text: String,
-	reps: Int,
+	pub text: String,
+	pub reps: Int,
 }
 
 var e = new Empty{};
@@ -74,7 +74,7 @@ var big = rect.scale(2);
 if (big.area() != 80) { panic "big area"; }
 if (big.perimeter() != 36) { panic "big perimeter"; }
 
-if (rect.describe() != 38) { panic "describe"; }
+if (rect.describe(12) != 38) { panic "describe"; }
 
 if (rect.scale(3).area() != 180) { panic "scale area"; }
 if (new Rect { width = 6, height = 6 }.is_square() != true) { panic "is_square true"; }
@@ -88,79 +88,3 @@ if (sq.is_square() != true) { panic "sq is_square"; }
 if (rect.is_square() != false) { panic "rect is_square"; }
 
 if ((new Point { x = 7, y = 8 }).x != 7) { panic "anon point"; }
-
-struct Container {
-	storage: Array[Int],
-	static fn init() -> Container {
-		return new Container {storage = []};
-	}
-}
-
-var container = Container::init();
-container;
-
-// --- Static fields: textual order, defaults, mutation ---
-struct Counter {
-	static count: Int = 0,
-	static step: Int = 1,
-	static double_step: Int = Counter::step + Counter::step,
-	value: Int,
-}
-
-if (Counter::count != 0) { panic "Counter::count init"; }
-if (Counter::step != 1) { panic "Counter::step"; }
-if (Counter::double_step != 2) { panic "Counter::double_step valid textual ref"; }
-
-Counter::count = 5;
-if (Counter::count != 5) { panic "Counter::count assign"; }
-Counter::count += 2;
-if (Counter::count != 7) { panic "Counter::count +="; }
-Counter::count *= 2;
-if (Counter::count != 14) { panic "Counter::count *="; }
-
-struct Statics {
-	static a: Int = 10,
-	static b: Int = Statics::a + 5,
-	static c: Int = Statics::b * 2,
-	val: Int,
-}
-if (Statics::a != 10) { panic "Statics::a"; }
-if (Statics::b != 15) { panic "Statics::b textual order"; }
-if (Statics::c != 30) { panic "Statics::c chained"; }
-Statics::b = 20;
-if (Statics::b != 20) { panic "Statics::b mutated"; }
-if (Statics::a != 10) { panic "Statics::a unchanged"; }
-
-// Cross-struct static refs
-struct A {
-	static p: Int = 1,
-	static q: Int = 2,
-	v: Int,
-}
-struct B {
-	static r: Int = A::p + A::q,
-	w: Int,
-}
-if (A::p != 1) { panic "A::p"; }
-if (A::q != 2) { panic "A::q"; }
-if (B::r != 3) { panic "B::r cross-struct"; }
-A::p = 10;
-if (B::r != 3) { panic "B::r not auto-updated"; }
-if (A::p != 10) { panic "A::p mutated"; }
-A::p = 1;
-
-struct WithStaticMethodAndField {
-	static base: Int = 100,
-	static offset: Int = WithStaticMethodAndField::base + 23,
-	n: Int,
-	static fn make(v: Int) -> WithStaticMethodAndField {
-		return new WithStaticMethodAndField { n = v + WithStaticMethodAndField::base };
-	}
-}
-if (WithStaticMethodAndField::base != 100) { panic "WithStaticMethodAndField::base"; }
-if (WithStaticMethodAndField::offset != 123) { panic "WithStaticMethodAndField::offset"; }
-var w = WithStaticMethodAndField::make(5);
-if (w.n != 105) { panic "WithStaticMethodAndField::make"; }
-WithStaticMethodAndField::base = 200;
-var w2 = WithStaticMethodAndField::make(5);
-if (w2.n != 205) { panic "WithStaticMethodAndField::base mutated"; }

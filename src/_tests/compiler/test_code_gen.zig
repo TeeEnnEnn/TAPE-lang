@@ -16,7 +16,7 @@ fn generateSource(allocator: std.mem.Allocator, source: []const u8) ![]const u8 
     var workspace = Workspace.init(allocator, io);
     defer workspace.deinit();
 
-    const mod = try Module.init("test", source, allocator);
+    const mod = try Module.init("test", source, allocator, true);
     defer {
         mod.deinit();
         allocator.destroy(mod);
@@ -39,7 +39,7 @@ fn generateSource(allocator: std.mem.Allocator, source: []const u8) ![]const u8 
 
     const vm = try VM.init(.{}, &workspace, allocator);
     defer vm.deinit();
-    const isolate = try vm.new_isolate();
+    const isolate = try vm.new_isolate(mod.binding_resolution.globals_count, mod.binding_resolution.function_constants_count);
 
     var codeGenerator = try CodeGenerator.init(allocator, isolate, &mod.binding_resolution, &registry, mod.ast, &workspace.diagnostics, mod);
     const function = codeGenerator.generate() orelse return error.CodeGenerationFailed;
@@ -52,7 +52,7 @@ fn expectOpcode(source: []const u8, opcode: Opcode) !void {
 
     const code = try generateSource(arena.allocator(), source);
     for (code) |byte| {
-        if (byte == @intFromEnum(opcode)) return;
+        if (byte == @backingInt(opcode)) return;
     }
 
     return error.ExpectedOpcodeNotFound;

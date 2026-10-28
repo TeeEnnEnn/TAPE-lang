@@ -35,3 +35,11 @@ for f in examples/basics/*; do
 		echo -e "\n"
 	fi
 done
+
+for f in examples/multimodule/main.tape examples/taskflow/main.tape; do
+	if [ -f "$f" ]; then
+		echo -e "\n\033[1;34mExecuting: $f\033[0m\n"
+		./zig-out/bin/TAPE_lang run "$f"
+		echo -e "\n"
+	fi
+done

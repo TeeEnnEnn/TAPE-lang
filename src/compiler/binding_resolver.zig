@@ -7,6 +7,7 @@ const DiagnosticReporter = Diagnostics.DiagnosticsReporter;
 const Module = @import("workspace.zig").Module;
 const Workspace = @import("workspace.zig").Workspace;
 const WorkspaceGlobals = @import("workspace.zig").WorkspaceGlobals;
+const ConstValue = @import("const_value.zig").ConstValue;
 
 pub const BindingResolverError = error{
     MissingDeclRef,
@@ -20,8 +21,6 @@ pub const BindingResolverError = error{
 pub const BindingKind = enum {
     /// a global
     global,
-    /// A global imported from a different module
-    imported_global,
     /// A value used within a scope
     local,
     /// A value passed to a function
@@ -32,6 +31,8 @@ pub const BindingKind = enum {
     method,
     /// no runtime value
     comptime_type,
+    /// compile-time literal, inlined at every use. No runtime slot.
+    constant,
     /// a compiled function
     function_constant,
 };
@@ -43,6 +44,7 @@ pub const BindingInfo = struct {
     decl: AST.DeclRef,
     name: []const u8,
     module_path: ?[]const u8 = null,
+    const_value: ?ConstValue = null,
 };
 
 pub const UpvalueInfo = struct {
@@ -61,10 +63,8 @@ pub const FunctionInfo = struct {
 
 pub const MemberInfo = union(enum) {
     field: struct { index: u16, type_id: AST.TypeId },
-    method: struct { index: u16, type_id: AST.TypeId },
+    method: struct { index: u16, type_id: AST.TypeId, takes_receiver: bool = true },
     tuple_index: struct { index: u16, type_id: AST.TypeId },
-    static_field: struct { index: u16, type_id: AST.TypeId },
-    static_method: struct { index: u16, type_id: AST.TypeId },
     enum_variant: struct { index: u16, type_id: AST.TypeId },
     error_variant: struct { index: u16, type_id: AST.TypeId },
     struct_init: struct { type_id: AST.TypeId, field_indexes: []u16 },
@@ -219,14 +219,15 @@ pub const BindingResolver = struct {
                         const ref: AST.DeclRef = .{ .import = .{ .use_decl = decl_node, .index = @as(u32, @intCast(index)) } };
                         const name = (item.alias orelse item.name).lexeme;
                         const type_id = try self.import_typeid(decl, item);
-                        const kind = self.importBindingKind(type_id, item.name.lexeme);
+                        const exported = try self.exported_binding(decl, item);
                         try self.putDeclBinding(ref, .{
-                            .kind = kind,
-                            .slot = try self.next_global(),
+                            .kind = exported.kind, // function_constant, constant or comptime_type
+                            .slot = exported.slot,
                             .type_id = type_id,
                             .decl = ref,
                             .name = name,
                             .module_path = decl.resolved_module_path,
+                            .const_value = exported.const_value,
                         });
                     }
                 },
@@ -235,29 +236,9 @@ pub const BindingResolver = struct {
                 .struct_decl => |decl| {
                     // structs are pre hoisted
                     // This allows structs to reference other structs
-                    // We also pre hoist the static methods and static variables so we can use those out of order
-                    // static fields are treated the same a globals and are assigned a slot in the globals array
-                    // static method are treated like regular functions and are given a slot in the function_constants array
 
                     const struct_type_id = try self.named_typeid(decl.name.lexeme, decl_node);
                     try self.registerComptimeNode(decl_node, decl.name.lexeme, struct_type_id);
-
-                    // pre hoist static fields (allocating global slots)
-                    for (decl.fields, 0..) |field, index| {
-                        if (field.is_static) {
-                            const field_type = try self.registry.resolve(field.type_annotation);
-                            const field_ref: AST.DeclRef = .{ .static_field = .{ .type_id = struct_type_id, .index = @intCast(index) } };
-
-                            try self.putDeclBinding(field_ref, .{
-                                .kind = .global,
-                                .slot = try self.next_global(),
-                                .type_id = field_type,
-                                .decl = field_ref,
-                                .name = field.name.lexeme,
-                                .module_path = self.module.filepath,
-                            });
-                        }
-                    }
 
                     // pre hoist methods (allocating function slots)
                     for (decl.methods) |method| {
@@ -266,7 +247,7 @@ pub const BindingResolver = struct {
                             .decl = ref,
                             .kind = .function_constant,
                             .slot = try self.next_function_constant(),
-                            .type_id = try self.callable_type_id(method.method, if (method.is_static) null else struct_type_id),
+                            .type_id = try self.callable_type_id(method.method, struct_type_id),
                             .name = method.name.lexeme,
                             .module_path = self.module.filepath,
                         });
@@ -328,10 +309,6 @@ pub const BindingResolver = struct {
                 try self.resolveNode(expr.expr, false);
                 try self.resolve_dot_expression(node, expr);
             },
-            .static_member_expr => |expr| {
-                try self.resolveNode(expr.expr, false);
-                try self.resolve_static_member_expression(node, expr);
-            },
             .try_expr => |expr| try self.resolveNode(expr.expr, false),
             .resume_expr => |expr| {
                 try self.resolveNode(expr.expr, false);
@@ -359,7 +336,6 @@ pub const BindingResolver = struct {
     }
 
     fn resolveStructDecl(self: *BindingResolver, node: *AST.ASTNode, decl: *AST.StructDecl) BindingResolverError!void {
-        // TODO: public visibility for static fields/methods - currently ignored
         _ = node;
 
         for (decl.fields) |field| {
@@ -381,6 +357,22 @@ pub const BindingResolver = struct {
         try self.resolveNode(decl.initializer, false);
         const type_id = if (decl.type_annotation) |annotated| try self.registry.resolve(annotated) else resolved_type_of(decl.initializer);
         const ref: AST.DeclRef = .{ .node = node };
+        if (direct_program_decl and decl.is_const) {
+            const value = ConstValue.from_literal(decl.initializer) orelse {
+                try self.fail("Module-level constant is not a literal.", "Run type checking before binding resolution.", decl.line, decl.column);
+                return BindingResolverError.MissingBinding;
+            };
+            try self.putDeclBinding(ref, .{
+                .kind = .constant,
+                .slot = 0,
+                .type_id = type_id,
+                .decl = ref,
+                .name = decl.name.lexeme,
+                .module_path = self.module.filepath,
+                .const_value = value,
+            });
+            return;
+        }
         if (direct_program_decl) {
             try self.putDeclBinding(ref, .{
                 .kind = .global,
@@ -456,10 +448,10 @@ pub const BindingResolver = struct {
 
         // hidden local slot for the ObjectRange
         const range_ref: AST.DeclRef = .{ .node = stmt.iterator_expr };
-        try self.registerLocal(range_ref, "$range", @intFromEnum(PrimitiveType.Never));
+        try self.registerLocal(range_ref, "$range", @backingInt(PrimitiveType.Never));
 
         // user visible iterator variable
-        try self.registerLocal(.{ .node = node }, stmt.iterator_name.lexeme, @intFromEnum(PrimitiveType.Int));
+        try self.registerLocal(.{ .node = node }, stmt.iterator_name.lexeme, @backingInt(PrimitiveType.Int));
 
         try self.resolveNode(stmt.body, false);
         const current = self.current_function();
@@ -496,6 +488,20 @@ pub const BindingResolver = struct {
 
     fn resolve_dot_expression(self: *BindingResolver, node: *AST.ASTNode, expr: *AST.DotExpr) !void {
         const obj_type = resolved_type_of(expr.expr);
+        // Variant access and instance-member access are distinguished by the receiver
+        var receiver_is_type_symbol = false;
+        if (expr.expr.* == .identifier_expr) {
+            // check if the receiver is a type symbol
+            const recv_decl = expr.expr.identifier_expr.resolved_decl orelse {
+                try self.fail("Receiver has no runtime binding.", "The resolver and type checker disagree about this symbol.", expr.line, expr.column);
+                return BindingResolverError.MissingBinding;
+            };
+            const recv_binding = self.find_binding(recv_decl) orelse {
+                try self.fail("Receiver declaration has no runtime binding.", "The resolver and type checker disagree about this symbol.", expr.line, expr.column);
+                return BindingResolverError.MissingBinding;
+            };
+            receiver_is_type_symbol = recv_binding.kind == .comptime_type;
+        }
         switch (self.registry.get_type_info(obj_type)) {
             .tuple => |items| {
                 const index = std.fmt.parseInt(u16, expr.member.lexeme, 10) catch return;
@@ -505,65 +511,54 @@ pub const BindingResolver = struct {
                 }
             },
             ._struct => |info| {
+                if (receiver_is_type_symbol) {
+                    for (info.methods) |method| {
+                        if (!std.mem.eql(u8, method.name, expr.member.lexeme)) continue;
+                        const takes_receiver = switch (method.method_node.*) { .fn_decl => |d| d.params.len > 0 and std.mem.eql(u8, d.params[0].name.lexeme, "self"), .co_decl => |d| d.params.len > 0 and std.mem.eql(u8, d.params[0].name.lexeme, "self"), else => false };
+                        if (takes_receiver) {
+                            try self.fail("Instance method requires a value receiver.", "Call this method on a struct instance; only associated functions can be called through the type name.", expr.line, expr.column);
+                            return BindingResolverError.MissingBinding;
+                        }
+                        const binding = self.find_binding(.{ .node = method.method_node }) orelse return BindingResolverError.MissingBinding;
+                        try self.result.member_infos.put(node, .{ .method = .{ .index = binding.slot, .type_id = method.type, .takes_receiver = false } });
+                        return;
+                    }
+                    try self.fail("Struct has no associated function with this name.", null, expr.line, expr.column);
+                    return BindingResolverError.MissingBinding;
+                }
                 // instance fields are stored on the struct instance
                 // so the instance_field_index is the index into that array of values at runtime
                 var instance_field_index: u16 = 0;
                 for (info.fields) |field| {
-                    if (!field.is_static) {
-                        if (std.mem.eql(u8, field.name, expr.member.lexeme)) {
-                            try self.result.member_infos.put(node, .{ .field = .{ .index = instance_field_index, .type_id = field.type } });
-                            return;
-                        }
-                        instance_field_index += 1;
+                    if (std.mem.eql(u8, field.name, expr.member.lexeme)) {
+                        try self.result.member_infos.put(node, .{ .field = .{ .index = instance_field_index, .type_id = field.type } });
+                        return;
                     }
+                    instance_field_index += 1;
                 }
 
                 // methods are stored in the function constants array
                 for (info.methods) |method| {
-                    if (!method.is_static and std.mem.eql(u8, method.name, expr.member.lexeme)) {
-                        const method_binding = self.result.declaration_bindings.get(.{ .node = method.method_node }) orelse {
+                    if (std.mem.eql(u8, method.name, expr.member.lexeme)) {
+                        const method_binding = self.find_binding(.{ .node = method.method_node }) orelse {
                             try self.fail("Method binding not found.", null, expr.line, expr.column);
                             return BindingResolverError.MissingBinding;
                         };
-                        try self.result.member_infos.put(node, .{ .method = .{ .index = method_binding.slot, .type_id = method.type } });
-                        return;
-                    }
-                }
-            },
-            else => {},
-        }
-    }
-
-    fn resolve_static_member_expression(self: *BindingResolver, node: *AST.ASTNode, expr: *AST.StaticMemberExpr) !void {
-        const obj_type = resolved_type_of(expr.expr);
-        switch (self.registry.get_type_info(obj_type)) {
-            ._struct => |info| {
-                // Check static fields
-                for (info.fields, 0..) |field, field_idx| {
-                    if (field.is_static and std.mem.eql(u8, field.name, expr.member.lexeme)) {
-                        const field_ref: AST.DeclRef = .{ .static_field = .{ .type_id = obj_type, .index = @intCast(field_idx) } };
-                        const binding = self.result.declaration_bindings.get(field_ref) orelse {
-                            try self.fail("Static field binding not found.", null, expr.line, expr.column);
+                        const takes_receiver = switch (method.method_node.*) { .fn_decl => |d| d.params.len > 0 and std.mem.eql(u8, d.params[0].name.lexeme, "self"), .co_decl => |d| d.params.len > 0 and std.mem.eql(u8, d.params[0].name.lexeme, "self"), else => false };
+                        if (!takes_receiver) {
+                            try self.fail("Associated function requires the struct type.", "Call this function through the struct name, not an instance.", expr.line, expr.column);
                             return BindingResolverError.MissingBinding;
-                        };
-                        try self.result.member_infos.put(node, .{ .static_field = .{ .index = binding.slot, .type_id = field.type } });
-                        return;
-                    }
-                }
-
-                // Check static methods
-                for (info.methods) |method| {
-                    if (method.is_static and std.mem.eql(u8, method.name, expr.member.lexeme)) {
-                        const method_binding = self.result.declaration_bindings.get(.{ .node = method.method_node }) orelse {
-                            try self.fail("Static method binding not found.", null, expr.line, expr.column);
-                            return BindingResolverError.MissingBinding;
-                        };
-                        try self.result.member_infos.put(node, .{ .static_method = .{ .index = method_binding.slot, .type_id = method.type } });
+                        }
+                        try self.result.member_infos.put(node, .{ .method = .{ .index = method_binding.slot, .type_id = method.type, .takes_receiver = true } });
                         return;
                     }
                 }
             },
             ._enum => |info| {
+                if (!receiver_is_type_symbol) {
+                    try self.fail("Variant access requires the type name.", "Enum variants are constants; write `EnumType.<variant>`, not `value.<variant>`.", expr.line, expr.column);
+                    return BindingResolverError.MissingBinding;
+                }
                 for (info.variants, 0..) |variant, index| {
                     if (std.mem.eql(u8, variant, expr.member.lexeme)) {
                         try self.result.member_infos.put(node, .{ .enum_variant = .{ .index = @intCast(index), .type_id = obj_type } });
@@ -572,6 +567,10 @@ pub const BindingResolver = struct {
                 }
             },
             ._error => |info| {
+                if (!receiver_is_type_symbol) {
+                    try self.fail("Variant access requires the type name.", "Error variants are constants; write `ErrorType.<variant>`, not `value.<variant>`.", expr.line, expr.column);
+                    return BindingResolverError.MissingBinding;
+                }
                 for (info.variants, 0..) |variant, index| {
                     if (std.mem.eql(u8, variant, expr.member.lexeme)) {
                         try self.result.member_infos.put(node, .{ .error_variant = .{ .index = @intCast(index), .type_id = obj_type } });
@@ -605,13 +604,15 @@ pub const BindingResolver = struct {
     }
 
     fn registerCallableParams(self: *BindingResolver, func: *AST.ASTNode, params: []*AST.TypedNamedField, arg_types: []AST.TypeId) !void {
-        const offset: usize = if (arg_types.len == params.len + 1) 1 else 0;
+        const explicit_self = params.len > 0 and std.mem.eql(u8, params[0].name.lexeme, "self");
+        const offset: usize = if (explicit_self) 1 else 0;
         if (offset == 1) {
             const ref: AST.DeclRef = .{ .param = .{ .func = func, .index = 0 } };
             try self.registerParam(ref, "self", arg_types[0]);
         }
 
-        for (params, arg_types[offset..], 0..) |param, type_id, index| {
+        const source_params = if (explicit_self) params[1..] else params;
+        for (source_params, arg_types[offset..], 0..) |param, type_id, index| {
             const slot: u32 = @intCast(index + offset);
             const ref: AST.DeclRef = .{ .param = .{ .func = func, .index = slot } };
             try self.registerParam(ref, param.name.lexeme, type_id);
@@ -781,8 +782,15 @@ pub const BindingResolver = struct {
         const decl = node.fn_decl;
         var param_types: std.ArrayList(AST.TypeId) = .empty;
         defer param_types.deinit(self.allocator);
-        if (self_type) |st| try param_types.append(self.allocator, st);
-        for (decl.params) |param| try param_types.append(self.allocator, try self.registry.resolve(param.type_annotation));
+        const has_self = self_type != null and decl.params.len > 0 and std.mem.eql(u8, decl.params[0].name.lexeme, "self");
+        if (has_self) try param_types.append(self.allocator, self_type.?);
+        for (decl.params, 0..) |param, index| {
+            if (std.mem.eql(u8, param.name.lexeme, "self")) {
+                if (!has_self or index != 0 or param.type_annotation.* != .nil_type) return BindingResolverError.MissingBinding;
+                continue;
+            }
+            try param_types.append(self.allocator, try self.registry.resolve(param.type_annotation));
+        }
         return self.registry.add_function_type(try param_types.toOwnedSlice(self.allocator), try self.registry.resolve(decl.return_type_annotation));
     }
 
@@ -793,8 +801,15 @@ pub const BindingResolver = struct {
         const decl = node.co_decl;
         var param_types: std.ArrayList(AST.TypeId) = .empty;
         defer param_types.deinit(self.allocator);
-        if (self_type) |st| try param_types.append(self.allocator, st);
-        for (decl.params) |param| try param_types.append(self.allocator, try self.registry.resolve(param.type_annotation));
+        const has_self = self_type != null and decl.params.len > 0 and std.mem.eql(u8, decl.params[0].name.lexeme, "self");
+        if (has_self) try param_types.append(self.allocator, self_type.?);
+        for (decl.params, 0..) |param, index| {
+            if (std.mem.eql(u8, param.name.lexeme, "self")) {
+                if (!has_self or index != 0 or param.type_annotation.* != .nil_type) return BindingResolverError.MissingBinding;
+                continue;
+            }
+            try param_types.append(self.allocator, try self.registry.resolve(param.type_annotation));
+        }
         return self.registry.add_coroutine_type(try param_types.toOwnedSlice(self.allocator), try self.registry.resolve(decl.yield_type_annotation), try self.registry.resolve(decl.resume_with_type_annotation), try self.registry.resolve(decl.return_type_annotation));
     }
 
@@ -812,15 +827,24 @@ pub const BindingResolver = struct {
         return BindingResolverError.MissingBinding;
     }
 
-    fn importBindingKind(self: *BindingResolver, type_id: AST.TypeId, import_name: []const u8) BindingKind {
-        const info = self.registry.get_type_info(type_id);
-        return switch (info) {
-            ._struct => |named| if (std.mem.eql(u8, named.name, import_name)) .comptime_type else .imported_global,
-            ._enum => |named| if (std.mem.eql(u8, named.name, import_name)) .comptime_type else .imported_global,
-            ._error => |named| if (std.mem.eql(u8, named.name, import_name)) .comptime_type else .imported_global,
-            ._type => |named| if (std.mem.eql(u8, named.name, import_name)) .comptime_type else .imported_global,
-            else => .imported_global,
-        };
+    fn exported_binding(self: *BindingResolver, decl: *AST.UseDecl, item: AST.ImportItem) !BindingInfo {
+        const imported = self.workspace.modules.get(decl.resolved_module_path) orelse return BindingResolverError.MissingBinding;
+        const node = imported.export_nodes.get(item.name.lexeme) orelse return BindingResolverError.MissingBinding;
+        // Direct exports are bound in the imported module. Re-exports (`pub use`) keep the
+        // original declaration node, whose binding belongs to its defining module.
+        return imported.binding_resolution.declaration_bindings.get(.{ .node = node }) orelse
+            self.find_binding(.{ .node = node }) orelse
+            BindingResolverError.MissingBinding;
+    }
+
+    /// Slots are unique program-wide, so the declaring module's binding is the right one.
+    fn find_binding(self: *BindingResolver, ref: AST.DeclRef) ?BindingInfo {
+        if (self.result.declaration_bindings.get(ref)) |b| return b;
+        var it = self.workspace.modules.valueIterator();
+        while (it.next()) |module| {
+            if (module.*.binding_resolution.declaration_bindings.get(ref)) |b| return b;
+        }
+        return null;
     }
 
     fn fail(self: *BindingResolver, message: []const u8, hint: ?[]const u8, line: usize, col: usize) BindingResolverError!void {
@@ -836,17 +860,6 @@ pub const BindingResolver = struct {
     }
 };
 
-/// Gets the binding info for a variable with the given name in the specified module
-fn find_exported_binding(module: *Module, name: []const u8) ?BindingInfo {
-    var iterator = module.binding_resolution.declaration_bindings.valueIterator();
-    while (iterator.next()) |info| {
-        if (std.mem.eql(u89, info.name, name)) {
-            return info.*;
-        }
-    }
-    return null;
-}
-
 fn resolved_type_of(node: *AST.ASTNode) AST.TypeId {
     return switch (node.*) {
         .assign_expr => |v| v.resolved_type,
@@ -857,7 +870,6 @@ fn resolved_type_of(node: *AST.ASTNode) AST.TypeId {
         .index_expr => |v| v.resolved_type,
         .array_expr => |v| v.resolved_type,
         .dot_expr => |v| v.resolved_type,
-        .static_member_expr => |v| v.resolved_type,
         .try_expr => |v| v.resolved_type,
         .resume_expr => |v| v.resolved_type,
         .group_expr => |v| v.resolved_type,
@@ -907,7 +919,6 @@ fn node_position(node: *AST.ASTNode) NodePosition {
         .index_expr => |v| .{ .line = v.line, .column = v.column },
         .array_expr => |v| .{ .line = v.line, .column = v.column },
         .dot_expr => |v| .{ .line = v.line, .column = v.column },
-        .static_member_expr => |v| .{ .line = v.line, .column = v.column },
         .try_expr => |v| .{ .line = v.line, .column = v.column },
         .resume_expr => |v| .{ .line = v.line, .column = v.column },
         .group_expr => |v| .{ .line = v.line, .column = v.column },

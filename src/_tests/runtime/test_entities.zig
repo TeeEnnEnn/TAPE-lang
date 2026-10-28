@@ -27,7 +27,7 @@ test "table_set table_get and table_delete use open addressing" {
     const vm = try VM.init(.{}, &workspace, allocator);
     defer vm.deinit();
 
-    const isolate = try vm.new_isolate();
+    const isolate = try vm.new_isolate(@intCast(vm.config.globals_size), 256);
     const table = try Entities.new_table_object(isolate);
     try isolate.push_value(.{ .object = &table.header });
 

@@ -13,7 +13,7 @@ fn resolveType(allocator: std.mem.Allocator, registry: *TypeRegistry, type_str: 
     var group = std.Io.Group.init;
     var workspace = Workspace.init(allocator, io);
     defer workspace.deinit();
-    const mod = try Module.init("test", source, allocator);
+    const mod = try Module.init("test", source, allocator, true);
     var p = try Parser.init(allocator, &workspace, mod, io, &group);
     const node = try p.parse();
     const var_decl = node.program.declarations[0].var_decl;
@@ -29,13 +29,13 @@ test "TypeRegistry - Primitive Types" {
     defer registry.deinit();
 
     const int_id = try resolveType(allocator, &registry, "Int");
-    try std.testing.expectEqual(@intFromEnum(PrimitiveType.Int), int_id);
+    try std.testing.expectEqual(@backingInt(PrimitiveType.Int), int_id);
 
     const string_id = try resolveType(allocator, &registry, "String");
-    try std.testing.expectEqual(@intFromEnum(PrimitiveType.String), string_id);
+    try std.testing.expectEqual(@backingInt(PrimitiveType.String), string_id);
 
     const float_id = try resolveType(allocator, &registry, "Float");
-    try std.testing.expectEqual(@intFromEnum(PrimitiveType.Float), float_id);
+    try std.testing.expectEqual(@backingInt(PrimitiveType.Float), float_id);
 }
 
 test "TypeRegistry - Array Types" {

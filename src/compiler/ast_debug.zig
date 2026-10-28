@@ -34,7 +34,6 @@ pub fn print_node(node: *AST.ASTNode, depth: usize, indent_amt: usize) void {
             std.debug.print("FnDecl: {s}", .{fn_decl.name.lexeme});
             write_location(fn_decl.line, fn_decl.column);
             if (fn_decl.modifier_pub) std.debug.print(" pub", .{});
-            if (fn_decl.modifier_static) std.debug.print(" static", .{});
             std.debug.print("\n", .{});
             for (fn_decl.params) |param| {
                 indent(depth + 1, indent_amt);
@@ -60,7 +59,6 @@ pub fn print_node(node: *AST.ASTNode, depth: usize, indent_amt: usize) void {
                 indent(depth + 1, indent_amt);
                 std.debug.print("Field: {s}", .{field.name.lexeme});
                 if (field.is_pub) std.debug.print(" pub", .{});
-                if (field.is_static) std.debug.print(" static", .{});
                 if (field.has_default) std.debug.print(" default", .{});
                 std.debug.print("\n", .{});
                 print_node(field.type_annotation, depth + 2, indent_amt);
@@ -74,7 +72,6 @@ pub fn print_node(node: *AST.ASTNode, depth: usize, indent_amt: usize) void {
                 indent(depth + 1, indent_amt);
                 std.debug.print("Method: {s}", .{method.name.lexeme});
                 if (method.is_pub) std.debug.print(" pub", .{});
-                if (method.is_static) std.debug.print(" static", .{});
                 std.debug.print("\n", .{});
                 print_node(method.method, depth + 2, indent_amt);
             }
@@ -103,7 +100,6 @@ pub fn print_node(node: *AST.ASTNode, depth: usize, indent_amt: usize) void {
             std.debug.print("CoDecl: {s}", .{co_decl.name.lexeme});
             write_location(co_decl.line, co_decl.column);
             if (co_decl.modifier_pub) std.debug.print(" pub", .{});
-            if (co_decl.modifier_static) std.debug.print(" static", .{});
             std.debug.print("\n", .{});
             for (co_decl.params) |param| {
                 indent(depth + 1, indent_amt);
@@ -383,12 +379,6 @@ pub fn print_node(node: *AST.ASTNode, depth: usize, indent_amt: usize) void {
             write_location(return_stmt.line, return_stmt.column);
             std.debug.print("\n", .{});
             if (return_stmt.expr) |expr| print_node(expr, depth + 1, indent_amt);
-        },
-        .static_member_expr => |static_member_expr| {
-            std.debug.print("StaticMemberExpr: ::{s}", .{static_member_expr.member.lexeme});
-            write_location(static_member_expr.line, static_member_expr.column);
-            std.debug.print("\n", .{});
-            print_node(static_member_expr.expr, depth + 1, indent_amt);
         },
         .str_lit => |str_lit| {
             std.debug.print("StrLit: \"{s}\"", .{str_lit.value});

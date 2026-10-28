@@ -1,5 +1,6 @@
 const std = @import("std");
 const Parser = @import("../../compiler/parser.zig").Parser;
+const ParserError = @import("../../compiler/parser.zig").ParserError;
 const AST = @import("../../compiler/ast.zig");
 const Workspace = @import("../../compiler/workspace.zig").Workspace;
 const Module = @import("../../compiler/workspace.zig").Module;
@@ -9,7 +10,7 @@ fn parseFirstDecl(allocator: std.mem.Allocator, source: []const u8) !*AST.ASTNod
     var group = std.Io.Group.init;
     var workspace = Workspace.init(allocator, io);
     defer workspace.deinit();
-    const mod = try Module.init("test", source, allocator);
+    const mod = try Module.init("test", source, allocator, true);
     var p = try Parser.init(allocator, &workspace, mod, io, &group);
     const node = try p.parse();
     try std.testing.expect(node.* == .program);
@@ -286,17 +287,6 @@ test "Parser can parse for statement with var iterator" {
     try std.testing.expectEqualStrings("..", node.for_stmt.iterator_expr.binary_expr.operator.lexeme);
 }
 
-test "Parser can parse Color::Red expression" {
-    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
-    defer arena.deinit();
-    const allocator = arena.allocator();
-
-    const node = try parseFirstDecl(allocator, "Color::Red;");
-    try std.testing.expect(node.* == .expr_stmt);
-    try std.testing.expect(node.expr_stmt.expr.* == .static_member_expr);
-    try std.testing.expectEqualStrings("Red", node.expr_stmt.expr.static_member_expr.member.lexeme);
-}
-
 test "Parser can parse struct methods" {
     var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
     defer arena.deinit();
@@ -356,4 +346,73 @@ test "Parser can parse use declaration with multiple imports" {
     try std.testing.expectEqual(@as(usize, 2), use_decl.items.len);
     try std.testing.expectEqualStrings("foo", use_decl.items[0].name.lexeme);
     try std.testing.expectEqualStrings("bar", use_decl.items[1].name.lexeme);
+}
+
+test "Parser rejects pub var" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const allocator = arena.allocator();
+    const io = std.testing.io;
+    var group = std.Io.Group.init;
+    var workspace = Workspace.init(allocator, io);
+    defer workspace.deinit();
+    const mod = try Module.init("test", "pub var x = 10;", allocator, true);
+    var p = try Parser.init(allocator, &workspace, mod, io, &group);
+    try std.testing.expectError(ParserError.UnexpectedToken, p.parse());
+}
+
+test "Parser rejects top-level var in a non-entrypoint module" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const allocator = arena.allocator();
+    const io = std.testing.io;
+    var group = std.Io.Group.init;
+    var workspace = Workspace.init(allocator, io);
+    defer workspace.deinit();
+    const mod = try Module.init("test", "var x = 10;", allocator, false);
+    var p = try Parser.init(allocator, &workspace, mod, io, &group);
+    try std.testing.expectError(ParserError.UnexpectedToken, p.parse());
+}
+
+test "Parser rejects top-level statements in a non-entrypoint module" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const allocator = arena.allocator();
+    const io = std.testing.io;
+    var group = std.Io.Group.init;
+    var workspace = Workspace.init(allocator, io);
+    defer workspace.deinit();
+    const mod = try Module.init("test", "1 + 1;", allocator, false);
+    var p = try Parser.init(allocator, &workspace, mod, io, &group);
+    try std.testing.expectError(ParserError.UnexpectedToken, p.parse());
+}
+
+test "Parser allows fn bodies and locals inside non-entrypoint modules" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const allocator = arena.allocator();
+    const io = std.testing.io;
+    var group = std.Io.Group.init;
+    var workspace = Workspace.init(allocator, io);
+    defer workspace.deinit();
+    const mod = try Module.init("test", "fn hi() -> Int { var n = 3; return n; }", allocator, false);
+    var p = try Parser.init(allocator, &workspace, mod, io, &group);
+    const program = try p.parse();
+    try std.testing.expectEqual(@as(usize, 1), program.program.declarations.len);
+}
+
+test "Parser accepts pub use for re-exports" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const allocator = arena.allocator();
+    const io = std.testing.io;
+    var group = std.Io.Group.init;
+    var workspace = Workspace.init(allocator, io);
+    defer workspace.deinit();
+    const mod = try Module.init("test", "pub use x from \"lib.tape\";", allocator, true);
+    var p = try Parser.init(allocator, &workspace, mod, io, &group);
+    const program = try p.parse();
+    try std.testing.expectEqual(@as(usize, 1), program.program.declarations.len);
+    try std.testing.expect(program.program.declarations[0].* == .use_decl);
+    try std.testing.expect(program.program.declarations[0].use_decl.modifier_pub);
 }
