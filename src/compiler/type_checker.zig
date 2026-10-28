@@ -47,7 +47,10 @@ pub const TypeCheckerError = error{
     /// Trying to reassignment a constant
     ConstantReassignmentAttempt,
     /// An exported constant was initialized with a non constant value
+    /// The export would leak state that is not compile-time knowable.
     NonConstantExport,
+    /// A public fn/co signature names a type that is not itself public.
+    NonPublicTypeExport,
     /// A try statement used outside of a function
     TryOutsideFunction,
     /// Invalid function return type
@@ -81,6 +84,8 @@ pub const TypeChecker = struct {
     in_loop: bool = false,
     in_coroutine: bool = false,
     in_function: bool = false,
+    current_struct_type: ?AST.TypeId = null,
+    current_struct_is_pub: bool = false,
 
     /// Set whenever a `yield` expression is type-checked so the enclosing
     /// statement/block can propagate the (existential) yield signal.
@@ -127,6 +132,79 @@ pub const TypeChecker = struct {
         try self.module.export_nodes.put(name, node);
     }
 
+    /// Private fields and methods are accessible only while checking a method of
+    /// their declaring struct. File location does not affect member visibility.
+    fn can_access_private_members(self: *TypeChecker, struct_type: AST.TypeId) bool {
+        return self.current_struct_type != null and self.current_struct_type.? == struct_type;
+    }
+
+    /// A `pub fn`/`pub co` signature may only name types that are themselves exported:
+    /// importers must be able to name every type they touch.
+    /// Ensure that all types named in a pub signature are exported
+    fn check_pub_signature(self: *TypeChecker, type_ids: []const AST.TypeId, line: usize, column: usize) TypeCheckerError!void {
+        var visited = std.AutoHashMap(AST.TypeId, void).init(self.allocator);
+        defer visited.deinit();
+        for (type_ids) |type_id| {
+            try self.require_pub_type(type_id, line, column, &visited);
+        }
+    }
+
+    fn require_pub_type(self: *TypeChecker, type_id: AST.TypeId, line: usize, column: usize, visited: *std.AutoHashMap(AST.TypeId, void)) TypeCheckerError!void {
+        if (visited.get(type_id) != null) return; // recursive alias/type cycle guard
+        try visited.put(type_id, {});
+
+        const type_info = self.registry.get_type_info(type_id);
+        if (self.named_type_of(type_info)) |named| {
+            const decl_module = self.workspace.modules.get(named.source_file) orelse return;
+            if (!decl_module.exports.contains(named.name)) {
+                try self.fail("Non-public type in public signature", "Every named type in a public signature must also be public.", line, column);
+                return TypeCheckerError.NonPublicTypeExport;
+            }
+            // a public alias must not launder a non-public underlying type either
+            if (type_info == ._type) {
+                try self.require_pub_type(type_info._type.resolved_type, line, column, visited);
+            }
+            return;
+        }
+        switch (type_info) {
+            .array => |elem| try self.require_pub_type(elem, line, column, visited),
+            .tuple => |items| {
+                for (items) |item| try self.require_pub_type(item, line, column, visited);
+            },
+            .table => |t| {
+                try self.require_pub_type(t.key, line, column, visited);
+                try self.require_pub_type(t.value, line, column, visited);
+            },
+            ._union => |u| {
+                try self.require_pub_type(u.left, line, column, visited);
+                try self.require_pub_type(u.right, line, column, visited);
+            },
+            .function => |f| {
+                for (f.args) |arg| try self.require_pub_type(arg, line, column, visited);
+                try self.require_pub_type(f.ret, line, column, visited);
+            },
+            .coroutine => |c| {
+                for (c.args) |arg| try self.require_pub_type(arg, line, column, visited);
+                try self.require_pub_type(c.ret, line, column, visited);
+            },
+            else => {}, // primitives are always public
+        }
+    }
+
+    /// Extracts `name`/`source_file` from the named type shapes, or null for
+    /// structural/primitive types.
+    fn named_type_of(self: *TypeChecker, type_info: TypeRegistry.TypeInfo) ?struct { name: []const u8, source_file: []const u8 } {
+        _ = self;
+        return switch (type_info) {
+            ._struct => |s| .{ .name = s.name, .source_file = s.source_file },
+            ._enum => |e| .{ .name = e.name, .source_file = e.source_file },
+            ._error => |e| .{ .name = e.name, .source_file = e.source_file },
+            ._type => |t| .{ .name = t.name, .source_file = t.source_file },
+            .identifier => |i| .{ .name = i.name, .source_file = i.source_file },
+            else => null,
+        };
+    }
+
     fn hoist(self: *TypeChecker, node: *AST.ASTNode) TypeCheckerError!void {
         switch (node.*) {
             .program => |program| for (program.declarations) |decl| try self.hoist(decl),
@@ -138,7 +216,22 @@ pub const TypeChecker = struct {
                 for (decl.items, 0..) |item, index| {
                     const alias = item.alias orelse item.name;
                     if (imported_module.exports.get(item.name.lexeme)) |resolved_id| {
-                        try self.environment.define_binding(alias.lexeme, resolved_id, .{ .import = .{ .use_decl = node, .index = @as(u32, @intCast(index)) } }, true);
+                        const exported_node = imported_module.export_nodes.get(item.name.lexeme) orelse {
+                            try self.fail("Imported symbol has no export declaration.", null, item.name.line, item.name.column);
+                            return TypeCheckerError.UndefinedSymbol;
+                        };
+                        // A type symbol (not a value of that type) keeps its identity
+                        // across the module boundary, so variant access stays type-name-only.
+                        const is_type_symbol = switch (exported_node.*) {
+                            .struct_decl, .enum_decl, .error_decl, .type_decl => true,
+                            else => false,
+                        };
+                        try self.environment.define_symbol(alias.lexeme, resolved_id, .{ .import = .{ .use_decl = node, .index = @as(u32, @intCast(index)) } }, true, is_type_symbol);
+                        if (decl.modifier_pub) {
+                            // Re-export the original declaration node so further importers
+                            // retain the defining module's type identity and binding.
+                            try self.export_symbol(alias.lexeme, resolved_id, exported_node);
+                        }
                     } else {
                         try self.fail("Failed to import symbol from external module.", "Check that the module path is correct and that the symbol is exported with the 'pub' keyword.", alias.line, alias.column);
                         return TypeCheckerError.UndefinedSymbol;
@@ -194,7 +287,7 @@ pub const TypeChecker = struct {
                 // Update the struct with actual methods
                 self.registry.types.items[struct_id]._struct.methods = try method_types.toOwnedSlice(self.allocator);
 
-                try self.environment.define_binding(decl.name.lexeme, struct_id, .{ .node = node }, true);
+                try self.environment.define_type_binding(decl.name.lexeme, struct_id, .{ .node = node }, true);
                 if (decl.modifier_pub) {
                     try self.export_symbol(decl.name.lexeme, struct_id, node);
                 }
@@ -202,7 +295,7 @@ pub const TypeChecker = struct {
             .type_decl => |decl| {
                 const type_annot_id = try self.registry.resolve(decl.type_annotation);
                 const type_id = try self.registry.add_type_type(decl.name.lexeme, type_annot_id, self.module.filepath);
-                try self.environment.define_binding(decl.name.lexeme, type_id, .{ .node = node }, true);
+                try self.environment.define_type_binding(decl.name.lexeme, type_id, .{ .node = node }, true);
                 if (decl.modifier_pub) {
                     try self.export_symbol(decl.name.lexeme, type_id, node);
                 }
@@ -214,7 +307,7 @@ pub const TypeChecker = struct {
                     try variants.append(self.allocator, variant.lexeme);
                 }
                 const enum_id = try self.registry.add_enum_type(decl.name.lexeme, try variants.toOwnedSlice(self.allocator), self.module.filepath);
-                try self.environment.define_binding(decl.name.lexeme, enum_id, .{ .node = node }, true);
+                try self.environment.define_type_binding(decl.name.lexeme, enum_id, .{ .node = node }, true);
                 if (decl.modifier_pub) {
                     try self.export_symbol(decl.name.lexeme, enum_id, node);
                 }
@@ -226,7 +319,7 @@ pub const TypeChecker = struct {
                     try variants.append(self.allocator, variant.lexeme);
                 }
                 const error_id = try self.registry.add_error_type(decl.name.lexeme, try variants.toOwnedSlice(self.allocator), self.module.filepath);
-                try self.environment.define_binding(decl.name.lexeme, error_id, .{ .node = node }, true);
+                try self.environment.define_type_binding(decl.name.lexeme, error_id, .{ .node = node }, true);
                 if (decl.modifier_pub) {
                     try self.export_symbol(decl.name.lexeme, error_id, node);
                 }
@@ -288,6 +381,15 @@ pub const TypeChecker = struct {
                 if (type_info != .function) {
                     try self.fail("Not callable", "Symbol is not a function. Functions are defined with the `fn` keyword.", decl.name.line, decl.name.column);
                     return TypeCheckerError.NotCallable;
+                }
+
+                // Every type in a public signature must itself be public,
+                if (decl.modifier_pub and (self.current_struct_type == null or self.current_struct_is_pub)) {
+                    var signature: std.ArrayList(AST.TypeId) = .empty;
+                    defer signature.deinit(self.allocator);
+                    try signature.appendSlice(self.allocator, type_info.function.args);
+                    try signature.append(self.allocator, type_info.function.ret);
+                    try self.check_pub_signature(signature.items, decl.name.line, decl.name.column);
                 }
 
                 // Track expected return type
@@ -365,6 +467,13 @@ pub const TypeChecker = struct {
                 self.environment = &local_env;
                 defer self.environment = prev_env;
 
+                const prev_struct_type = self.current_struct_type;
+                const prev_struct_is_pub = self.current_struct_is_pub;
+                self.current_struct_type = struct_typeid;
+                self.current_struct_is_pub = decl.modifier_pub;
+                defer self.current_struct_type = prev_struct_type;
+                defer self.current_struct_is_pub = prev_struct_is_pub;
+
                 const type_info = self.registry.get_type_info(struct_typeid);
                 try self.environment.define_binding("self", struct_typeid, .{ .node = node }, true);
                 for (decl.methods, type_info._struct.methods) |method_decl, sm| {
@@ -386,6 +495,15 @@ pub const TypeChecker = struct {
                 if (type_info != .coroutine) {
                     try self.fail("Not callable", "Symbol is not a coroutine. Coroutines are defined with the `co` keyword.", decl.name.line, decl.name.column);
                     return TypeCheckerError.NotCallable;
+                }
+
+                // Every type named in a public signature must itself be public
+                if (decl.modifier_pub and (self.current_struct_type == null or self.current_struct_is_pub)) {
+                    var signature: std.ArrayList(AST.TypeId) = .empty;
+                    defer signature.deinit(self.allocator);
+                    try signature.appendSlice(self.allocator, type_info.coroutine.args);
+                    try signature.append(self.allocator, type_info.coroutine.ret);
+                    try self.check_pub_signature(signature.items, decl.name.line, decl.name.column);
                 }
 
                 // Track expected return type
@@ -652,7 +770,6 @@ pub const TypeChecker = struct {
 
     /// Rejects reads/writes of module-global mutable state from within a function or
     /// coroutine body. Functions must be fully compile-time knowable.
-    /// TODO: make this more strict (dot expr etc)
     fn reject_global_state_access(self: *TypeChecker, name: []const u8, info: SymbolInfo, scope: *Environment, line: usize, column: usize) TypeCheckerError!void {
         if (!self.in_function and !self.in_coroutine) return;
         if (scope.parent != null) return; // local / upvalue, allowed (closures)
@@ -930,6 +1047,10 @@ pub const TypeChecker = struct {
                     if (receiver_info == ._struct) {
                         for (receiver_info._struct.methods) |method| {
                             if (std.mem.eql(u8, method.name, dot.member.lexeme)) {
+                                if (!method.is_pub and !self.can_access_private_members(receiver_type)) {
+                                    try self.fail("Member is private", "Private methods can only be called from a method of their declaring struct.", expr.line, expr.column);
+                                    return TypeCheckerError.InvalidMemberAccess;
+                                }
                                 const method_info = self.registry.get_type_info(method.type);
                                 const args = switch (method_info) {
                                     .function => |f| f.args,
@@ -1073,6 +1194,16 @@ pub const TypeChecker = struct {
                 const obj_type = try self.check_expression(expr.expr);
                 const type_info = self.registry.get_type_info(obj_type);
 
+                // Variant access and instance-member access are distinguished by the
+                // receiver *symbol*. only a symbol that *is* a type may name its variants.
+                var receiver_is_type_symbol = false;
+                if (expr.expr.* == .identifier_expr) {
+                    const recv_info = self.environment.lookup_binding(expr.expr.identifier_expr.name.lexeme) catch {
+                        return TypeCheckerError.UndefinedSymbol;
+                    };
+                    receiver_is_type_symbol = recv_info.is_type;
+                }
+
                 switch (type_info) {
                     .tuple => |tuple| {
                         const index_value = std.fmt.parseInt(u8, expr.member.lexeme, 10) catch {
@@ -1087,8 +1218,16 @@ pub const TypeChecker = struct {
                         return tuple[index_value];
                     },
                     ._struct => |_struct| {
+                        if (receiver_is_type_symbol) {
+                            try self.fail("Type name has no members", "Struct members are accessed on an instance (`myStruct.member`), not on the type name.", expr.line, expr.column);
+                            return TypeCheckerError.InvalidMemberAccess;
+                        }
                         for (_struct.fields) |field| {
                             if (std.mem.eql(u8, field.name, expr.member.lexeme)) {
+                                if (!field.is_pub and !self.can_access_private_members(obj_type)) {
+                                    try self.fail("Member is private", "Private fields can only be accessed from a method of their declaring struct.", expr.line, expr.column);
+                                    return TypeCheckerError.InvalidMemberAccess;
+                                }
                                 expr.resolved_type = field.type;
                                 return field.type;
                             }
@@ -1098,6 +1237,10 @@ pub const TypeChecker = struct {
                                 const method_type = self.registry.get_type_info(method.type);
                                 if (method_type != .function and method_type != .coroutine) {
                                     try self.fail("Invalid Member Access", "Member is not a callable method.", expr.line, expr.column);
+                                    return TypeCheckerError.InvalidMemberAccess;
+                                }
+                                if (!method.is_pub and !self.can_access_private_members(obj_type)) {
+                                    try self.fail("Member is private", "Private methods can only be accessed from a method of their declaring struct.", expr.line, expr.column);
                                     return TypeCheckerError.InvalidMemberAccess;
                                 }
                                 expr.resolved_type = method.type;
@@ -1118,6 +1261,10 @@ pub const TypeChecker = struct {
                         }
                     },
                     ._error => |existing_error| {
+                        if (!receiver_is_type_symbol) {
+                            try self.fail("Variant access requires the type name", "Error variants are constants; write `ErrorType.<variant>`, not `value.<variant>`.", expr.line, expr.column);
+                            return TypeCheckerError.InvalidMemberAccess;
+                        }
                         for (existing_error.variants) |variant| {
                             if (std.mem.eql(u8, variant, expr.member.lexeme)) {
                                 expr.resolved_type = obj_type;
@@ -1128,6 +1275,10 @@ pub const TypeChecker = struct {
                         return TypeCheckerError.InvalidMemberAccess;
                     },
                     ._enum => |existing_enum| {
+                        if (!receiver_is_type_symbol) {
+                            try self.fail("Variant access requires the type name", "Enum variants are constants; write `EnumType.<variant>`, not `value.<variant>`.", expr.line, expr.column);
+                            return TypeCheckerError.InvalidMemberAccess;
+                        }
                         for (existing_enum.variants) |variant| {
                             if (std.mem.eql(u8, variant, expr.member.lexeme)) {
                                 expr.resolved_type = obj_type;
@@ -1238,6 +1389,22 @@ pub const TypeChecker = struct {
                 }
 
                 const struct_fields = type_info._struct.fields;
+
+                // `new` names the fields it initializes, so private fields may be
+                // initialized only from a method of the struct being constructed.
+                if (!self.can_access_private_members(struct_typeid)) {
+                    for (expr.fields) |provided| {
+                        for (struct_fields) |struct_field| {
+                            if (std.mem.eql(u8, struct_field.name, provided.name.lexeme)) {
+                                if (!struct_field.is_pub) {
+                                    try self.fail("Member is private", "Private fields can only be initialized from a method of their declaring struct.", provided.name.line, provided.name.column);
+                                    return TypeCheckerError.InvalidMemberAccess;
+                                }
+                                break;
+                            }
+                        }
+                    }
+                }
 
                 for (struct_fields) |struct_field| {
                     if (struct_field.default_value == null) {
@@ -1566,17 +1733,23 @@ pub const TypeChecker = struct {
             return TypeCheckerError.NonExhaustiveMatch;
         }
 
-        // Collect covered variants (only static_member patterns contribute)
+        // Collect covered variants. Only variant patterns contribute: the receiver must
+        // be a symbol that *is* a type (type-name access like `Weekdays.MONDAY`), and
+        // the member must actually be a variant of the matched type. A value receiver
+        // like `day.MONDAY` never counts as coverage (and is rejected in pattern checking).
         var covered = std.ArrayList([]const u8).empty;
         defer covered.deinit(self.allocator);
         for (expr.cases) |case| {
-            // TODO: NEW
-            if (case.pattern.* == .dot_expr) {
-                // get the target expression
-                // check if it evaluates to an enum or an error
-
-                // add to covered
-                try covered.append(self.allocator, case.pattern.dot_expr.member.lexeme);
+            if (case.pattern.* != .dot_expr) continue;
+            const pattern_dot = case.pattern.dot_expr;
+            if (pattern_dot.expr.* != .identifier_expr) continue;
+            const recv_info = self.environment.lookup_binding(pattern_dot.expr.identifier_expr.name.lexeme) catch continue;
+            if (!recv_info.is_type) continue;
+            for (expected_variants.items) |variant| {
+                if (std.mem.eql(u8, variant, pattern_dot.member.lexeme)) {
+                    try covered.append(self.allocator, pattern_dot.member.lexeme);
+                    break;
+                }
             }
         }
 

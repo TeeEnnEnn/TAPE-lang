@@ -16,7 +16,7 @@ fn generateSource(allocator: std.mem.Allocator, source: []const u8) ![]const u8 
     var workspace = Workspace.init(allocator, io);
     defer workspace.deinit();
 
-    const mod = try Module.init("test", source, allocator);
+    const mod = try Module.init("test", source, allocator, true);
     defer {
         mod.deinit();
         allocator.destroy(mod);

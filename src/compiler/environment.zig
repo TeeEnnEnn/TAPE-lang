@@ -13,6 +13,10 @@ pub const SymbolInfo = struct {
     type_id: TypeId,
     decl: ?DeclRef = null,
     is_const: bool,
+    /// True when this symbol *is* a type (struct, enum, error, `type`), not a runtime
+    /// value of that type. Variant access (`Weekdays.MONDAY`) is only legal on such
+    /// symbols; it is rejected on values, even though both share the same TypeId.
+    is_type: bool = false,
 };
 
 pub const Environment = struct {
@@ -37,15 +41,27 @@ pub const Environment = struct {
     /// Defines a symbol with no declaration identity. Use for types, struct/enum/error
     /// names, and anything that isn't a runtime value the codegen resolver needs to place.
     pub fn define(self: *Environment, name: []const u8, id: TypeId) EnvironmentError!void {
-        return self.define_binding(name, id, null, false);
+        return self.define_type_binding(name, id, null, true);
+    }
+
+    /// Defines a type symbol (struct, enum, error, `type`). Only symbols defined via
+    /// the `define_type*` entry points may name variants (`Weekdays.MONDAY`).
+    pub fn define_type_binding(self: *Environment, name: []const u8, id: TypeId, decl: ?DeclRef, is_const: bool) EnvironmentError!void {
+        return self.define_symbol(name, id, decl, is_const, true);
     }
 
     /// Defines a symbol with declaration identity attached, for the codegen resolver to use.
     pub fn define_binding(self: *Environment, name: []const u8, id: TypeId, decl: ?DeclRef, is_const: bool) EnvironmentError!void {
+        return self.define_symbol(name, id, decl, is_const, false);
+    }
+
+    /// Raw define, giving explicit control over the type-symbol flag (used by imports,
+    /// where the flag is derived from the exporting module's declaration).
+    pub fn define_symbol(self: *Environment, name: []const u8, id: TypeId, decl: ?DeclRef, is_const: bool, is_type: bool) EnvironmentError!void {
         if (self.symbols.contains(name)) {
             return EnvironmentError.DuplicateDefinition;
         }
-        try self.symbols.put(name, .{ .type_id = id, .decl = decl, .is_const = is_const });
+        try self.symbols.put(name, .{ .type_id = id, .decl = decl, .is_const = is_const, .is_type = is_type });
     }
 
     /// Looks up a symbol's type ID only. Existing call sites keep working unchanged.

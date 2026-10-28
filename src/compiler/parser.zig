@@ -1209,7 +1209,7 @@ pub const Parser = struct {
         try self.consume(.LEFT_BRACE, "Expected '{' to start block statement.");
         var statements: std.ArrayList(*AST.ASTNode) = .empty;
         while (!self.check(.RIGHT_BRACE) and !self.check(.EOF)) {
-            const stmt = try self.parse_declaration();
+            const stmt = try self.parse_declaration(false); // statements inside blocks are allowed in every module
             try statements.append(self.allocator, stmt);
         }
 
@@ -1507,13 +1507,27 @@ pub const Parser = struct {
         }
     }
 
-    fn parse_declaration(self: *Parser) ParserError!*AST.ASTNode {
+    /// Parses one program element. `top_level` is true only for the program's
+    /// declaration list; nested blocks (fn bodies, if/while bodies) pass false, so
+    /// statements inside them keep working even in non-entrypoint modules.
+    fn parse_declaration(self: *Parser, top_level: bool) ParserError!*AST.ASTNode {
         var is_pub = false;
         if (try self.match(.PUB)) {
             is_pub = true;
         }
 
         if (try self.match(.VAR)) {
+            if (top_level and !self.module.is_entrypoint) {
+                // A top-level `var` in an imported module is compiled but its
+                // initializer never runs, so the variable stays uninitialized forever.
+                try self.fail_at(
+                    "Top-level `var` in a non-entrypoint module never runs.",
+                    "An imported module is declaration-only (`fn`, `co`, `struct`, `enum`, `error`, `type`, `use`, `pub const`); use a `const` with a literal value, or move the mutable state to the entry module.",
+                    self.previous.line,
+                    self.previous.column,
+                );
+                return ParserError.UnexpectedToken;
+            }
             return try self.parse_var_declaration(is_pub, false);
         } else if (try self.match(.CONST)) {
             return try self.parse_var_declaration(is_pub, true);
@@ -1532,8 +1546,12 @@ pub const Parser = struct {
         } else if (try self.match(.USE)) {
             return try self.parse_use_declaration(is_pub);
         } else {
+            if (top_level and !self.module.is_entrypoint) {
+                try self.fail_at("Unexpected token", "Top level statements are not allowed in a non-entrypoint module.", self.current.line, self.current.column);
+                return ParserError.UnexpectedToken;
+            }
             if (is_pub) {
-                try self.fail("Unexpected token", "`pub` is only allowed inside struct and for top level declarations.");
+                try self.fail_at("Unexpected token", "`pub` is only allowed inside `struct` and for top level declarations.", self.current.line, self.current.column);
                 return ParserError.UnexpectedToken;
             }
             return try self.parse_statement();
@@ -1544,7 +1562,7 @@ pub const Parser = struct {
         const program = try self.allocator.create(AST.Program);
         var declarations: std.ArrayList(*AST.ASTNode) = .empty;
         while (!self.check(.EOF)) {
-            try declarations.append(self.allocator, try self.parse_declaration());
+            try declarations.append(self.allocator, try self.parse_declaration(true));
         }
         program.* = .{ .declarations = try declarations.toOwnedSlice(self.allocator) };
         const node = try self.allocator.create(AST.ASTNode);
@@ -1553,8 +1571,14 @@ pub const Parser = struct {
     }
 
     fn fail(self: *Parser, message: []const u8, hint: ?[]const u8) !void {
+        try self.fail_at(message, hint, self.scanner.line, self.scanner.column());
+    }
+
+    /// Reports a diagnostic at an explicit source position (for cases where the
+    /// scanner has already advanced past the offending token).
+    fn fail_at(self: *Parser, message: []const u8, hint: ?[]const u8, line: usize, column: usize) !void {
         try self.workspace.diagnostics_mutex.lock(self.io);
-        try self.workspace.diagnostics.add_diagnostic(.{ .column = self.scanner.column(), .line = self.scanner.line, .stage = .Parser, .severity = .Error, .message = message, .file_path = self.module.filepath, .hint = hint });
+        try self.workspace.diagnostics.add_diagnostic(.{ .column = column, .line = line, .stage = .Parser, .severity = .Error, .message = message, .file_path = self.module.filepath, .hint = hint });
         self.workspace.diagnostics_mutex.unlock(self.io);
     }
 };

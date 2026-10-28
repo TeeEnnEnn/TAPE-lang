@@ -400,7 +400,8 @@ pub const CodeGenerator = struct {
     }
 
     fn generate_struct_decl(self: *CodeGenerator, node: *AST.ASTNode, decl: *AST.StructDecl) CodeGeneratorError!void {
-        _ = node; // TODO:  check this
+        // struct node carries no runtime information
+        _ = node;
         for (decl.methods) |method| {
             switch (method.method.*) {
                 .fn_decl => try self.generate_callable_decl(method.method, @ptrCast(method.method.fn_decl), AST.FnDecl),
@@ -958,7 +959,7 @@ pub const CodeGenerator = struct {
                 };
                 try self.emit_const_value(value, expr.line);
             },
-            .global, .imported_global => {
+            .global => {
                 try self.current.chunk().write_opcode(.OP_LOAD_GLOBAL, expr.line);
                 try self.current.chunk().write_u16(binding.slot, expr.line);
             },

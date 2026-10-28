@@ -21,7 +21,7 @@ test "Binding Resolver - registers implicit self param for methods" {
     var workspace = Workspace.init(allocator, io);
     defer workspace.deinit();
 
-    const mod = try Module.init("test", source, allocator);
+    const mod = try Module.init("test", source, allocator, true);
     defer {
         mod.deinit();
         allocator.destroy(mod);

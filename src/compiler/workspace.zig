@@ -90,8 +90,9 @@ pub const Module = struct {
     visit_state: ModuleVisitState = .NotVisited,
     function: *Entities.ObjectFunction,
     allocator: std.mem.Allocator,
+    is_entrypoint: bool,
 
-    pub fn init(filepath: []const u8, file_contents: []const u8, allocator: std.mem.Allocator) !*Module {
+    pub fn init(filepath: []const u8, file_contents: []const u8, allocator: std.mem.Allocator, is_entrypoint: bool) !*Module {
         const module = try allocator.create(Module);
         module.* = Module{
             .filepath = filepath,
@@ -106,6 +107,7 @@ pub const Module = struct {
             .dependencies = .empty,
             .function = undefined,
             .allocator = allocator,
+            .is_entrypoint = is_entrypoint,
         };
         return module;
     }
@@ -216,7 +218,7 @@ pub const Workspace = struct {
             };
         };
 
-        const entrypoint_module = try Module.init(entrypoint_absolute, file_contents, self.allocator);
+        const entrypoint_module = try Module.init(entrypoint_absolute, file_contents, self.allocator, true);
         errdefer {
             self.allocator.free(file_contents);
             self.allocator.free(entrypoint_absolute);
@@ -245,6 +247,7 @@ pub const Workspace = struct {
 
         // sort modules
         const sorted_modules = try self.sort_modules(entrypoint_module);
+        defer self.allocator.free(sorted_modules);
 
         if (compile_options.debug.ast) {
             for (sorted_modules) |module| print_node(module.ast, 0, 4);
@@ -388,8 +391,7 @@ pub const Workspace = struct {
                 });
                 return;
             };
-
-            module = try Module.init(resolved_filepath, file_contents, self.allocator);
+            module = try Module.init(resolved_filepath, file_contents, self.allocator, false);
             try self.modules.put(resolved_filepath, module);
             is_new = true;
             // resolved_filepath is now owned by the module and modules HashMap
@@ -469,7 +471,7 @@ pub const Workspace = struct {
     fn worker_parse_module(param: ParserWorkerParam) void {
         if (param.workspace.debug.pipeline) std.debug.print("Starting parsing {s}\n", .{param.module.filepath});
 
-        var parser = Parser.init(param.module.arena.allocator(), param.workspace, param.module, param.io, param.group) catch {
+        var parser = Parser.init(param.module.arena.allocator(), param.workspace, param.module, param.io, param.group) catch |err| {
             param.workspace.diagnostics_mutex.lock(param.io) catch {};
             defer param.workspace.diagnostics_mutex.unlock(param.io);
 
@@ -480,6 +482,7 @@ pub const Workspace = struct {
                 .severity = .Error,
                 .message = "Failed to create parser",
                 .file_path = param.module.filepath,
+                .hint = @errorName(err),
             }) catch {};
 
             param.module.mutex.lock(param.io) catch {};

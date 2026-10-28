@@ -21,8 +21,6 @@ pub const BindingResolverError = error{
 pub const BindingKind = enum {
     /// a global
     global,
-    /// A global imported from a different module
-    imported_global,
     /// A value used within a scope
     local,
     /// A value passed to a function
@@ -490,6 +488,20 @@ pub const BindingResolver = struct {
 
     fn resolve_dot_expression(self: *BindingResolver, node: *AST.ASTNode, expr: *AST.DotExpr) !void {
         const obj_type = resolved_type_of(expr.expr);
+        // Variant access and instance-member access are distinguished by the receiver
+        var receiver_is_type_symbol = false;
+        if (expr.expr.* == .identifier_expr) {
+            // check if the receiver is a type symbol
+            const recv_decl = expr.expr.identifier_expr.resolved_decl orelse {
+                try self.fail("Receiver has no runtime binding.", "The resolver and type checker disagree about this symbol.", expr.line, expr.column);
+                return BindingResolverError.MissingBinding;
+            };
+            const recv_binding = self.find_binding(recv_decl) orelse {
+                try self.fail("Receiver declaration has no runtime binding.", "The resolver and type checker disagree about this symbol.", expr.line, expr.column);
+                return BindingResolverError.MissingBinding;
+            };
+            receiver_is_type_symbol = recv_binding.kind == .comptime_type;
+        }
         switch (self.registry.get_type_info(obj_type)) {
             .tuple => |items| {
                 const index = std.fmt.parseInt(u16, expr.member.lexeme, 10) catch return;
@@ -499,6 +511,10 @@ pub const BindingResolver = struct {
                 }
             },
             ._struct => |info| {
+                if (receiver_is_type_symbol) {
+                    try self.fail("Type name has no members.", "Struct members are accessed on an instance (`myStruct.member`), not on the type name.", expr.line, expr.column);
+                    return BindingResolverError.MissingBinding;
+                }
                 // instance fields are stored on the struct instance
                 // so the instance_field_index is the index into that array of values at runtime
                 var instance_field_index: u16 = 0;
@@ -523,6 +539,10 @@ pub const BindingResolver = struct {
                 }
             },
             ._enum => |info| {
+                if (!receiver_is_type_symbol) {
+                    try self.fail("Variant access requires the type name.", "Enum variants are constants; write `EnumType.<variant>`, not `value.<variant>`.", expr.line, expr.column);
+                    return BindingResolverError.MissingBinding;
+                }
                 for (info.variants, 0..) |variant, index| {
                     if (std.mem.eql(u8, variant, expr.member.lexeme)) {
                         try self.result.member_infos.put(node, .{ .enum_variant = .{ .index = @intCast(index), .type_id = obj_type } });
@@ -531,6 +551,10 @@ pub const BindingResolver = struct {
                 }
             },
             ._error => |info| {
+                if (!receiver_is_type_symbol) {
+                    try self.fail("Variant access requires the type name.", "Error variants are constants; write `ErrorType.<variant>`, not `value.<variant>`.", expr.line, expr.column);
+                    return BindingResolverError.MissingBinding;
+                }
                 for (info.variants, 0..) |variant, index| {
                     if (std.mem.eql(u8, variant, expr.member.lexeme)) {
                         try self.result.member_infos.put(node, .{ .error_variant = .{ .index = @intCast(index), .type_id = obj_type } });
@@ -774,7 +798,11 @@ pub const BindingResolver = struct {
     fn exported_binding(self: *BindingResolver, decl: *AST.UseDecl, item: AST.ImportItem) !BindingInfo {
         const imported = self.workspace.modules.get(decl.resolved_module_path) orelse return BindingResolverError.MissingBinding;
         const node = imported.export_nodes.get(item.name.lexeme) orelse return BindingResolverError.MissingBinding;
-        return imported.binding_resolution.declaration_bindings.get(.{ .node = node }) orelse BindingResolverError.MissingBinding;
+        // Direct exports are bound in the imported module. Re-exports (`pub use`) keep the
+        // original declaration node, whose binding belongs to its defining module.
+        return imported.binding_resolution.declaration_bindings.get(.{ .node = node }) orelse
+            self.find_binding(.{ .node = node }) orelse
+            BindingResolverError.MissingBinding;
     }
 
     /// Slots are unique program-wide, so the declaring module's binding is the right one.

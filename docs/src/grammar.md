@@ -6,8 +6,7 @@ declaration     ::= modifier* ( var_decl | fn_decl | type_decl | struct_decl | e
 
 modifier        ::= 'pub' 
 
-use_decl        ::= 'use' import_item (',' import_item)* 'from' STRING ';'
-
+use_decl        ::= modifier* 'use' import_item (',' import_item)* 'from' STRING ';'
 
 var_decl        ::= ('var' | 'const') IDENTIFIER (':' type_expr)? '=' expression ';'
 

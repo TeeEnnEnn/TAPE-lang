@@ -13,7 +13,7 @@ fn resolveType(allocator: std.mem.Allocator, registry: *TypeRegistry, type_str: 
     var group = std.Io.Group.init;
     var workspace = Workspace.init(allocator, io);
     defer workspace.deinit();
-    const mod = try Module.init("test", source, allocator);
+    const mod = try Module.init("test", source, allocator, true);
     var p = try Parser.init(allocator, &workspace, mod, io, &group);
     const node = try p.parse();
     const var_decl = node.program.declarations[0].var_decl;

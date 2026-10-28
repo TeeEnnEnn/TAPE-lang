@@ -16,7 +16,7 @@ fn checkSource(allocator: std.mem.Allocator, source: []const u8) !struct { regis
     var group = std.Io.Group.init;
     var workspace = Workspace.init(allocator, io);
     defer workspace.deinit();
-    const mod = try Module.init("test", source, allocator);
+    const mod = try Module.init("test", source, allocator, true);
     defer {
         mod.deinit();
         allocator.destroy(mod);
@@ -50,9 +50,12 @@ fn checkSourceMulti(allocator: std.mem.Allocator, sources: []const SourceEntry) 
     defer modules.deinit(allocator);
 
     for (sources) |entry| {
-        const mod = try Module.init(entry.name, entry.source, allocator);
+        const source = try allocator.dupe(u8, entry.source);
+        const filepath = try allocator.dupe(u8, if (std.mem.eql(u8, entry.name, "main")) "main" else "/lib");
+        const module_key = try allocator.dupe(u8, filepath);
+        const mod = try Module.init(filepath, source, allocator, true);
         try modules.append(allocator, mod);
-        try workspace.modules.put(entry.name, mod);
+        try workspace.modules.put(module_key, mod);
 
         var parser = try Parser.init(mod.arena.allocator(), &workspace, mod, io, &group);
         mod.ast = try parser.parse();
@@ -82,7 +85,7 @@ test "Type Checker - Init works" {
     var workspace = Workspace.init(arena_allocator, io);
     defer workspace.deinit();
 
-    const mod = try Module.init("test", "", arena_allocator);
+    const mod = try Module.init("test", "", arena_allocator, true);
     defer mod.deinit();
 
     var env = Environment.init(arena_allocator, null);
@@ -260,7 +263,7 @@ test "Type Checker - checks struct construction and member access" {
     const allocator = arena.allocator();
 
     var result = try checkSource(allocator,
-        \\struct Point { x: Int, y: Int }
+        \\struct Point { pub x: Int, pub y: Int }
         \\var p = new Point { x = 1, y = 2 };
         \\var px: Int = p.x;
     );
@@ -372,7 +375,7 @@ test "Type Checker - pub const is exported" {
     var workspace = Workspace.init(allocator, io);
     defer workspace.deinit();
 
-    const mod = try Module.init("test_pub_const", "pub const x: Int = 42;", allocator);
+    const mod = try Module.init("test_pub_const", "pub const x: Int = 42;", allocator, true);
     var parser = try Parser.init(allocator, &workspace, mod, io, &group);
     mod.ast = try parser.parse();
 
@@ -396,7 +399,7 @@ test "Type Checker - pub fn is exported and importable" {
 
     try checkSourceMulti(allocator, &.{
         SourceEntry{ .name = "lib", .source = "pub fn foo() -> Int { return 1; }" },
-        SourceEntry{ .name = "main", .source = "use foo from \"lib\"; var x = foo();" },
+        SourceEntry{ .name = "main", .source = "use foo from \"/lib\"; var x = foo();" },
     });
 }
 
@@ -409,7 +412,7 @@ test "Type Checker - pub co is exported" {
     var workspace = Workspace.init(allocator, io);
     defer workspace.deinit();
 
-    const mod = try Module.init("test_co", "pub co bar() -> (Int, Nil, Nil) { yield 1; }", allocator);
+    const mod = try Module.init("test_co", "pub co bar() -> (Int, Nil, Nil) { yield 1; }", allocator, true);
     var parser = try Parser.init(allocator, &workspace, mod, io, &group);
     mod.ast = try parser.parse();
 
@@ -434,7 +437,7 @@ test "Type Checker - pub struct is exported" {
     var workspace = Workspace.init(allocator, io);
     defer workspace.deinit();
 
-    const mod = try Module.init("test_struct", "pub struct Point { x: Int, y: Int }", allocator);
+    const mod = try Module.init("test_struct", "pub struct Point { x: Int, y: Int }", allocator, true);
     var parser = try Parser.init(allocator, &workspace, mod, io, &group);
     mod.ast = try parser.parse();
 
@@ -459,7 +462,7 @@ test "Type Checker - pub enum is exported" {
     var workspace = Workspace.init(allocator, io);
     defer workspace.deinit();
 
-    const mod = try Module.init("test_enum", "pub enum Color { Red, Green }", allocator);
+    const mod = try Module.init("test_enum", "pub enum Color { Red, Green }", allocator, true);
     var parser = try Parser.init(allocator, &workspace, mod, io, &group);
     mod.ast = try parser.parse();
 
@@ -482,7 +485,7 @@ test "Type Checker - use_decl errors on non-exported symbol" {
 
     try std.testing.expectError(TypeCheckerError.UndefinedSymbol, checkSourceMulti(allocator, &.{
         SourceEntry{ .name = "lib", .source = "fn secret() -> Int { return 0; }" },
-        SourceEntry{ .name = "main", .source = "use secret from \"lib\"; var x = secret();" },
+        SourceEntry{ .name = "main", .source = "use secret from \"/lib\"; var x = secret();" },
     }));
 }
 
@@ -499,7 +502,7 @@ test "Type Checker - pub const import via use_decl hoist looks up from exports m
     defer workspace.deinit();
 
     // Create and process the "lib" module with a pub var
-    const lib_mod = try Module.init("lib", "pub const x: Int = 42;", allocator);
+    const lib_mod = try Module.init("lib", "pub const x: Int = 42;", allocator, false);
     var group = std.Io.Group.init;
     var parser = try Parser.init(allocator, &workspace, lib_mod, io, &group);
     lib_mod.ast = try parser.parse();
@@ -835,4 +838,177 @@ test "Type Checker - anonymous fn reading module var is rejected" {
 test "Type Checker - non-literal module const is rejected" {
     const allocator = std.testing.allocator;
     try std.testing.expectError(TypeCheckerError.NonConstantExport, checkSource(allocator, "var a = 5; const b = a + 1;"));
+}
+
+// --- Variant receiver rules (wave: is_type symbol discrimination) ---
+
+const COLOR_ENUM_LIB = "pub enum Color { Red, Green }";
+
+test "Type Checker - enum variants are only accessible through the type name" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const allocator = arena.allocator();
+
+    try std.testing.expectError(TypeCheckerError.InvalidMemberAccess, checkSourceMulti(allocator, &.{
+        SourceEntry{ .name = "lib", .source = COLOR_ENUM_LIB },
+        SourceEntry{ .name = "main", .source = "use Color from \"/lib\"; var c = Color.Green; var x = c.Red;" },
+    }));
+}
+
+test "Type Checker - call receivers cannot name variants" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const allocator = arena.allocator();
+
+    try std.testing.expectError(TypeCheckerError.InvalidMemberAccess, checkSourceMulti(allocator, &.{
+        SourceEntry{ .name = "lib", .source = COLOR_ENUM_LIB ++ " pub fn make() -> Color { return Color.Red; }" },
+        SourceEntry{ .name = "main", .source = "use Color, make from \"/lib\"; var x = make().Red;" },
+    }));
+}
+
+test "Type Checker - variant access also works across modules (aliased)" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const allocator = arena.allocator();
+
+    const sources = [_]SourceEntry{
+        SourceEntry{ .name = "lib", .source = COLOR_ENUM_LIB },
+        SourceEntry{ .name = "main", .source = "use Color as C from \"/lib\"; var x = C.Red; var y = x == C.Green;" },
+    };
+    try checkSourceMulti(allocator, &sources);
+}
+
+test "Type Checker - type names have no struct members" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const allocator = arena.allocator();
+
+    try std.testing.expectError(TypeCheckerError.InvalidMemberAccess, checkSourceMulti(allocator, &.{
+        SourceEntry{ .name = "lib", .source = "pub struct Point { pub x: Int }" },
+        SourceEntry{ .name = "main", .source = "use Point from \"/lib\"; var n = Point.x;" },
+    }));
+}
+
+test "Type Checker - value-receiver match patterns are not coverage" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const allocator = arena.allocator();
+
+    try std.testing.expectError(TypeCheckerError.InvalidMemberAccess, checkSourceMulti(allocator, &.{
+        SourceEntry{ .name = "lib", .source = "pub enum Weekdays { MON, TUE } pub fn next_day() -> Weekdays { return Weekdays.MON; }" },
+        SourceEntry{ .name = "main", .source = "use Weekdays, next_day from \"/lib\"; var day = next_day(); var r = match (day) { day.MON => give 1;, default => give 0;, };" },
+    }));
+}
+
+// --- Import visibility enforcement ---
+
+test "Type Checker - pub field access across modules works" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const allocator = arena.allocator();
+
+    try checkSourceMulti(allocator, &.{
+        SourceEntry{ .name = "lib", .source = "pub struct Box { pub v: Int } pub fn make() -> Box { return new Box { v = 1 }; }" },
+        SourceEntry{ .name = "main", .source = "use Box, make from \"/lib\"; var b = make(); var t = b.v;" },
+    });
+}
+
+test "Type Checker - private field reads across modules are rejected" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const allocator = arena.allocator();
+
+    const sources = [_]SourceEntry{
+        SourceEntry{ .name = "lib", .source = "pub struct Box { v: Int } pub fn make() -> Box { return new Box { v = 1 }; }" },
+        SourceEntry{ .name = "main", .source = "use Box, make from \"/lib\"; var b = make(); var t = b.v;" },
+    };
+    try std.testing.expectError(TypeCheckerError.InvalidMemberAccess, checkSourceMulti(allocator, &sources));
+}
+
+test "Type Checker - private method calls across modules are rejected" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const allocator = arena.allocator();
+
+    try std.testing.expectError(TypeCheckerError.InvalidMemberAccess, checkSourceMulti(allocator, &.{
+        SourceEntry{ .name = "lib", .source = "pub struct Box { pub v: Int, fn secret() -> Int { return self.v; } } pub fn make() -> Box { return new Box { v = 1 }; }" },
+        SourceEntry{ .name = "main", .source = "use Box, make from \"/lib\"; var b = make(); var t = b.secret();" },
+    }));
+}
+
+test "Type Checker - cross-module `new` cannot set private fields" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const allocator = arena.allocator();
+
+    try std.testing.expectError(TypeCheckerError.InvalidMemberAccess, checkSourceMulti(allocator, &.{
+        SourceEntry{ .name = "lib", .source = "pub struct Box { pub visible: Int, hidden: Int } pub fn make() -> Box { return new Box { visible = 1, hidden = 2 }; }" },
+        SourceEntry{ .name = "main", .source = "use Box from \"/lib\"; var b = new Box { visible = 5, hidden = 9 };" },
+    }));
+}
+
+// --- Public signature hygiene ---
+
+test "Type Checker - pub fn signatures must name only public types" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const allocator = arena.allocator();
+
+    try std.testing.expectError(TypeCheckerError.NonPublicTypeExport, checkSourceMulti(allocator, &.{
+        SourceEntry{ .name = "lib", .source = "struct Hidden {} pub fn make() -> Hidden { return new Hidden {}; }" },
+    }));
+}
+
+test "Type Checker - pub fn signatures accept public types" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const allocator = arena.allocator();
+
+    try checkSourceMulti(allocator, &.{
+        SourceEntry{ .name = "lib", .source = "pub struct Point { pub x: Int } pub fn at(p: Point) -> Int { return p.x; }" },
+    });
+}
+
+test "Type Checker - pub methods on private structs are module-local API" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const allocator = arena.allocator();
+
+    _ = try checkSource(allocator, "struct Hidden { pub fn show() -> Nil { self; } }");
+}
+
+test "Type Checker - public method calls work across modules" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const allocator = arena.allocator();
+
+    try checkSourceMulti(allocator, &.{
+        SourceEntry{ .name = "lib", .source = "pub struct Box { pub value: Int, pub fn get() -> Int { return self.value; } } pub fn make() -> Box { return new Box { value = 7 }; }" },
+        SourceEntry{ .name = "main", .source = "use Box, make from \"/lib\"; var b = make(); var n = b.get();" },
+    });
+}
+
+test "Type Checker - enum comparisons work across modules" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const allocator = arena.allocator();
+
+    const sources = [_]SourceEntry{
+        SourceEntry{ .name = "lib", .source = "pub enum Color { Red, Green }" },
+        SourceEntry{ .name = "main", .source = "use Color as Shade from \"/lib\"; var a = Shade.Red; var b = Shade.Green; var equal = a == b;" },
+    };
+    try checkSourceMulti(allocator, &sources);
+}
+
+test "Workspace rejects an imported name that collides with a local declaration" {
+    const allocator = std.testing.allocator;
+    const io = std.testing.io;
+
+    var workspace = Workspace.init(allocator, io);
+    defer workspace.deinit();
+
+    try std.testing.expect(!try workspace.compile_workspace("src/_tests/compiler/fixtures/import_collision/main.tape", .{}));
+    try std.testing.expect(workspace.diagnostics.has_errors);
+    try std.testing.expectEqual(@as(usize, 1), workspace.diagnostics.diagnostics.items.len);
+    try std.testing.expectEqualStrings("Duplicate symbol", workspace.diagnostics.diagnostics.items[0].message);
 }

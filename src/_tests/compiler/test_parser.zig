@@ -10,7 +10,7 @@ fn parseFirstDecl(allocator: std.mem.Allocator, source: []const u8) !*AST.ASTNod
     var group = std.Io.Group.init;
     var workspace = Workspace.init(allocator, io);
     defer workspace.deinit();
-    const mod = try Module.init("test", source, allocator);
+    const mod = try Module.init("test", source, allocator, true);
     var p = try Parser.init(allocator, &workspace, mod, io, &group);
     const node = try p.parse();
     try std.testing.expect(node.* == .program);
@@ -356,7 +356,63 @@ test "Parser rejects pub var" {
     var group = std.Io.Group.init;
     var workspace = Workspace.init(allocator, io);
     defer workspace.deinit();
-    const mod = try Module.init("test", "pub var x = 10;", allocator);
+    const mod = try Module.init("test", "pub var x = 10;", allocator, true);
     var p = try Parser.init(allocator, &workspace, mod, io, &group);
     try std.testing.expectError(ParserError.UnexpectedToken, p.parse());
+}
+
+test "Parser rejects top-level var in a non-entrypoint module" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const allocator = arena.allocator();
+    const io = std.testing.io;
+    var group = std.Io.Group.init;
+    var workspace = Workspace.init(allocator, io);
+    defer workspace.deinit();
+    const mod = try Module.init("test", "var x = 10;", allocator, false);
+    var p = try Parser.init(allocator, &workspace, mod, io, &group);
+    try std.testing.expectError(ParserError.UnexpectedToken, p.parse());
+}
+
+test "Parser rejects top-level statements in a non-entrypoint module" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const allocator = arena.allocator();
+    const io = std.testing.io;
+    var group = std.Io.Group.init;
+    var workspace = Workspace.init(allocator, io);
+    defer workspace.deinit();
+    const mod = try Module.init("test", "1 + 1;", allocator, false);
+    var p = try Parser.init(allocator, &workspace, mod, io, &group);
+    try std.testing.expectError(ParserError.UnexpectedToken, p.parse());
+}
+
+test "Parser allows fn bodies and locals inside non-entrypoint modules" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const allocator = arena.allocator();
+    const io = std.testing.io;
+    var group = std.Io.Group.init;
+    var workspace = Workspace.init(allocator, io);
+    defer workspace.deinit();
+    const mod = try Module.init("test", "fn hi() -> Int { var n = 3; return n; }", allocator, false);
+    var p = try Parser.init(allocator, &workspace, mod, io, &group);
+    const program = try p.parse();
+    try std.testing.expectEqual(@as(usize, 1), program.program.declarations.len);
+}
+
+test "Parser accepts pub use for re-exports" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const allocator = arena.allocator();
+    const io = std.testing.io;
+    var group = std.Io.Group.init;
+    var workspace = Workspace.init(allocator, io);
+    defer workspace.deinit();
+    const mod = try Module.init("test", "pub use x from \"lib.tape\";", allocator, true);
+    var p = try Parser.init(allocator, &workspace, mod, io, &group);
+    const program = try p.parse();
+    try std.testing.expectEqual(@as(usize, 1), program.program.declarations.len);
+    try std.testing.expect(program.program.declarations[0].* == .use_decl);
+    try std.testing.expect(program.program.declarations[0].use_decl.modifier_pub);
 }
