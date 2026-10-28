@@ -12,15 +12,20 @@ var_decl        ::= ('var' | 'const') IDENTIFIER (':' type_expr)? '=' expression
 
 fn_decl         ::= 'fn' IDENTIFIER '(' parameters? ')' ('->' type_expr) statement
 
-co_decl         ::= 'co' IDENTIFIER '(' parameters? ')' ('->' '(' type_expr ',' type_expr ')' statement)
+co_decl         ::= 'co' IDENTIFIER '(' parameters? ')' ('->' '(' type_expr ',' type_expr ',' type_expr ')' statement)
 
 type_decl       ::= 'type' IDENTIFIER '=' type_expr ';'
 
 struct_decl     ::= 'struct' IDENTIFIER '{' struct_members? '}'
 struct_members  ::= struct_member (',' struct_member)* ','?
-struct_member   ::= modifier* IDENTIFIER ':' type_expr ('=' expression)?   /* field with optional default */
-                  | modifier* fn_decl                                      /* associated function or method */
-                  | modifier* co_decl                                      /* associated coroutine or method */
+struct_member   ::= modifier* struct_field
+                  | modifier* method_fn_decl
+                  | modifier* method_co_decl
+
+struct_field    ::= IDENTIFIER ':' type_expr ('=' expression)?
+method_fn_decl  ::= 'fn' IDENTIFIER '(' method_parameters? ')' ('->' type_expr) statement
+method_co_decl  ::= 'co' IDENTIFIER '(' method_parameters? ')' ('->' '(' type_expr ',' type_expr ',' type_expr ')' statement)
+method_parameters ::= 'self' (',' parameters)? | parameters
 
 enum_decl       ::= 'enum' IDENTIFIER '{' enum_variants? '}'
 
@@ -43,6 +48,7 @@ type_expr_list  ::= type_expr (',' type_expr)* ','?
 
 parameters      ::= param (',' param)* ','?
 param           ::= IDENTIFIER ':' type_expr
+/* In a struct method, an untyped `self` may appear only as the first parameter. */
 
 struct_fields   ::= field (',' field)* ','?
 field           ::= IDENTIFIER ':' type_expr
@@ -88,7 +94,7 @@ unary           ::= ('not' | '-' | '~' | 'resume' | 'try' | 'yield') unary
 postfix         ::= primary (
                       '(' arguments? ')'            /* Call */
                     | '[' expression ']'            /* Index */
-                    | '.' IDENTIFIER                /* Instance member access */
+                    | '.' IDENTIFIER                /* Field, instance method, or type-associated function */
                   )*
 
 primary         ::= IDENTIFIER

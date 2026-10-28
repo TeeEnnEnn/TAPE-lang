@@ -1,8 +1,10 @@
 # Summary
 
 - [Introduction](./context.md)
-- [Getting Started](./cli.md)
+- [Getting Started](./overview/cli.md)
+- [Importing](./features/imports.md)
+- [Structs](./features/structs.md)
 - [Grammar](./grammar.md)
-- [Compiler](./compiler.md)
-- [Runtime VM](./runtime.md)
+- [Compiler](./overview/compiler.md)
+- [Runtime VM](./overview/runtime.md)
 - [Zen of TAPE](./zen.md)
