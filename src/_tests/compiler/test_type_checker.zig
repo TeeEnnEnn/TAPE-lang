@@ -931,7 +931,7 @@ test "Type Checker - private method calls across modules are rejected" {
     const allocator = arena.allocator();
 
     try std.testing.expectError(TypeCheckerError.InvalidMemberAccess, checkSourceMulti(allocator, &.{
-        SourceEntry{ .name = "lib", .source = "pub struct Box { pub v: Int, fn secret() -> Int { return self.v; } } pub fn make() -> Box { return new Box { v = 1 }; }" },
+        SourceEntry{ .name = "lib", .source = "pub struct Box { pub v: Int, fn secret(self) -> Int { return self.v; } } pub fn make() -> Box { return new Box { v = 1 }; }" },
         SourceEntry{ .name = "main", .source = "use Box, make from \"/lib\"; var b = make(); var t = b.secret();" },
     }));
 }
@@ -974,7 +974,7 @@ test "Type Checker - pub methods on private structs are module-local API" {
     defer arena.deinit();
     const allocator = arena.allocator();
 
-    _ = try checkSource(allocator, "struct Hidden { pub fn show() -> Nil { self; } }");
+    _ = try checkSource(allocator, "struct Hidden { pub fn show(self) -> Nil { self; } }");
 }
 
 test "Type Checker - public method calls work across modules" {
@@ -983,9 +983,17 @@ test "Type Checker - public method calls work across modules" {
     const allocator = arena.allocator();
 
     try checkSourceMulti(allocator, &.{
-        SourceEntry{ .name = "lib", .source = "pub struct Box { pub value: Int, pub fn get() -> Int { return self.value; } } pub fn make() -> Box { return new Box { value = 7 }; }" },
+        SourceEntry{ .name = "lib", .source = "pub struct Box { pub value: Int, pub fn get(self) -> Int { return self.value; } } pub fn make() -> Box { return new Box { value = 7 }; }" },
         SourceEntry{ .name = "main", .source = "use Box, make from \"/lib\"; var b = make(); var n = b.get();" },
     });
+}
+
+test "Type Checker - associated functions construct private fields" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const allocator = arena.allocator();
+
+    _ = try checkSource(allocator, "struct Box { secret: Int, pub fn create(value: Int) -> Box { return new Box { secret = value }; } } var b = Box.create(7);");
 }
 
 test "Type Checker - enum comparisons work across modules" {

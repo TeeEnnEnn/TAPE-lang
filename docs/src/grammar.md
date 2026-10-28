@@ -19,8 +19,8 @@ type_decl       ::= 'type' IDENTIFIER '=' type_expr ';'
 struct_decl     ::= 'struct' IDENTIFIER '{' struct_members? '}'
 struct_members  ::= struct_member (',' struct_member)* ','?
 struct_member   ::= modifier* IDENTIFIER ':' type_expr ('=' expression)?   /* field with optional default */
-                  | modifier* fn_decl                                      /* method */
-                  | modifier* co_decl                                      /* coroutine method */
+                  | modifier* fn_decl                                      /* associated function or method */
+                  | modifier* co_decl                                      /* associated coroutine or method */
 
 enum_decl       ::= 'enum' IDENTIFIER '{' enum_variants? '}'
 

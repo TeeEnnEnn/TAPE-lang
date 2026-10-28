@@ -1,11 +1,13 @@
 // Users own tasks. Roles are plain strings; "admin" unlocks everything.
 pub struct User {
-    name: String,
-    role: String,
-    fn display() -> String {
+    pub name: String,
+    pub role: String,
+    id: Int = 0,
+
+    pub fn display(self) -> String {
         return self.name ++ "<" ++ self.role ++ ">";
     }
-    fn is_admin() -> Bool {
+    pub fn is_admin(self) -> Bool {
         return self.role == "admin";
     }
 }

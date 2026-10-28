@@ -5,19 +5,19 @@ use label_for_status_code, is_done_code from "./task_status.tape";
 use label_for_priority_code from "./priority.tape";
 
 pub struct Task {
-    title: String,
-    owner: String,
-    estimate: Int,
-    status_code: Int,
-    priority_code: Int,
-    flags: Int,
-    fn summary() -> String {
+    pub title: String,
+    pub owner: String,
+    pub estimate: Int,
+    pub status_code: Int,
+    pub priority_code: Int,
+    pub flags: Int,
+    pub fn summary(self) -> String {
         return self.title ++ " [" ++ label_for_status_code(self.status_code) ++ "]";
     }
-    fn is_done() -> Bool {
+    pub fn is_done(self) -> Bool {
         return is_done_code(self.status_code);
     }
-    fn effort() -> String {
+    pub fn effort(self) -> String {
         if (self.estimate > 20) {
             return "huge";
         }
@@ -29,7 +29,7 @@ pub struct Task {
         }
         return "small";
     }
-    fn owner_tag() -> String {
+    pub fn owner_tag(self) -> String {
         return self.owner ++ "/" ++ label_for_priority_code(self.priority_code);
     }
 }

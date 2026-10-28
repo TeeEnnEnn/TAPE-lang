@@ -1,16 +1,16 @@
 struct Empty {}
 
 struct Point {
-	x: Int,
-	y: Int,
+	pub x: Int,
+	pub y: Int,
 }
 
 struct Point3D {
-	x: Int,
-	y: Int,
-	z: Int,
+	pub x: Int,
+	pub y: Int,
+	pub z: Int,
 
-	fn print() -> Nil {
+	pub fn print(self) -> Nil {
 		self.x;
 		self.y;
 		self.z;
@@ -18,38 +18,38 @@ struct Point3D {
 }
 
 struct Rect {
-	width: Int,
-	height: Int,
+	pub width: Int,
+	pub height: Int,
 
-	fn area() -> Int {
+	pub fn area(self) -> Int {
 		return self.width * self.height;
 	}
 
-	fn perimeter() -> Int {
+	pub fn perimeter(self) -> Int {
 		return 2 * (self.width + self.height);
 	}
 
-	fn is_square() -> Bool {
+	pub fn is_square(self) -> Bool {
 		return self.width == self.height;
 	}
 
-	fn scale(factor: Int) -> Rect {
+	pub fn scale(self, factor: Int) -> Rect {
 		return new Rect { width = self.width * factor, height = self.height * factor };
 	}
 
-	fn describe() -> Int {
+	pub fn describe(something_else: Int, self) -> Int {
 		return self.area() + self.perimeter();
 	}
 }
 
 struct Line {
-	start: Point,
-	end: Point,
+	pub start: Point,
+	pub end: Point,
 }
 
 struct Label {
-	text: String,
-	reps: Int,
+	pub text: String,
+	pub reps: Int,
 }
 
 var e = new Empty{};
@@ -74,7 +74,7 @@ var big = rect.scale(2);
 if (big.area() != 80) { panic "big area"; }
 if (big.perimeter() != 36) { panic "big perimeter"; }
 
-if (rect.describe() != 38) { panic "describe"; }
+if (rect.describe(12) != 38) { panic "describe"; }
 
 if (rect.scale(3).area() != 180) { panic "scale area"; }
 if (new Rect { width = 6, height = 6 }.is_square() != true) { panic "is_square true"; }

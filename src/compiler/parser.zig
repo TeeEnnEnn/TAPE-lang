@@ -651,7 +651,7 @@ pub const Parser = struct {
 
         if (!self.check(.RIGHT_PAREN)) {
             while (true) {
-                const param_node = try self.parse_typed_named_field();
+                const param_node = try self.parse_typed_named_field(false);
                 try params.append(self.allocator, param_node);
                 if (!try self.match(.COMMA)) break;
             }
@@ -691,7 +691,7 @@ pub const Parser = struct {
 
         if (!self.check(.RIGHT_PAREN)) {
             while (true) {
-                const param_node = try self.parse_typed_named_field(); // Helper to parse "name: Type"
+                const param_node = try self.parse_typed_named_field(false);
                 try params.append(self.allocator, param_node);
                 if (!try self.match(.COMMA)) break;
             }
@@ -717,11 +717,18 @@ pub const Parser = struct {
         return node;
     }
 
-    fn parse_typed_named_field(self: *Parser) ParserError!*AST.TypedNamedField {
+    /// parses `ident: type`
+    fn parse_typed_named_field(self: *Parser, allow_self: bool) ParserError!*AST.TypedNamedField {
         try self.consume(.IDENTIFIER, "Expected identifier for typed named field.");
         const token = self.previous;
-        try self.consume(.COLON, "Expected ':' to separate identifier from type annotation.");
-        const type_ = try self.parse_type_expression();
+        var type_: *AST.ASTNode = undefined;
+        if (allow_self and std.mem.eql(u8, token.lexeme, "self") and !self.check(.COLON)) {
+            type_ = try self.allocator.create(AST.ASTNode);
+            type_.* = .{ .nil_type = try self.allocator.create(AST.NilType) };
+        } else {
+            try self.consume(.COLON, "Expected ':' to separate identifier from type annotation. Only an untyped first `self` parameter may omit its annotation.");
+            type_ = try self.parse_type_expression();
+        }
         const named_field = try self.allocator.create(AST.TypedNamedField);
         named_field.* = .{ .name = token, .type_annotation = type_ };
         return named_field;
@@ -1004,7 +1011,7 @@ pub const Parser = struct {
         return node;
     }
 
-    fn parse_function_declaration(self: *Parser, is_pub: bool) ParserError!*AST.ASTNode {
+    fn parse_function_declaration(self: *Parser, is_pub: bool, is_method: bool) ParserError!*AST.ASTNode {
         try self.consume(.IDENTIFIER, "Expected identifier for function declaration.");
         const name = self.previous;
 
@@ -1013,7 +1020,7 @@ pub const Parser = struct {
 
         if (!self.check(.RIGHT_PAREN)) {
             while (true) {
-                const param = try self.parse_typed_named_field();
+                const param = try self.parse_typed_named_field(is_method);
                 try params.append(self.allocator, param);
                 if (!try self.match(.COMMA)) break;
             }
@@ -1042,7 +1049,7 @@ pub const Parser = struct {
         return node;
     }
 
-    fn parse_coroutine_declaration(self: *Parser, is_pub: bool) ParserError!*AST.ASTNode {
+    fn parse_coroutine_declaration(self: *Parser, is_pub: bool, is_method: bool) ParserError!*AST.ASTNode {
         try self.consume(.IDENTIFIER, "Expected identifier for coroutine declaration.");
         const name = self.previous;
 
@@ -1051,7 +1058,7 @@ pub const Parser = struct {
 
         if (!self.check(.RIGHT_PAREN)) {
             while (true) {
-                const param = try self.parse_typed_named_field();
+                const param = try self.parse_typed_named_field(is_method);
                 try params.append(self.allocator, param);
                 if (!try self.match(.COMMA)) break;
             }
@@ -1346,7 +1353,7 @@ pub const Parser = struct {
             }
 
             if (try self.match(.CO)) {
-                const method = try self.parse_coroutine_declaration(is_public);
+                const method = try self.parse_coroutine_declaration(is_public, true);
                 const struct_method = try self.allocator.create(AST.StructMethodField);
                 struct_method.* = .{ .method = method, .is_pub = is_public, .name = method.co_decl.name };
                 try methods.append(self.allocator, struct_method);
@@ -1354,7 +1361,7 @@ pub const Parser = struct {
                 continue;
             }
             if (try self.match(.FN)) {
-                const method = try self.parse_function_declaration(is_public);
+                const method = try self.parse_function_declaration(is_public, true);
                 const struct_method = try self.allocator.create(AST.StructMethodField);
                 struct_method.* = .{ .method = method, .is_pub = is_public, .name = method.fn_decl.name };
                 try methods.append(self.allocator, struct_method);
@@ -1532,9 +1539,9 @@ pub const Parser = struct {
         } else if (try self.match(.CONST)) {
             return try self.parse_var_declaration(is_pub, true);
         } else if (try self.match(.FN)) {
-            return try self.parse_function_declaration(is_pub);
+            return try self.parse_function_declaration(is_pub, false);
         } else if (try self.match(.CO)) {
-            return try self.parse_coroutine_declaration(is_pub);
+            return try self.parse_coroutine_declaration(is_pub, false);
         } else if (try self.match(.STRUCT)) {
             return try self.parse_struct_declaration(is_pub);
         } else if (try self.match(.TYPE)) {

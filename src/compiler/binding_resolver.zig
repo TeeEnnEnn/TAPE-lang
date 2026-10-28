@@ -63,7 +63,7 @@ pub const FunctionInfo = struct {
 
 pub const MemberInfo = union(enum) {
     field: struct { index: u16, type_id: AST.TypeId },
-    method: struct { index: u16, type_id: AST.TypeId },
+    method: struct { index: u16, type_id: AST.TypeId, takes_receiver: bool = true },
     tuple_index: struct { index: u16, type_id: AST.TypeId },
     enum_variant: struct { index: u16, type_id: AST.TypeId },
     error_variant: struct { index: u16, type_id: AST.TypeId },
@@ -512,7 +512,18 @@ pub const BindingResolver = struct {
             },
             ._struct => |info| {
                 if (receiver_is_type_symbol) {
-                    try self.fail("Type name has no members.", "Struct members are accessed on an instance (`myStruct.member`), not on the type name.", expr.line, expr.column);
+                    for (info.methods) |method| {
+                        if (!std.mem.eql(u8, method.name, expr.member.lexeme)) continue;
+                        const takes_receiver = switch (method.method_node.*) { .fn_decl => |d| d.params.len > 0 and std.mem.eql(u8, d.params[0].name.lexeme, "self"), .co_decl => |d| d.params.len > 0 and std.mem.eql(u8, d.params[0].name.lexeme, "self"), else => false };
+                        if (takes_receiver) {
+                            try self.fail("Instance method requires a value receiver.", "Call this method on a struct instance; only associated functions can be called through the type name.", expr.line, expr.column);
+                            return BindingResolverError.MissingBinding;
+                        }
+                        const binding = self.find_binding(.{ .node = method.method_node }) orelse return BindingResolverError.MissingBinding;
+                        try self.result.member_infos.put(node, .{ .method = .{ .index = binding.slot, .type_id = method.type, .takes_receiver = false } });
+                        return;
+                    }
+                    try self.fail("Struct has no associated function with this name.", null, expr.line, expr.column);
                     return BindingResolverError.MissingBinding;
                 }
                 // instance fields are stored on the struct instance
@@ -533,7 +544,12 @@ pub const BindingResolver = struct {
                             try self.fail("Method binding not found.", null, expr.line, expr.column);
                             return BindingResolverError.MissingBinding;
                         };
-                        try self.result.member_infos.put(node, .{ .method = .{ .index = method_binding.slot, .type_id = method.type } });
+                        const takes_receiver = switch (method.method_node.*) { .fn_decl => |d| d.params.len > 0 and std.mem.eql(u8, d.params[0].name.lexeme, "self"), .co_decl => |d| d.params.len > 0 and std.mem.eql(u8, d.params[0].name.lexeme, "self"), else => false };
+                        if (!takes_receiver) {
+                            try self.fail("Associated function requires the struct type.", "Call this function through the struct name, not an instance.", expr.line, expr.column);
+                            return BindingResolverError.MissingBinding;
+                        }
+                        try self.result.member_infos.put(node, .{ .method = .{ .index = method_binding.slot, .type_id = method.type, .takes_receiver = true } });
                         return;
                     }
                 }
@@ -588,13 +604,15 @@ pub const BindingResolver = struct {
     }
 
     fn registerCallableParams(self: *BindingResolver, func: *AST.ASTNode, params: []*AST.TypedNamedField, arg_types: []AST.TypeId) !void {
-        const offset: usize = if (arg_types.len == params.len + 1) 1 else 0;
+        const explicit_self = params.len > 0 and std.mem.eql(u8, params[0].name.lexeme, "self");
+        const offset: usize = if (explicit_self) 1 else 0;
         if (offset == 1) {
             const ref: AST.DeclRef = .{ .param = .{ .func = func, .index = 0 } };
             try self.registerParam(ref, "self", arg_types[0]);
         }
 
-        for (params, arg_types[offset..], 0..) |param, type_id, index| {
+        const source_params = if (explicit_self) params[1..] else params;
+        for (source_params, arg_types[offset..], 0..) |param, type_id, index| {
             const slot: u32 = @intCast(index + offset);
             const ref: AST.DeclRef = .{ .param = .{ .func = func, .index = slot } };
             try self.registerParam(ref, param.name.lexeme, type_id);
@@ -764,8 +782,15 @@ pub const BindingResolver = struct {
         const decl = node.fn_decl;
         var param_types: std.ArrayList(AST.TypeId) = .empty;
         defer param_types.deinit(self.allocator);
-        if (self_type) |st| try param_types.append(self.allocator, st);
-        for (decl.params) |param| try param_types.append(self.allocator, try self.registry.resolve(param.type_annotation));
+        const has_self = self_type != null and decl.params.len > 0 and std.mem.eql(u8, decl.params[0].name.lexeme, "self");
+        if (has_self) try param_types.append(self.allocator, self_type.?);
+        for (decl.params, 0..) |param, index| {
+            if (std.mem.eql(u8, param.name.lexeme, "self")) {
+                if (!has_self or index != 0 or param.type_annotation.* != .nil_type) return BindingResolverError.MissingBinding;
+                continue;
+            }
+            try param_types.append(self.allocator, try self.registry.resolve(param.type_annotation));
+        }
         return self.registry.add_function_type(try param_types.toOwnedSlice(self.allocator), try self.registry.resolve(decl.return_type_annotation));
     }
 
@@ -776,8 +801,15 @@ pub const BindingResolver = struct {
         const decl = node.co_decl;
         var param_types: std.ArrayList(AST.TypeId) = .empty;
         defer param_types.deinit(self.allocator);
-        if (self_type) |st| try param_types.append(self.allocator, st);
-        for (decl.params) |param| try param_types.append(self.allocator, try self.registry.resolve(param.type_annotation));
+        const has_self = self_type != null and decl.params.len > 0 and std.mem.eql(u8, decl.params[0].name.lexeme, "self");
+        if (has_self) try param_types.append(self.allocator, self_type.?);
+        for (decl.params, 0..) |param, index| {
+            if (std.mem.eql(u8, param.name.lexeme, "self")) {
+                if (!has_self or index != 0 or param.type_annotation.* != .nil_type) return BindingResolverError.MissingBinding;
+                continue;
+            }
+            try param_types.append(self.allocator, try self.registry.resolve(param.type_annotation));
+        }
         return self.registry.add_coroutine_type(try param_types.toOwnedSlice(self.allocator), try self.registry.resolve(decl.yield_type_annotation), try self.registry.resolve(decl.resume_with_type_annotation), try self.registry.resolve(decl.return_type_annotation));
     }
 

@@ -620,13 +620,13 @@ pub const CodeGenerator = struct {
                     if (self.binding_resolution.member_infos.get(expr.expr)) |member_info| {
                         if (member_info == .method) {
                             const method_slot = member_info.method.index;
+                            const takes_receiver = member_info.method.takes_receiver;
                             const dot = expr.expr.dot_expr;
 
                             try self.current.chunk().write_opcode(.OP_LOAD_FUNCTION_CONSTANT, expr.line);
                             try self.current.chunk().write_u16(method_slot, expr.line);
 
-                            // Push `self` - evaluate the receiver
-                            try self.generate_expression(dot.expr);
+                            if (takes_receiver) try self.generate_expression(dot.expr);
 
                             for (expr.args) |arg| {
                                 try self.generate_expression(arg);
@@ -639,9 +639,9 @@ pub const CodeGenerator = struct {
                                 else => return CodeGeneratorError.UnsupportedOperandType,
                             };
 
-                            // args + 1 for self
+                            // Include the receiver only for instance methods.
                             try self.current.chunk().write_opcode(opcode, expr.line);
-                            try self.current.chunk().write_u16(@intCast(expr.args.len + 1), expr.line);
+                            try self.current.chunk().write_u16(@intCast(expr.args.len + @as(usize, if (takes_receiver) 1 else 0)), expr.line);
                             return;
                         }
                     }

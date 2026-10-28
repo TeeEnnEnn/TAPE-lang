@@ -9,12 +9,12 @@ const TypeChecker = @import("../../compiler/type_checker.zig").TypeChecker;
 const TypeRegistry = @import("../../compiler/type_registry.zig").TypeRegistry;
 const Workspace = @import("../../compiler/workspace.zig").Workspace;
 
-test "Binding Resolver - registers implicit self param for methods" {
+test "Binding Resolver - registers explicit self param for methods" {
     var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
     defer arena.deinit();
     const allocator = arena.allocator();
 
-    const source = "struct Point3D { x: Int, y: Int, z: Int, fn print() -> Nil { self.x; self.y; self.z; } }";
+    const source = "struct Point3D { x: Int, y: Int, z: Int, fn print(self) -> Nil { self.x; self.y; self.z; } }";
 
     const io = std.testing.io;
     var group = std.Io.Group.init;

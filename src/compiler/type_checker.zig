@@ -278,8 +278,7 @@ pub const TypeChecker = struct {
                 defer method_types.deinit(self.allocator);
 
                 for (decl.methods) |method| {
-                    const self_type: ?AST.TypeId = struct_id;
-                    const method_type = try self.check_declaration_type(method.method, self_type);
+                    const method_type = try self.check_declaration_type(method.method, struct_id);
                     // store the node with the method definition
                     try method_types.append(self.allocator, .{ .name = method.name.lexeme, .type = method_type, .is_pub = method.is_pub, .method_node = method.method });
                 }
@@ -405,7 +404,7 @@ pub const TypeChecker = struct {
                 defer self.environment = prev_env;
 
                 // Define self if this is a method
-                const has_self = type_info.function.args.len == decl.params.len + 1;
+                const has_self = decl.params.len > 0 and std.mem.eql(u8, decl.params[0].name.lexeme, "self");
                 if (has_self) {
                     try self.environment.define_binding(
                         "self",
@@ -417,7 +416,8 @@ pub const TypeChecker = struct {
 
                 // Define params locally
                 const param_offset: usize = if (has_self) 1 else 0;
-                for (decl.params, type_info.function.args[param_offset..], 0..) |param, param_id, index| {
+                const source_params = if (has_self) decl.params[1..] else decl.params;
+                for (source_params, type_info.function.args[param_offset..], 0..) |param, param_id, index| {
                     try self.environment.define_binding(param.name.lexeme, param_id, .{ .param = .{ .func = node, .index = @as(u32, @intCast(index + param_offset)) } }, false);
                 }
 
@@ -529,14 +529,15 @@ pub const TypeChecker = struct {
                 defer self.environment = prev_env;
 
                 // Define self if this is a method
-                const has_self = type_info.coroutine.args.len == decl.params.len + 1;
+                const has_self = decl.params.len > 0 and std.mem.eql(u8, decl.params[0].name.lexeme, "self");
                 if (has_self) {
                     try self.environment.define_binding("self", type_info.coroutine.args[0], .{ .param = .{ .func = node, .index = 0 } }, true);
                 }
 
                 // Define params locally
                 const param_offset: usize = if (has_self) 1 else 0;
-                for (decl.params, type_info.coroutine.args[param_offset..], 0..) |param, param_id, index| {
+                const source_params = if (has_self) decl.params[1..] else decl.params;
+                for (source_params, type_info.coroutine.args[param_offset..], 0..) |param, param_id, index| {
                     try self.environment.define_binding(param.name.lexeme, param_id, .{ .param = .{ .func = node, .index = @as(u32, @intCast(index + param_offset)) } }, false);
                 }
 
@@ -736,9 +737,16 @@ pub const TypeChecker = struct {
                 var param_types: std.ArrayList(AST.TypeId) = .empty;
                 defer param_types.deinit(self.allocator);
 
-                if (self_type) |st| try param_types.append(self.allocator, st);
-
-                for (decl.params) |param| {
+                const has_self = self_type != null and decl.params.len > 0 and std.mem.eql(u8, decl.params[0].name.lexeme, "self");
+                if (has_self) try param_types.append(self.allocator, self_type.?);
+                for (decl.params, 0..) |param, index| {
+                    if (std.mem.eql(u8, param.name.lexeme, "self")) {
+                        if (!has_self or index != 0 or param.type_annotation.* != .nil_type) {
+                            try self.fail("Invalid self parameter", "A struct method receiver must be the first parameter, named `self`, with no type annotation.", param.name.line, param.name.column);
+                            return TypeCheckerError.InvalidOperation;
+                        }
+                        continue;
+                    }
                     const param_type = try self.registry.resolve(param.type_annotation);
                     try param_types.append(self.allocator, param_type);
                 }
@@ -750,9 +758,16 @@ pub const TypeChecker = struct {
                 var param_types: std.ArrayList(AST.TypeId) = .empty;
                 defer param_types.deinit(self.allocator);
 
-                if (self_type) |st| try param_types.append(self.allocator, st);
-
-                for (decl.params) |param| {
+                const has_self = self_type != null and decl.params.len > 0 and std.mem.eql(u8, decl.params[0].name.lexeme, "self");
+                if (has_self) try param_types.append(self.allocator, self_type.?);
+                for (decl.params, 0..) |param, index| {
+                    if (std.mem.eql(u8, param.name.lexeme, "self")) {
+                        if (!has_self or index != 0 or param.type_annotation.* != .nil_type) {
+                            try self.fail("Invalid self parameter", "A struct method receiver must be the first parameter, named `self`, with no type annotation.", param.name.line, param.name.column);
+                            return TypeCheckerError.InvalidOperation;
+                        }
+                        continue;
+                    }
                     const param_type = try self.registry.resolve(param.type_annotation);
                     try param_types.append(self.allocator, param_type);
                 }
@@ -1038,11 +1053,16 @@ pub const TypeChecker = struct {
                 }
             },
             .call_expr => |expr| {
-                // check if this is an instance method - if so, it needs an implicit self
+                // Struct calls inject a receiver only when the declaration names `self`.
                 if (expr.expr.* == .dot_expr) {
                     const dot = expr.expr.dot_expr;
                     const receiver_type = try self.check_expression(dot.expr);
                     const receiver_info = self.registry.get_type_info(receiver_type);
+                    var receiver_is_type = false;
+                    if (dot.expr.* == .identifier_expr) {
+                        const binding = self.environment.lookup_binding(dot.expr.identifier_expr.name.lexeme) catch null;
+                        receiver_is_type = if (binding) |b| b.is_type else false;
+                    }
 
                     if (receiver_info == ._struct) {
                         for (receiver_info._struct.methods) |method| {
@@ -1063,8 +1083,21 @@ pub const TypeChecker = struct {
                                     else => return TypeCheckerError.NotCallable,
                                 };
 
-                                // args[0] is the implicut`self`. args start at index 1.
-                                const expected_arg_count = args.len - 1;
+                                const has_receiver = switch (method.method_node.*) {
+                                    .fn_decl => |d| d.params.len > 0 and std.mem.eql(u8, d.params[0].name.lexeme, "self"),
+                                    .co_decl => |d| d.params.len > 0 and std.mem.eql(u8, d.params[0].name.lexeme, "self"),
+                                    else => false,
+                                };
+                                if (receiver_is_type and has_receiver) {
+                                    try self.fail("Instance method requires a value receiver.", "Call this method on a struct instance; only associated functions can be called through the type name.", expr.line, expr.column);
+                                    return TypeCheckerError.InvalidMemberAccess;
+                                }
+                                if (!receiver_is_type and !has_receiver) {
+                                    try self.fail("Associated function requires the struct type.", "Call this function through the struct name, not an instance.", expr.line, expr.column);
+                                    return TypeCheckerError.InvalidMemberAccess;
+                                }
+                                const offset: usize = if (has_receiver) 1 else 0;
+                                const expected_arg_count = args.len - offset;
                                 if (expr.args.len != expected_arg_count) {
                                     try self.fail("Invalid argument count", "Method expects a different number of arguments.", expr.line, expr.column);
                                     return TypeCheckerError.InvalidArgumentCount;
@@ -1072,7 +1105,7 @@ pub const TypeChecker = struct {
 
                                 for (expr.args, 0..) |arg, index| {
                                     const arg_type = try self.check_expression(arg);
-                                    if (arg_type != args[index + 1]) {
+                                    if (arg_type != args[index + offset]) {
                                         try self.fail("Type Mismatch", "Argument type does not match method parameter type.", expr.line, expr.column);
                                         return TypeCheckerError.TypeMismatch;
                                     }
@@ -1219,7 +1252,13 @@ pub const TypeChecker = struct {
                     },
                     ._struct => |_struct| {
                         if (receiver_is_type_symbol) {
-                            try self.fail("Type name has no members", "Struct members are accessed on an instance (`myStruct.member`), not on the type name.", expr.line, expr.column);
+                        for (_struct.methods) |method| {
+                            if (std.mem.eql(u8, method.name, expr.member.lexeme)) {
+                                const takes_receiver = switch (method.method_node.*) { .fn_decl => |d| d.params.len > 0 and std.mem.eql(u8, d.params[0].name.lexeme, "self"), .co_decl => |d| d.params.len > 0 and std.mem.eql(u8, d.params[0].name.lexeme, "self"), else => false };
+                                if (!takes_receiver) { expr.resolved_type = method.type; return method.type; }
+                            }
+                        }
+                            try self.fail("Type name has no associated function with this name.", null, expr.line, expr.column);
                             return TypeCheckerError.InvalidMemberAccess;
                         }
                         for (_struct.fields) |field| {

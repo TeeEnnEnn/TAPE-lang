@@ -8,14 +8,14 @@ use TaskError from "../models/task_error.tape";
 use valid_estimate, valid_task_id from "../utils/validators.tape";
 
 pub struct TaskStore {
-    titles: Array[String],
-    owners: Array[String],
-    estimates: Array[Int],
-    status_codes: Array[Int],
-    priority_codes: Array[Int],
-    flags: Array[Int],
-    count: Int,
-    next_id: Int
+    pub titles: Array[String],
+    pub owners: Array[String],
+    pub estimates: Array[Int],
+    pub status_codes: Array[Int],
+    pub priority_codes: Array[Int],
+    pub flags: Array[Int],
+    pub count: Int,
+    pub next_id: Int
 }
 
 pub fn make_task_store() -> TaskStore {
