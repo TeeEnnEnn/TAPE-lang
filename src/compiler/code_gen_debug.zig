@@ -216,6 +216,7 @@ pub const ChunkDisassembler = struct {
 
             .OP_CALL,
             .OP_COROUTINE,
+            .OP_CALL_NATIVE,
             => {
                 return disassemble_call_instruction(chunk, offset);
             },

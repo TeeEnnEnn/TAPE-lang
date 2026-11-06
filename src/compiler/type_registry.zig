@@ -38,12 +38,14 @@ pub const TypeInfo = union(enum) {
     range: struct { start: TypeId, end: TypeId },
     table: struct { key: TypeId, value: TypeId },
     function: struct { args: []TypeId, ret: TypeId },
+    native_function: struct { args: []TypeId, ret: TypeId },
     coroutine: struct { args: []TypeId, ret: TypeId, yield: TypeId, resume_with: TypeId },
     _union: struct { left: TypeId, right: TypeId },
     _error: struct { name: []const u8, variants: [][]const u8, source_file: []const u8 },
     _enum: struct { name: []const u8, variants: [][]const u8, source_file: []const u8 },
     _struct: struct { name: []const u8, fields: []StructField, methods: []StructMethod, source_file: []const u8 },
     _type: struct { name: []const u8, resolved_type: TypeId, source_file: []const u8 },
+    native_type: struct { name: []const u8, source_file: []const u8 },
     identifier: struct { name: []const u8, source_file: []const u8, generics: ?[]TypeId }, // errors, enums, structs
 };
 
@@ -253,6 +255,25 @@ pub const TypeRegistry = struct {
         return id;
     }
 
+    pub fn add_native_function_type(self: *TypeRegistry, args: []TypeId, ret: TypeId) std.mem.Allocator.Error!TypeId {
+        for (self.types.items, 0..) |info, index| {
+            switch (info) {
+                .native_function => |f| {
+                    if (std.mem.eql(TypeId, f.args, args) and f.ret == ret) {
+                        self.allocator.free(args);
+                        return @as(TypeId, @intCast(index));
+                    }
+                },
+                else => continue,
+            }
+        }
+
+        // add new type
+        const id = @as(TypeId, @intCast(self.types.items.len));
+        try self.types.append(self.allocator, .{ .native_function = .{ .args = args, .ret = ret } });
+        return id;
+    }
+
     pub fn add_coroutine_type(self: *TypeRegistry, args: []TypeId, yield: TypeId, resume_with: TypeId, ret: TypeId) std.mem.Allocator.Error!TypeId {
         for (self.types.items, 0..) |info, index| {
             switch (info) {
@@ -331,6 +352,22 @@ pub const TypeRegistry = struct {
         // add new type
         const id = @as(TypeId, @intCast(self.types.items.len));
         try self.types.append(self.allocator, .{ ._union = .{ .left = left_id, .right = right_id } });
+        return id;
+    }
+
+    pub fn add_native_type_type(self: *TypeRegistry, name: []const u8, source_file: []const u8) !TypeId {
+        for (self.types.items, 0..) |info, index| {
+            switch (info) {
+                .native_type => |existing_type| {
+                    if (!std.mem.eql(u8, existing_type.name, name) or !std.mem.eql(u8, existing_type.source_file, source_file)) continue;
+                    return @as(TypeId, @intCast(index));
+                },
+                else => continue,
+            }
+        }
+
+        const id = @as(TypeId, @intCast(self.types.items.len));
+        try self.types.append(self.allocator, .{ .native_type = .{ .name = name, .source_file = source_file } });
         return id;
     }
 
@@ -486,6 +523,11 @@ pub const TypeRegistry = struct {
                     if (!std.mem.eql(u8, error_info.source_file, source_file)) continue;
                     return @as(TypeId, @intCast(index));
                 },
+                .native_type => |native_type_info| {
+                    if (!std.mem.eql(u8, native_type_info.name, name)) continue;
+                    if (!std.mem.eql(u8, native_type_info.source_file, source_file)) continue;
+                    return @as(TypeId, @intCast(index));
+                },
                 else => continue,
             }
         }
@@ -506,6 +548,10 @@ pub const TypeRegistry = struct {
                 },
                 ._error => |error_info| {
                     if (!std.mem.eql(u8, error_info.name, name)) continue;
+                    return @as(TypeId, @intCast(index));
+                },
+                .native_type => |native_type_info| {
+                    if (!std.mem.eql(u8, native_type_info.name, name)) continue;
                     return @as(TypeId, @intCast(index));
                 },
                 else => continue,

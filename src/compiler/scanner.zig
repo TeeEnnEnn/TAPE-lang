@@ -189,6 +189,8 @@ pub const TokenType = enum {
     RANGE_TYPE,
     /// 'Never'
     NEVER_TYPE,
+    /// 'native'
+    NATIVE,
     /// 'EOF'
     EOF,
 };
@@ -376,6 +378,7 @@ pub const Scanner = struct {
             } else .IDENTIFIER,
             'm' => self.check_keyword(1, "atch", .MATCH),
             'n' => if (len > 1) switch (source[1]) {
+                'a' => self.check_keyword(2, "tive", .NATIVE),
                 'o' => self.check_keyword(2, "t", .NOT),
                 'i' => self.check_keyword(2, "l", .NIL),
                 'e' => self.check_keyword(2, "w", .NEW),

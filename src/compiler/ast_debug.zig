@@ -43,12 +43,29 @@ pub fn print_node(node: *AST.ASTNode, depth: usize, indent_amt: usize) void {
             print_node(fn_decl.return_type_annotation, depth + 1, indent_amt);
             print_node(fn_decl.body, depth + 1, indent_amt);
         },
+        .native_fn_decl => |native_fn_decl| {
+            std.debug.print("NativeFnDecl: {s}", .{native_fn_decl.name.lexeme});
+            write_location(native_fn_decl.line, native_fn_decl.column);
+            if (native_fn_decl.modifier_pub) std.debug.print(" pub", .{});
+            std.debug.print("\n", .{});
+            for (native_fn_decl.params) |param| {
+                indent(depth + 1, indent_amt);
+                std.debug.print("Param: {s}\n", .{param.name.lexeme});
+                print_node(param.type_annotation, depth + 2, indent_amt);
+            }
+            print_node(native_fn_decl.return_type_annotation, depth + 1, indent_amt);
+        },
         .type_decl => |type_decl| {
             std.debug.print("TypeDecl: {s}", .{type_decl.name.lexeme});
             write_location(type_decl.line, type_decl.column);
             if (type_decl.modifier_pub) std.debug.print(" pub", .{});
             std.debug.print("\n", .{});
             print_node(type_decl.type_annotation, depth + 1, indent_amt);
+        },
+        .native_type_decl => |native_type_decl| {
+            std.debug.print("TypeDecl: {s}", .{native_type_decl.name.lexeme});
+            write_location(native_type_decl.line, native_type_decl.column);
+            if (native_type_decl.modifier_pub) std.debug.print(" pub", .{});
         },
         .struct_decl => |struct_decl| {
             std.debug.print("StructDecl: {s}", .{struct_decl.name.lexeme});
@@ -249,7 +266,7 @@ pub fn print_node(node: *AST.ASTNode, depth: usize, indent_amt: usize) void {
             std.debug.print("\n", .{});
         },
         .float_type => {
-            std.debug.print("FloatType:\n", .{});
+            std.debug.print("FloatType\n", .{});
         },
         .fn_type => |fn_type| {
             std.debug.print("FnType:\n", .{});
@@ -319,7 +336,7 @@ pub fn print_node(node: *AST.ASTNode, depth: usize, indent_amt: usize) void {
             std.debug.print("\n", .{});
         },
         .int_type => {
-            std.debug.print("IntType:\n", .{});
+            std.debug.print("IntType\n", .{});
         },
         .match_expr => |match_expr| {
             std.debug.print("MatchExpr:", .{});
@@ -334,7 +351,7 @@ pub fn print_node(node: *AST.ASTNode, depth: usize, indent_amt: usize) void {
             }
         },
         .never_type => {
-            std.debug.print("NeverType:\n", .{});
+            std.debug.print("NeverType\n", .{});
         },
         .new_expr => |new_expr| {
             std.debug.print("NewExpr: {s}", .{new_expr.struct_name.lexeme});
@@ -350,7 +367,7 @@ pub fn print_node(node: *AST.ASTNode, depth: usize, indent_amt: usize) void {
             std.debug.print("NilLit:\n", .{});
         },
         .nil_type => {
-            std.debug.print("NilType:\n", .{});
+            std.debug.print("NilType\n", .{});
         },
         .panic_stmt => |panic_stmt| {
             std.debug.print("PanicStmt:", .{});
@@ -386,7 +403,7 @@ pub fn print_node(node: *AST.ASTNode, depth: usize, indent_amt: usize) void {
             std.debug.print("\n", .{});
         },
         .string_type => {
-            std.debug.print("StringType:\n", .{});
+            std.debug.print("StringType\n", .{});
         },
         .table_expr => |table_expr| {
             std.debug.print("TableExpr:", .{});

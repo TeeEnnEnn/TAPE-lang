@@ -8,6 +8,7 @@ const Module = @import("workspace.zig").Module;
 const Workspace = @import("workspace.zig").Workspace;
 const WorkspaceGlobals = @import("workspace.zig").WorkspaceGlobals;
 const ConstValue = @import("const_value.zig").ConstValue;
+const Natives = @import("../natives/natives.zig").Natives;
 
 pub const BindingResolverError = error{
     MissingDeclRef,
@@ -35,6 +36,8 @@ pub const BindingKind = enum {
     constant,
     /// a compiled function
     function_constant,
+    /// native function implemented in zig. Slot is its index in the native table
+    native,
 };
 
 pub const BindingInfo = struct {
@@ -232,13 +235,14 @@ pub const BindingResolver = struct {
                     }
                 },
                 .fn_decl => |decl| try self.register_function_node(decl_node, decl.name.lexeme, try self.functionTypeId(decl_node, null)),
+                .native_fn_decl => |decl| try self.register_native_function_node(decl_node, decl),
                 .co_decl => |decl| try self.register_function_node(decl_node, decl.name.lexeme, try self.coroutineTypeId(decl_node, null)),
                 .struct_decl => |decl| {
                     // structs are pre hoisted
                     // This allows structs to reference other structs
 
                     const struct_type_id = try self.named_typeid(decl.name.lexeme, decl_node);
-                    try self.registerComptimeNode(decl_node, decl.name.lexeme, struct_type_id);
+                    try self.register_comptime_node(decl_node, decl.name.lexeme, struct_type_id);
 
                     // pre hoist methods (allocating function slots)
                     for (decl.methods) |method| {
@@ -253,9 +257,10 @@ pub const BindingResolver = struct {
                         });
                     }
                 },
-                .type_decl => |decl| try self.registerComptimeNode(decl_node, decl.name.lexeme, try self.named_typeid(decl.name.lexeme, decl_node)),
-                .enum_decl => |decl| try self.registerComptimeNode(decl_node, decl.name.lexeme, try self.named_typeid(decl.name.lexeme, decl_node)),
-                .error_decl => |decl| try self.registerComptimeNode(decl_node, decl.name.lexeme, try self.named_typeid(decl.name.lexeme, decl_node)),
+                .type_decl => |decl| try self.register_comptime_node(decl_node, decl.name.lexeme, try self.named_typeid(decl.name.lexeme, decl_node)),
+                .native_type_decl => |decl| try self.register_comptime_node(decl_node, decl.name.lexeme, try self.named_typeid(decl.name.lexeme, decl_node)),
+                .enum_decl => |decl| try self.register_comptime_node(decl_node, decl.name.lexeme, try self.named_typeid(decl.name.lexeme, decl_node)),
+                .error_decl => |decl| try self.register_comptime_node(decl_node, decl.name.lexeme, try self.named_typeid(decl.name.lexeme, decl_node)),
                 else => {},
             }
         }
@@ -264,7 +269,7 @@ pub const BindingResolver = struct {
     fn resolveNode(self: *BindingResolver, node: *AST.ASTNode, direct_program_decl: bool) BindingResolverError!void {
         switch (node.*) {
             .program => try self.resolveProgram(node),
-            .use_decl, .type_decl, .enum_decl, .error_decl => {},
+            .use_decl, .type_decl, .enum_decl, .error_decl, .native_type_decl, .native_fn_decl => {},
             .struct_decl => |decl| try self.resolveStructDecl(node, decl),
             .var_decl => |decl| try self.resolve_var_decl(node, decl, direct_program_decl),
             .fn_decl => |decl| try self.resolveFnDecl(node, decl, direct_program_decl, false),
@@ -514,7 +519,11 @@ pub const BindingResolver = struct {
                 if (receiver_is_type_symbol) {
                     for (info.methods) |method| {
                         if (!std.mem.eql(u8, method.name, expr.member.lexeme)) continue;
-                        const takes_receiver = switch (method.method_node.*) { .fn_decl => |d| d.params.len > 0 and std.mem.eql(u8, d.params[0].name.lexeme, "self"), .co_decl => |d| d.params.len > 0 and std.mem.eql(u8, d.params[0].name.lexeme, "self"), else => false };
+                        const takes_receiver = switch (method.method_node.*) {
+                            .fn_decl => |d| d.params.len > 0 and std.mem.eql(u8, d.params[0].name.lexeme, "self"),
+                            .co_decl => |d| d.params.len > 0 and std.mem.eql(u8, d.params[0].name.lexeme, "self"),
+                            else => false,
+                        };
                         if (takes_receiver) {
                             try self.fail("Instance method requires a value receiver.", "Call this method on a struct instance; only associated functions can be called through the type name.", expr.line, expr.column);
                             return BindingResolverError.MissingBinding;
@@ -544,7 +553,11 @@ pub const BindingResolver = struct {
                             try self.fail("Method binding not found.", null, expr.line, expr.column);
                             return BindingResolverError.MissingBinding;
                         };
-                        const takes_receiver = switch (method.method_node.*) { .fn_decl => |d| d.params.len > 0 and std.mem.eql(u8, d.params[0].name.lexeme, "self"), .co_decl => |d| d.params.len > 0 and std.mem.eql(u8, d.params[0].name.lexeme, "self"), else => false };
+                        const takes_receiver = switch (method.method_node.*) {
+                            .fn_decl => |d| d.params.len > 0 and std.mem.eql(u8, d.params[0].name.lexeme, "self"),
+                            .co_decl => |d| d.params.len > 0 and std.mem.eql(u8, d.params[0].name.lexeme, "self"),
+                            else => false,
+                        };
                         if (!takes_receiver) {
                             try self.fail("Associated function requires the struct type.", "Call this function through the struct name, not an instance.", expr.line, expr.column);
                             return BindingResolverError.MissingBinding;
@@ -654,18 +667,6 @@ pub const BindingResolver = struct {
         });
     }
 
-    fn registerGlobalNode(self: *BindingResolver, node: *AST.ASTNode, name: []const u8, type_id: AST.TypeId) !void {
-        const ref: AST.DeclRef = .{ .node = node };
-        try self.putDeclBinding(ref, .{
-            .kind = .global,
-            .slot = try self.next_global(),
-            .type_id = type_id,
-            .decl = ref,
-            .name = name,
-            .module_path = self.module.filepath,
-        });
-    }
-
     fn register_function_node(self: *BindingResolver, node: *AST.ASTNode, name: []const u8, type_id: AST.TypeId) !void {
         const ref: AST.DeclRef = .{ .node = node };
         try self.putDeclBinding(ref, .{
@@ -678,7 +679,24 @@ pub const BindingResolver = struct {
         });
     }
 
-    fn registerComptimeNode(self: *BindingResolver, node: *AST.ASTNode, name: []const u8, type_id: AST.TypeId) !void {
+    fn register_native_function_node(self: *BindingResolver, node: *AST.ASTNode, decl: *AST.NativeFnDecl) !void {
+        const index = Natives.find(decl.name.lexeme) orelse {
+            try self.fail("No native implementation found.", "If this error is unexpected. Please reach out to a maintainer.", decl.line, decl.column);
+            return BindingResolverError.MissingBinding;
+        };
+
+        const ref: AST.DeclRef = .{ .node = node };
+        try self.putDeclBinding(ref, .{
+            .kind = .native,
+            .slot = index,
+            .type_id = try self.native_function_type_id(decl),
+            .decl = ref,
+            .name = decl.name.lexeme,
+            .module_path = self.module.filepath,
+        });
+    }
+
+    fn register_comptime_node(self: *BindingResolver, node: *AST.ASTNode, name: []const u8, type_id: AST.TypeId) !void {
         const ref: AST.DeclRef = .{ .node = node };
         try self.putDeclBinding(ref, .{
             .kind = .comptime_type,
@@ -773,6 +791,15 @@ pub const BindingResolver = struct {
             .co_decl => self.coroutineTypeId(node, self_type),
             else => BindingResolverError.MissingBinding,
         };
+    }
+
+    fn native_function_type_id(self: *BindingResolver, decl: *const AST.NativeFnDecl) !AST.TypeId {
+        var param_types: std.ArrayList(AST.TypeId) = .empty;
+        defer param_types.deinit(self.allocator);
+        for (decl.params) |param| {
+            try param_types.append(self.allocator, try self.registry.resolve(param.type_annotation));
+        }
+        return self.registry.add_native_function_type(try param_types.toOwnedSlice(self.allocator), try self.registry.resolve(decl.return_type_annotation));
     }
 
     /// Add a function's type id to the registry

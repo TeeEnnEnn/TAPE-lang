@@ -1049,6 +1049,42 @@ pub const Parser = struct {
         return node;
     }
 
+    fn parse_native_function_declaration(self: *Parser, is_pub: bool) ParserError!*AST.ASTNode {
+        try self.consume(.IDENTIFIER, "Expected identifier for function declaration.");
+        const name = self.previous;
+
+        try self.consume(.LEFT_PAREN, "Expected '(' to start function parameters.");
+        var params: std.ArrayList(*AST.TypedNamedField) = .empty;
+
+        if (!self.check(.RIGHT_PAREN)) {
+            while (true) {
+                const param = try self.parse_typed_named_field(false);
+                try params.append(self.allocator, param);
+                if (!try self.match(.COMMA)) break;
+            }
+        }
+        try self.consume(.RIGHT_PAREN, "Expected ')' to end function parameters.");
+
+        try self.consume(.ARROW, "Expected '->' to separate parameters from return type.");
+        const return_type = try self.parse_type_expression();
+        try self.consume(.SEMICOLON, "Expected ';' to end native function declaration.");
+
+        const native_fn_decl = try self.allocator.create(AST.NativeFnDecl);
+        native_fn_decl.* = .{
+            .modifier_pub = is_pub,
+            .name = name,
+            .params = try params.toOwnedSlice(self.allocator),
+            .return_type_annotation = return_type,
+            .line = name.line,
+            .column = name.column,
+        };
+
+        const node = try self.allocator.create(AST.ASTNode);
+        node.* = .{ .native_fn_decl = native_fn_decl };
+
+        return node;
+    }
+
     fn parse_coroutine_declaration(self: *Parser, is_pub: bool, is_method: bool) ParserError!*AST.ASTNode {
         try self.consume(.IDENTIFIER, "Expected identifier for coroutine declaration.");
         const name = self.previous;
@@ -1104,6 +1140,18 @@ pub const Parser = struct {
         type_decl.* = .{ .modifier_pub = is_pub, .name = name, .type_annotation = type_expr, .line = name.line, .column = name.column };
         const node = try self.allocator.create(AST.ASTNode);
         node.* = .{ .type_decl = type_decl };
+        return node;
+    }
+
+    fn parse_native_type_declaration(self: *Parser, is_pub: bool) ParserError!*AST.ASTNode {
+        try self.consume(.IDENTIFIER, "Expected identifier for native type declaration.");
+        const name = self.previous;
+        try self.consume(.SEMICOLON, "Expected ';' to end native type declaration.");
+
+        const native_type_decl = try self.allocator.create(AST.NativeTypeDecl);
+        native_type_decl.* = .{ .name = name, .modifier_pub = is_pub, .line = name.line, .column = name.column };
+        const node = try self.allocator.create(AST.ASTNode);
+        node.* = .{ .native_type_decl = native_type_decl };
         return node;
     }
 
@@ -1521,6 +1569,21 @@ pub const Parser = struct {
         var is_pub = false;
         if (try self.match(.PUB)) {
             is_pub = true;
+        }
+
+        if (try self.match(.NATIVE)) {
+            if (!top_level) {
+                try self.fail_at("Illegal Native Position.", "'native' can only be declared at the top level of a script.", self.current.line, self.current.column);
+                return ParserError.UnexpectedToken;
+            }
+            if (try self.match(.FN)) {
+                return try self.parse_native_function_declaration(is_pub);
+            } else if (try self.match(.TYPE)) {
+                return try self.parse_native_type_declaration(is_pub);
+            } else {
+                try self.fail_at("Unexpected token", "'native' can only be followed by 'fn' or 'type'.", self.current.line, self.current.column);
+                return ParserError.UnexpectedToken;
+            }
         }
 
         if (try self.match(.VAR)) {

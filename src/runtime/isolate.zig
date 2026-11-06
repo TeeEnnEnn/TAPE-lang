@@ -1,4 +1,5 @@
 const std = @import("std");
+const Natives = @import("../natives/natives.zig").Natives;
 const Entities = @import("entities.zig");
 const Chunk = @import("chunk.zig");
 const BasicGarbageCollector = @import("../memory/basic_garbage_collector.zig");
@@ -820,6 +821,16 @@ pub const Isolate = struct {
                     _ = try self.pop_value();
                     _ = try self.pop_value();
                     try self.push_value(value);
+                },
+
+                .OP_CALL_NATIVE => {
+                    const arg_count = frame.read_u16();
+                    const slot = frame.read_u16();
+                    const native_fn = Natives.get(slot);
+                    const result = try native_fn(self, self.current.stack[self.current.stack_top_index - arg_count .. self.current.stack_top_index]);
+                    // unwinding stack slots
+                    self.current.stack_top_index -= arg_count;
+                    try self.push_value(result);
                 },
 
                 .OP_CALL => {

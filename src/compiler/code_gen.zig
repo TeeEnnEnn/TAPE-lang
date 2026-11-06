@@ -187,6 +187,9 @@ pub const CodeGenerator = struct {
             .fn_decl => |decl| {
                 try self.generate_callable_decl(node, @ptrCast(decl), AST.FnDecl);
             },
+            .native_fn_decl => {
+                // nothing to do - fully comptime
+            },
             .co_decl => |decl| {
                 try self.generate_callable_decl(node, @ptrCast(decl), AST.CoDecl);
             },
@@ -201,6 +204,12 @@ pub const CodeGenerator = struct {
                 // nothing to do - fully comptime
             },
             .error_decl => {
+                // nothing to do - fully comptime
+            },
+            .type_decl => {
+                // nothing to do - fully comptime
+            },
+            .native_type_decl => {
                 // nothing to do - fully comptime
             },
             .expr_stmt => |stmt| {
@@ -647,21 +656,37 @@ pub const CodeGenerator = struct {
                     }
                 }
 
-                // Regular function call
-                try self.generate_expression(expr.expr); // the closure
-                for (expr.args) |arg| {
-                    try self.generate_expression(arg);
-                }
-
                 const indexed_type = resolve_typeof(expr.expr);
-                const opcode: Opcode = switch (self.registry.get_type_info(indexed_type)) {
-                    .function => .OP_CALL,
-                    .coroutine => .OP_COROUTINE,
-                    else => return CodeGeneratorError.UnsupportedOperandType,
-                };
+                const type_info = self.registry.get_type_info(indexed_type);
 
-                try self.current.chunk().write_opcode(opcode, expr.line);
-                try self.current.chunk().write_u16(@intCast(expr.args.len), expr.line);
+                if (type_info == .native_function) {
+                    for (expr.args) |arg| {
+                        try self.generate_expression(arg);
+                    }
+                    try self.current.chunk().write_opcode(.OP_CALL_NATIVE, expr.line);
+                    try self.current.chunk().write_u16(@intCast(expr.args.len), expr.line);
+                    const binding = self.binding_resolution.identifier_bindings.get(expr.expr) orelse {
+                        return CodeGeneratorError.MissingBinding;
+                    };
+                    if (binding.kind != .native) return CodeGeneratorError.MissingBinding;
+                    try self.current.chunk().write_u16(binding.slot, expr.line);
+                } else {
+                    // Regular function call
+
+                    try self.generate_expression(expr.expr); // the closure
+                    for (expr.args) |arg| {
+                        try self.generate_expression(arg);
+                    }
+
+                    const opcode: Opcode = switch (self.registry.get_type_info(indexed_type)) {
+                        .function => .OP_CALL,
+                        .coroutine => .OP_COROUTINE,
+                        else => return CodeGeneratorError.UnsupportedOperandType,
+                    };
+
+                    try self.current.chunk().write_opcode(opcode, expr.line);
+                    try self.current.chunk().write_u16(@intCast(expr.args.len), expr.line);
+                }
             },
             .index_expr => |expr| {
                 try self.generate_expression(expr.expr);

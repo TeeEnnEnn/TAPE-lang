@@ -85,6 +85,7 @@ pub const Opcode = enum(u8) {
     OP_JUMP_IF_ERROR,
     OP_LOOP,
     OP_CALL,
+    OP_CALL_NATIVE,
 
     OP_ARRAY,
     OP_TABLE,

@@ -34,6 +34,11 @@ pub const ASTNode = union(enum) {
     /// Use declaration
     use_decl: *UseDecl,
 
+    /// Native type declaration
+    native_type_decl: *NativeTypeDecl,
+    /// Native function declaration
+    native_fn_decl: *NativeFnDecl,
+
     /// Block of code (collection of statements in +1 scope)
     block_stmt: *BlockStmt,
     /// `return value`
@@ -736,3 +741,27 @@ pub const UnionType = struct {
 // match patterns
 
 pub const DefaultPat = struct {};
+
+// native types
+
+/// Does not have a body
+/// The functionality exists outside of TAPE
+/// `native fn open(fname: String) -> File`
+pub const NativeFnDecl = struct {
+    modifier_pub: bool,
+    name: Token,
+    params: []*TypedNamedField,
+    return_type_annotation: *ASTNode,
+    line: usize,
+    column: usize,
+};
+
+/// Does not have a type annotation
+/// The type is opaque
+/// `native type FileHandle;`
+pub const NativeTypeDecl = struct {
+    modifier_pub: bool,
+    name: Token,
+    line: usize,
+    column: usize,
+};

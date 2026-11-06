@@ -95,6 +95,21 @@ pub const TypeChecker = struct {
         return .{ .allocator = allocator, .registry = registry, .environment = global_environment, .diagnostics = diagnostics, .module = module, .workspace = workspace };
     }
 
+    fn native_fn_hoist(self: *TypeChecker, node: *AST.ASTNode, decl: *AST.NativeFnDecl) !u32 {
+        var param_types: std.ArrayList(AST.TypeId) = .empty;
+        defer param_types.deinit(self.allocator);
+
+        for (decl.params) |param| {
+            const param_id = try self.registry.resolve(param.type_annotation);
+            try param_types.append(self.allocator, param_id);
+        }
+
+        const return_id = try self.registry.resolve(decl.return_type_annotation);
+        const fn_id = try self.registry.add_native_function_type(try param_types.toOwnedSlice(self.allocator), return_id);
+        try self.environment.define_binding(decl.name.lexeme, fn_id, .{ .node = node }, true);
+        return fn_id;
+    }
+
     fn fn_hoist(self: *TypeChecker, node: *AST.ASTNode, decl: *AST.FnDecl) !u32 {
         var param_types: std.ArrayList(AST.TypeId) = .empty;
         defer param_types.deinit(self.allocator);
@@ -200,6 +215,7 @@ pub const TypeChecker = struct {
             ._enum => |e| .{ .name = e.name, .source_file = e.source_file },
             ._error => |e| .{ .name = e.name, .source_file = e.source_file },
             ._type => |t| .{ .name = t.name, .source_file = t.source_file },
+            .native_type => |n| .{ .name = n.name, .source_file = n.source_file },
             .identifier => |i| .{ .name = i.name, .source_file = i.source_file },
             else => null,
         };
@@ -240,6 +256,12 @@ pub const TypeChecker = struct {
             },
             .fn_decl => |decl| {
                 const fn_id = try self.fn_hoist(node, decl);
+                if (decl.modifier_pub) {
+                    try self.export_symbol(decl.name.lexeme, fn_id, node);
+                }
+            },
+            .native_fn_decl => |decl| {
+                const fn_id = try self.native_fn_hoist(node, decl);
                 if (decl.modifier_pub) {
                     try self.export_symbol(decl.name.lexeme, fn_id, node);
                 }
@@ -294,6 +316,13 @@ pub const TypeChecker = struct {
             .type_decl => |decl| {
                 const type_annot_id = try self.registry.resolve(decl.type_annotation);
                 const type_id = try self.registry.add_type_type(decl.name.lexeme, type_annot_id, self.module.filepath);
+                try self.environment.define_type_binding(decl.name.lexeme, type_id, .{ .node = node }, true);
+                if (decl.modifier_pub) {
+                    try self.export_symbol(decl.name.lexeme, type_id, node);
+                }
+            },
+            .native_type_decl => |decl| {
+                const type_id = try self.registry.add_native_type_type(decl.name.lexeme, self.module.filepath);
                 try self.environment.define_type_binding(decl.name.lexeme, type_id, .{ .node = node }, true);
                 if (decl.modifier_pub) {
                     try self.export_symbol(decl.name.lexeme, type_id, node);
@@ -1136,6 +1165,20 @@ pub const TypeChecker = struct {
                         }
                         expr.resolved_type = info.ret;
                     },
+                    .native_function => |info| {
+                        if (expr.args.len != info.args.len) {
+                            try self.fail("Invalid argument count", "Function expects a different number of arguments.", expr.line, expr.column);
+                            return TypeCheckerError.InvalidArgumentCount;
+                        }
+                        for (expr.args, 0..) |arg, index| {
+                            const arg_type = try self.check_expression(arg);
+                            if (arg_type != info.args[index]) {
+                                try self.fail("Type Mismatch", "Argument type does not match the function parameter type.", expr.line, expr.column);
+                                return TypeCheckerError.TypeMismatch;
+                            }
+                        }
+                        expr.resolved_type = info.ret;
+                    },
                     .coroutine => |info| {
                         if (expr.args.len != info.args.len) {
                             try self.fail("Invalid argument count", "Coroutine expects a different number of arguments.", expr.line, expr.column);
@@ -1252,12 +1295,19 @@ pub const TypeChecker = struct {
                     },
                     ._struct => |_struct| {
                         if (receiver_is_type_symbol) {
-                        for (_struct.methods) |method| {
-                            if (std.mem.eql(u8, method.name, expr.member.lexeme)) {
-                                const takes_receiver = switch (method.method_node.*) { .fn_decl => |d| d.params.len > 0 and std.mem.eql(u8, d.params[0].name.lexeme, "self"), .co_decl => |d| d.params.len > 0 and std.mem.eql(u8, d.params[0].name.lexeme, "self"), else => false };
-                                if (!takes_receiver) { expr.resolved_type = method.type; return method.type; }
+                            for (_struct.methods) |method| {
+                                if (std.mem.eql(u8, method.name, expr.member.lexeme)) {
+                                    const takes_receiver = switch (method.method_node.*) {
+                                        .fn_decl => |d| d.params.len > 0 and std.mem.eql(u8, d.params[0].name.lexeme, "self"),
+                                        .co_decl => |d| d.params.len > 0 and std.mem.eql(u8, d.params[0].name.lexeme, "self"),
+                                        else => false,
+                                    };
+                                    if (!takes_receiver) {
+                                        expr.resolved_type = method.type;
+                                        return method.type;
+                                    }
+                                }
                             }
-                        }
                             try self.fail("Type name has no associated function with this name.", null, expr.line, expr.column);
                             return TypeCheckerError.InvalidMemberAccess;
                         }

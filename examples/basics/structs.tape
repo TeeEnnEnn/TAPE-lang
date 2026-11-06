@@ -37,7 +37,7 @@ struct Rect {
 		return new Rect { width = self.width * factor, height = self.height * factor };
 	}
 
-	pub fn describe(something_else: Int, self) -> Int {
+	pub fn describe(self, something_else: Int) -> Int {
 		return self.area() + self.perimeter();
 	}
 }
