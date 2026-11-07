@@ -1134,7 +1134,7 @@ pub const TypeChecker = struct {
 
                                 for (expr.args, 0..) |arg, index| {
                                     const arg_type = try self.check_expression(arg);
-                                    if (arg_type != args[index + offset]) {
+                                    if (!try self.is_compatible(args[index + offset], arg_type)) {
                                         try self.fail("Type Mismatch", "Argument type does not match method parameter type.", expr.line, expr.column);
                                         return TypeCheckerError.TypeMismatch;
                                     }
@@ -1158,7 +1158,7 @@ pub const TypeChecker = struct {
                         }
                         for (expr.args, 0..) |arg, index| {
                             const arg_type = try self.check_expression(arg);
-                            if (arg_type != info.args[index]) {
+                            if (!try self.is_compatible(info.args[index], arg_type)) {
                                 try self.fail("Type Mismatch", "Argument type does not match the function parameter type.", expr.line, expr.column);
                                 return TypeCheckerError.TypeMismatch;
                             }
@@ -1172,7 +1172,7 @@ pub const TypeChecker = struct {
                         }
                         for (expr.args, 0..) |arg, index| {
                             const arg_type = try self.check_expression(arg);
-                            if (arg_type != info.args[index]) {
+                            if (!try self.is_compatible(info.args[index], arg_type)) {
                                 try self.fail("Type Mismatch", "Argument type does not match the function parameter type.", expr.line, expr.column);
                                 return TypeCheckerError.TypeMismatch;
                             }
@@ -1186,7 +1186,7 @@ pub const TypeChecker = struct {
                         }
                         for (expr.args, 0..) |arg, index| {
                             const arg_type = try self.check_expression(arg);
-                            if (arg_type != info.args[index]) {
+                            if (!try self.is_compatible(info.args[index], arg_type)) {
                                 try self.fail("Type Mismatch", "Argument type does not match the coroutine parameter type.", expr.line, expr.column);
                                 return TypeCheckerError.TypeMismatch;
                             }
@@ -1872,13 +1872,13 @@ pub const TypeChecker = struct {
             if (source_info.array == @backingInt(PrimitiveType.Never)) {
                 return true;
             }
-            return try self.is_compatible(target_info.array, source_info.array);
+            return target_info.array == source_info.array;
         }
 
         // Table[Never, Never] matches Table[K, V] for any K, V
         if (target_info == .table and source_info == .table) {
-            const key_compat = (source_info.table.key == @backingInt(PrimitiveType.Never)) or (try self.is_compatible(target_info.table.key, source_info.table.key));
-            const val_compat = (source_info.table.value == @backingInt(PrimitiveType.Never)) or (try self.is_compatible(target_info.table.value, source_info.table.value));
+            const key_compat = (source_info.table.key == @backingInt(PrimitiveType.Never)) or (target_info.table.key == source_info.table.key);
+            const val_compat = (source_info.table.value == @backingInt(PrimitiveType.Never)) or (target_info.table.value == source_info.table.value);
             return key_compat and val_compat;
         }
 

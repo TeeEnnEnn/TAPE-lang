@@ -341,7 +341,8 @@ pub const TypeRegistry = struct {
         for (self.types.items, 0..) |info, index| {
             switch (info) {
                 ._union => |u| {
-                    if (u.left == left_id and u.right == right_id) {
+                    // Unions are sets of members: `A | B` and `B | A` are the same type.
+                    if ((u.left == left_id and u.right == right_id) or (u.left == right_id and u.right == left_id)) {
                         return @as(TypeId, @intCast(index));
                     }
                 },
@@ -372,23 +373,22 @@ pub const TypeRegistry = struct {
     }
 
     pub fn add_type_type(self: *TypeRegistry, name: []const u8, resolved_type: TypeId, source_file: []const u8) !TypeId {
-        for (self.types.items, 0..) |info, index| {
+        for (self.types.items) |info| {
             switch (info) {
                 ._type => |existing_type| {
                     if (!std.mem.eql(u8, existing_type.name, name) or !std.mem.eql(u8, existing_type.source_file, source_file)) continue;
                     if (existing_type.resolved_type != resolved_type) {
                         return TypeRegistryError.TypeResolutionConflict; // names are the same but the resolved types differ
                     }
-                    return @as(TypeId, @intCast(index));
+                    return resolved_type;
                 },
                 else => continue,
             }
         }
 
         // add new type
-        const id = @as(TypeId, @intCast(self.types.items.len));
         try self.types.append(self.allocator, .{ ._type = .{ .name = name, .resolved_type = resolved_type, .source_file = source_file } });
-        return id;
+        return resolved_type;
     }
 
     pub fn add_struct_type(self: *TypeRegistry, name: []const u8, fields: []StructField, methods: []StructMethod, source_file: []const u8) !TypeId {
@@ -516,7 +516,7 @@ pub const TypeRegistry = struct {
                 ._type => |type_info| {
                     if (!std.mem.eql(u8, type_info.name, name)) continue;
                     if (!std.mem.eql(u8, type_info.source_file, source_file)) continue;
-                    return @as(TypeId, @intCast(index));
+                    return @as(TypeId, type_info.resolved_type);
                 },
                 ._error => |error_info| {
                     if (!std.mem.eql(u8, error_info.name, name)) continue;
@@ -544,7 +544,7 @@ pub const TypeRegistry = struct {
                 },
                 ._type => |type_info| {
                     if (!std.mem.eql(u8, type_info.name, name)) continue;
-                    return @as(TypeId, @intCast(index));
+                    return @as(TypeId, type_info.resolved_type);
                 },
                 ._error => |error_info| {
                     if (!std.mem.eql(u8, error_info.name, name)) continue;
