@@ -74,8 +74,8 @@ test "Code Generator - emits collection index assignment opcodes" {
 test "Code Generator - emits coroutine creation and resume opcodes" {
     // the coroutine body compiles into its own chunk (OP_YIELD lives there);
     // the top-level chunk carries OP_COROUTINE and OP_RESUME
-    try expectOpcode("co f() -> (Int, Nil, Nil) { yield 1; } var c = f(); resume c;", .OP_COROUTINE);
-    try expectOpcode("co f() -> (Int, Nil, Nil) { yield 1; } var c = f(); resume c;", .OP_RESUME);
-    try expectOpcode("co f() -> (Int, String, String) { var r = yield 1; return r; } var c = f(); var x = resume c with \"hi\";", .OP_RESUME);
-    try expectOpcode("co f() -> (Int, Int, Nil) { var r = yield 1; return nil; } var c = f(); var x = resume c with 5;", .OP_RESUME);
+    try expectOpcode("co f() -> (Int, Nil, Int) { yield 1; return 1; } var c = f(); resume c;", .OP_COROUTINE);
+    try expectOpcode("co f() -> (Int, Nil, Int) { yield 1; return 1; } var c = f(); resume c;", .OP_RESUME);
+    try expectOpcode("co f() -> (String, String, String) { var r = yield \"yo\"; return r; } var c = f(); var x = resume c with \"hi\";", .OP_RESUME);
+    try expectOpcode("co f() -> (Int, Int, Int) { var r = yield 1; return r; } var c = f(); var x = resume c with 5;", .OP_RESUME);
 }

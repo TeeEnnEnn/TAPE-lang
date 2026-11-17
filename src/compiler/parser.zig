@@ -911,16 +911,6 @@ pub const Parser = struct {
             left = node;
         }
 
-        // Union Type handling (Type | Type)
-        while (try self.match(.PIPE)) {
-            const right = try self.parse_type_expression();
-            const union_type = try self.allocator.create(AST.UnionType);
-            union_type.* = .{ .left = left, .right = right };
-            const node = try self.allocator.create(AST.ASTNode);
-            node.* = .{ .union_type = union_type };
-            left = node;
-        }
-
         return left;
     }
 

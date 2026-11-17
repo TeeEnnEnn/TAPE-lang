@@ -336,7 +336,20 @@ pub const BindingResolver = struct {
             .anon_fn_expr => |expr| try self.resolveAnonFnExpr(node, expr),
             .anon_co_expr => |expr| try self.resolveAnonCoExpr(node, expr),
             .int_lit, .float_lit, .str_lit, .bool_lit, .nil_lit, .default_pat => {},
-            .nil_type, .int_type, .float_type, .string_type, .bool_type, .array_type, .table_type, .range_type, .never_type, .tuple_type, .identifier_type, .fn_type, .co_type, .union_type => {},
+            .nil_type,
+            .int_type,
+            .float_type,
+            .string_type,
+            .bool_type,
+            .array_type,
+            .table_type,
+            .range_type,
+            .never_type,
+            .tuple_type,
+            .identifier_type,
+            .fn_type,
+            .co_type,
+            => {},
         }
     }
 

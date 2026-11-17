@@ -451,11 +451,6 @@ pub fn print_node(node: *AST.ASTNode, depth: usize, indent_amt: usize) void {
             std.debug.print("\n", .{});
             print_node(unary_expr.expr, depth + 1, indent_amt);
         },
-        .union_type => |union_type| {
-            std.debug.print("UnionType:\n", .{});
-            print_node(union_type.left, depth + 1, indent_amt);
-            print_node(union_type.right, depth + 1, indent_amt);
-        },
         .while_stmt => |while_stmt| {
             std.debug.print("WhileStmt:", .{});
             write_location(while_stmt.line, while_stmt.column);

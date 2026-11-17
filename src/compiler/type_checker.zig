@@ -190,10 +190,6 @@ pub const TypeChecker = struct {
                 try self.require_pub_type(t.key, line, column, visited);
                 try self.require_pub_type(t.value, line, column, visited);
             },
-            ._union => |u| {
-                try self.require_pub_type(u.left, line, column, visited);
-                try self.require_pub_type(u.right, line, column, visited);
-            },
             .function => |f| {
                 for (f.args) |arg| try self.require_pub_type(arg, line, column, visited);
                 try self.require_pub_type(f.ret, line, column, visited);
@@ -949,33 +945,22 @@ pub const TypeChecker = struct {
                     return TypeCheckerError.TypeMismatch;
                 }
 
-                const union_type = try self.registry.add_union_type(type_info.coroutine.yield, type_info.coroutine.ret);
-                expr.resolved_type = union_type;
-                return union_type;
+                // TODO: optionals
+                if (type_info.coroutine.yield != type_info.coroutine.ret) {
+                    try self.fail("Type Mismatch", "`resume` requires the coroutine's yield type and return type to match until `resume` produces `?Y`.", expr.line, expr.column);
+                    return TypeCheckerError.TypeMismatch;
+                }
+                expr.resolved_type = type_info.coroutine.yield;
+                return type_info.coroutine.yield;
             },
             .try_expr => |expr| {
-                const expected = self.expected_return_type orelse {
+                //  TODO: error unions
+                if (self.expected_return_type == null) {
                     try self.fail("`try` used outside function or coroutine", "`try` returns an error and so must be within a function or coroutine.", expr.line, expr.column);
                     return TypeCheckerError.TryOutsideFunction;
-                };
-                if (self.split_error_union(expected) == null) {
-                    try self.fail("Invalid Return Type", "A function that contains a `try` expression must have a union as its return type with an Error on one side.", expr.line, expr.column);
-                    return TypeCheckerError.InvalidReturnType;
                 }
-
-                const expr_typeid = try self.check_expression(expr.expr);
-                const parts = self.split_error_union(expr_typeid) orelse {
-                    try self.fail("Invalid Operation", "`try` can only be used on a union which contains an Error.", expr.line, expr.column);
-                    return TypeCheckerError.InvalidOperation;
-                };
-
-                if (!try self.is_compatible(expected, parts.err)) {
-                    try self.fail("Invalid Return Type", "The possibly returned error's type does not match the function return type.", expr.line, expr.column);
-                    return TypeCheckerError.InvalidReturnType;
-                }
-
-                expr.resolved_type = parts.success;
-                return expr.resolved_type;
+                try self.fail("Invalid Operation", "`try` requires error unions (`E!T`), which are not yet supported.", expr.line, expr.column);
+                return TypeCheckerError.InvalidOperation;
             },
             .binary_expr => |expr| {
                 const left_type: AST.TypeId = try self.check_expression(expr.left);
@@ -1034,48 +1019,13 @@ pub const TypeChecker = struct {
                     expr.resolved_type = @backingInt(PrimitiveType.Int);
                     return expr.resolved_type;
                 } else if (std.mem.eql(u8, op, "orelse")) {
-                    // a orelse b
-                    // if a is nil then give me b
-
-                    // a must be a union with Nil
-
-                    const left_info = self.registry.get_type_info(left_type);
-                    if (left_info != ._union) {
-                        try self.fail("Invalid Operation", "`orelse` requires a union with Nil on one side.", expr.line, expr.column);
-                        return TypeCheckerError.InvalidOperation;
-                    }
-
-                    if (!((left_info._union.left == @backingInt(PrimitiveType.Nil) and left_info._union.right != @backingInt(PrimitiveType.Nil)) or (left_info._union.left != @backingInt(PrimitiveType.Nil) and left_info._union.right == @backingInt(PrimitiveType.Nil)))) {
-                        try self.fail("Invalid Operation", "`orelse` requires exactly one side of the union to be Nil.", expr.line, expr.column);
-                        return TypeCheckerError.InvalidOperation;
-                    }
-                    const non_nil_side = if (left_info._union.left == @backingInt(PrimitiveType.Nil)) left_info._union.right else left_info._union.left;
-                    const result_union = try self.registry.add_union_type(non_nil_side, right_type);
-                    expr.resolved_type = result_union;
-                    return expr.resolved_type;
+                    // TODO: optionals
+                    try self.fail("Invalid Operation", "`orelse` requires optional types (`?T`), which are not yet supported.", expr.line, expr.column);
+                    return TypeCheckerError.InvalidOperation;
                 } else if (std.mem.eql(u8, op, "catch")) {
-                    // a catch b
-                    // if a is error then give me b
-
-                    // a must be a union with Error
-
-                    const left_info = self.registry.get_type_info(left_type);
-                    if (left_info != ._union) {
-                        try self.fail("Invalid Operation", "`catch` requires a union with an Error on one side.", expr.line, expr.column);
-                        return TypeCheckerError.InvalidOperation;
-                    }
-
-                    const union_left = self.registry.get_type_info(left_info._union.left);
-                    const union_right = self.registry.get_type_info(left_info._union.right);
-
-                    if (!((union_left == ._error and union_right != ._error) or (union_left != ._error and union_right == ._error))) {
-                        try self.fail("Invalid Operation", "`catch` requires exactly one side of the union to be an Error.", expr.line, expr.column);
-                        return TypeCheckerError.InvalidOperation;
-                    }
-                    const non_error_side = if (union_left == ._error) left_info._union.right else left_info._union.left;
-                    const result_union = try self.registry.add_union_type(non_error_side, right_type);
-                    expr.resolved_type = result_union;
-                    return expr.resolved_type;
+                    // TODO: error unions
+                    try self.fail("Invalid Operation", "`catch` requires error unions (`E!T`), which are not yet supported.", expr.line, expr.column);
+                    return TypeCheckerError.InvalidOperation;
                 } else {
                     try self.fail("Invalid Operation", "Unsupported binary operator.", expr.line, expr.column);
                     return TypeCheckerError.InvalidOperation;
@@ -1725,14 +1675,6 @@ pub const TypeChecker = struct {
         };
     }
 
-    fn unionContainsPrimitive(self: *TypeChecker, id: AST.TypeId) bool {
-        const info = self.registry.get_type_info(id);
-        if (info == ._union) {
-            return self.unionContainsPrimitive(info._union.left) or self.unionContainsPrimitive(info._union.right);
-        }
-        return self.isPrimitiveTypeId(id);
-    }
-
     fn isNeverTypeId(self: *TypeChecker, id: AST.TypeId) bool {
         _ = self;
         return id == @backingInt(PrimitiveType.Never);
@@ -1780,14 +1722,8 @@ pub const TypeChecker = struct {
 
         _ = self.registry.get_type_info(matched_type);
 
-        // Primitive, union containing primitive, array, table, tuple, etc. -> requires default
-        if (self.unionContainsPrimitive(matched_type)) {
-            try self.fail("Non-exhaustive match", "Match on primitive or union containing primitive requires `default`.", expr.line, expr.column);
-            return TypeCheckerError.NonExhaustiveMatch;
-        }
-
-        // Pure enum/error (or union of them) - check variant coverage
-        // Collect all enum/error variants from (possibly union) type
+        // Pure enum/error - check variant coverage
+        // Collect all enum/error variants from type
         var expected_variants: std.ArrayList([]const u8) = .empty;
         defer expected_variants.deinit(self.allocator);
         var has_enum_error = false;
@@ -1804,10 +1740,6 @@ pub const TypeChecker = struct {
                     ._error => |e| {
                         has.* = true;
                         for (e.variants) |v| try out.append(s.allocator, v);
-                    },
-                    ._union => |u| {
-                        try run(s, u.left, out, has);
-                        try run(s, u.right, out, has);
                     },
                     else => {},
                 }
@@ -1861,9 +1793,6 @@ pub const TypeChecker = struct {
         if (target == source) return true;
 
         const source_info = self.registry.get_type_info(source);
-        if (source_info == ._union) {
-            return (try self.is_compatible(target, source_info._union.left)) and (try self.is_compatible(target, source_info._union.right));
-        }
 
         const target_info = self.registry.get_type_info(target);
 
@@ -1881,30 +1810,10 @@ pub const TypeChecker = struct {
             const val_compat = (source_info.table.value == @backingInt(PrimitiveType.Never)) or (target_info.table.value == source_info.table.value);
             return key_compat and val_compat;
         }
-
-        return switch (target_info) {
-            ._union => |u| {
-                // source is compatible if it fits either side of target union
-                return (try self.is_compatible(u.left, source)) or (try self.is_compatible(u.right, source));
-            },
-            else => return false,
-        };
+        return false;
     }
 
     fn fail(self: *TypeChecker, message: []const u8, hint: ?[]const u8, line: usize, column: usize) !void {
         try self.diagnostics.add_diagnostic(.{ .file_path = self.module.filepath, .column = column, .line = line, .stage = .TypeChecker, .severity = .Error, .message = message, .hint = hint });
-    }
-
-    fn split_error_union(self: *TypeChecker, id: AST.TypeId) ?struct { success: AST.TypeId, err: AST.TypeId } {
-        const info = self.registry.get_type_info(id);
-        if (info != ._union) return null;
-        const left_err = self.registry.get_type_info(info._union.left) == ._error;
-        const right_err = self.registry.get_type_info(info._union.right) == ._error;
-        if (!left_err and !right_err) return null;
-        // NOTE: if both sides are errors - take the left hand side.
-        return .{
-            .err = if (left_err) info._union.left else info._union.right,
-            .success = if (left_err) info._union.right else info._union.left,
-        };
     }
 };

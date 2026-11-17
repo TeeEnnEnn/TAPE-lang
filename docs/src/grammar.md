@@ -33,7 +33,6 @@ error_decl      ::= 'error' IDENTIFIER '{' enum_variants? '}'
 
 /* --- Types --- */
 type_expr       ::= IDENTIFIER ('[' type_expr (',' type_expr)* ']')?  /* Generics e.g. Array[Int] */
-                  | type_expr '|' type_expr                           /* Unions e.g. Float | Nil */
                   | 'Nil' | 'Bool' | 'Int' | 'Float' | 'String'
                   | 'Never'
                   | 'Array' '[' type_expr ']'
@@ -77,7 +76,7 @@ assign_op       ::= '=' | '+=' | '-=' | '*=' | '/=' | '%=' | '**=' | '++='
 
 range           ::= logic_or ('..' logic_or)?
 
-logic_or        ::= logic_and ('or' logic_and | 'orelse' logic_and | 'catch' logic_and)*
+logic_or        ::= logic_and ('or' logic_and)*
 logic_and       ::= bit_or ('and' bit_or)*
 bit_or          ::= bit_xor ('|' bit_xor)*
 bit_xor         ::= bit_and ('^' bit_and)*

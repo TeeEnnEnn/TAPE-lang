@@ -40,7 +40,6 @@ pub const TypeInfo = union(enum) {
     function: struct { args: []TypeId, ret: TypeId },
     native_function: struct { args: []TypeId, ret: TypeId },
     coroutine: struct { args: []TypeId, ret: TypeId, yield: TypeId, resume_with: TypeId },
-    _union: struct { left: TypeId, right: TypeId },
     _error: struct { name: []const u8, variants: [][]const u8, source_file: []const u8 },
     _enum: struct { name: []const u8, variants: [][]const u8, source_file: []const u8 },
     _struct: struct { name: []const u8, fields: []StructField, methods: []StructMethod, source_file: []const u8 },
@@ -164,11 +163,6 @@ pub const TypeRegistry = struct {
                     return id;
                 }
                 return TypeRegistryError.UnknownType;
-            },
-            .union_type => |union_node| {
-                const left_id = try self.resolve(union_node.left);
-                const right_id = try self.resolve(union_node.right);
-                return try self.add_union_type(left_id, right_id);
             },
             else => {
                 return TypeRegistryError.UnknownType;
@@ -333,26 +327,6 @@ pub const TypeRegistry = struct {
         // add new type
         const id = @as(TypeId, @intCast(self.types.items.len));
         try self.types.append(self.allocator, .{ .identifier = .{ .name = name, .generics = generics } });
-        return id;
-    }
-
-    pub fn add_union_type(self: *TypeRegistry, left_id: TypeId, right_id: TypeId) !TypeId {
-        if (left_id == right_id) return left_id;
-        for (self.types.items, 0..) |info, index| {
-            switch (info) {
-                ._union => |u| {
-                    // Unions are sets of members: `A | B` and `B | A` are the same type.
-                    if ((u.left == left_id and u.right == right_id) or (u.left == right_id and u.right == left_id)) {
-                        return @as(TypeId, @intCast(index));
-                    }
-                },
-                else => continue,
-            }
-        }
-
-        // add new type
-        const id = @as(TypeId, @intCast(self.types.items.len));
-        try self.types.append(self.allocator, .{ ._union = .{ .left = left_id, .right = right_id } });
         return id;
     }
 

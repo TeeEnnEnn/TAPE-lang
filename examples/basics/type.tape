@@ -1,28 +1,29 @@
-// Type aliases are transparent: `Number` resolves to the union Int | Float.
-// Any member of the union is accepted wherever the alias is expected.
+// Type aliases are transparent: `UserId` resolves to the underlying type.
+// The alias and the underlying type are interchangeable.
 
-type Number = Int | Float;
+type UserId = Int;
 
-var a: Number = 12;
-var b: Number = 1.24;
+var a: UserId = 12;
+var b: Int = a;
 
-// Alias in parameter position: call sites pass plain union members
-fn pass_through(x: Number) -> Number {
+// Alias in parameter position: call sites pass plain values
+fn pass_through(x: UserId) -> UserId {
 	return x;
 }
 
-var p1: Number = pass_through(12);
-var p2: Number = pass_through(1.24);
+var p1: UserId = pass_through(12);
+var p2: Int = pass_through(7);
 
-// Alias in return position: any member can flow out of the function
-fn as_number(x: Int) -> Number {
+// Alias in return position: the underlying type flows out unchanged
+fn as_id(x: Int) -> UserId {
 	return x;
 }
 
-var r1: Number = as_number(7);
+var r1: UserId = as_id(7);
+var r2: Int = as_id(9);
 
-// Alias of an alias flattens to the same underlying type
-type MyNumber = Number;
+// Alias of an alias resolves to the same underlying type
+type AccountId = UserId;
 
-var m: MyNumber = 5;
-var m2: MyNumber = pass_through(2.5);
+var m: AccountId = 5;
+var m2: Int = pass_through(11);

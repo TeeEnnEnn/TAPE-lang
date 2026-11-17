@@ -116,7 +116,6 @@ pub const ASTNode = union(enum) {
     identifier_type: *IdentifierType,
     fn_type: *FnType,
     co_type: *CoType,
-    union_type: *UnionType,
 };
 
 // Node Types
@@ -731,11 +730,6 @@ pub const IdentifierType = struct {
     name: Token,
     source_file: []const u8,
     generic_args: ?[]*ASTNode,
-};
-
-pub const UnionType = struct {
-    left: *ASTNode,
-    right: *ASTNode,
 };
 
 // match patterns

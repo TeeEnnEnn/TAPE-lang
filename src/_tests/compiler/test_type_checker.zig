@@ -686,13 +686,14 @@ test "Type Checker - resume on non-coroutine" {
     try std.testing.expectError(TypeCheckerError.InvalidOperation, checkSource(allocator, "var x = 5; var y = resume x;"));
 }
 
-test "Type Checker - resume result is union of yield and return" {
+test "Type Checker - resume matches yield and return types" {
     var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
     defer arena.deinit();
     const allocator = arena.allocator();
 
+    // while yield and return agree, resume produces the coroutine's yield type
     var result = try checkSource(allocator,
-        \\co gen() -> (Int, Nil, String) { yield 1; return "done"; }
+        \\co gen() -> (Int, Nil, Int) { yield 1; return 2; }
         \\var c = gen();
         \\var v = resume c;
     );
@@ -700,10 +701,15 @@ test "Type Checker - resume result is union of yield and return" {
     defer result.registry.deinit();
 
     const v_type = try result.env.lookup("v");
-    const info = result.registry.get_type_info(v_type);
-    try std.testing.expect(info == ._union);
-    try std.testing.expectEqual(@backingInt(PrimitiveType.Int), info._union.left);
-    try std.testing.expectEqual(@backingInt(PrimitiveType.String), info._union.right);
+    try std.testing.expectEqual(@backingInt(PrimitiveType.Int), v_type);
+
+    // Temporary bridge: until `resume` produces `?Y`, coroutines whose yield
+    // and return types differ cannot be resumed.
+    try std.testing.expectError(TypeCheckerError.TypeMismatch, checkSource(allocator,
+        \\co gen() -> (Int, Nil, String) { yield 1; return "done"; }
+        \\var c = gen();
+        \\var v = resume c;
+    ));
 }
 
 test "Type Checker - coroutine member access" {
@@ -744,9 +750,10 @@ test "Type Checker - nested coroutines" {
     const allocator = arena.allocator();
 
     // coroutine calling another coroutine
-    _ = try checkSource(allocator, "co inner() -> (Int, Nil, Nil) { yield 1; } co outer() -> (Int, Nil, Nil) { yield 1; var c = inner(); resume c; }");
+    // (nested coroutines must agree on yield/return types to be resumed)
+    _ = try checkSource(allocator, "co inner() -> (Int, Nil, Int) { yield 1; return 1; } co outer() -> (Int, Nil, Nil) { yield 1; var c = inner(); resume c; }");
     // coroutine declared inside a block within a coroutine
-    _ = try checkSource(allocator, "co outer() -> (Int, Nil, Nil) { yield 1; { co inner() -> (Int, Nil, Nil) { yield 2; } var c = inner(); resume c; } }");
+    _ = try checkSource(allocator, "co outer() -> (Int, Nil, Nil) { yield 1; { co inner() -> (Int, Nil, Int) { yield 2; return 2; } var c = inner(); resume c; } }");
 }
 
 test "Type Checker - coroutine type carries yield, resume_with, return" {
@@ -784,13 +791,13 @@ test "Type Checker - resume with value type checks" {
     const allocator = arena.allocator();
 
     // valid: passing a String to a coroutine whose resume_with is String
-    _ = try checkSource(allocator, "co f() -> (Int, String, String) { var r = yield 1; return r; } var c = f(); var x = resume c with \"hi\";");
+    _ = try checkSource(allocator, "co f() -> (String, String, String) { var r = yield \"yo\"; return r; } var c = f(); var x = resume c with \"hi\";");
     // mismatch: passing an Int when resume_with is String
     try std.testing.expectError(TypeCheckerError.TypeMismatch, checkSource(allocator, "co f() -> (Int, String, String) { var r = yield 1; return r; } var c = f(); var x = resume c with 5;"));
     // omitting the value passes nil, which must match resume_with
     try std.testing.expectError(TypeCheckerError.TypeMismatch, checkSource(allocator, "co f() -> (Int, String, Nil) { var r = yield 1; return nil; } var c = f(); var x = resume c;"));
     // nil resume_with accepts both omission and explicit nil
-    _ = try checkSource(allocator, "co f() -> (Int, Nil, Nil) { var r = yield 1; return nil; } var c = f(); var x = resume c;");
+    _ = try checkSource(allocator, "co f() -> (Int, Nil, Int) { var r = yield 1; return 1; } var c = f(); var x = resume c;");
 }
 
 test "Type Checker - yield produces nil" {

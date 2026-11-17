@@ -69,19 +69,6 @@ test "TypeRegistry - Table Types" {
     try std.testing.expectEqual(table_id, table_id2);
 }
 
-test "TypeRegistry - Union Types" {
-    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
-    defer arena.deinit();
-    const allocator = arena.allocator();
-
-    var registry = try TypeRegistry.init(allocator);
-    defer registry.deinit();
-
-    const union_id = try resolveType(allocator, &registry, "Int | Nil");
-    const union_id2 = try resolveType(allocator, &registry, "Int | Nil");
-    try std.testing.expectEqual(union_id, union_id2);
-}
-
 test "TypeRegistry - Function Types" {
     var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
     defer arena.deinit();
