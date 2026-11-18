@@ -341,6 +341,7 @@ pub const BindingResolver = struct {
             .float_type,
             .string_type,
             .bool_type,
+            .optional_type,
             .array_type,
             .table_type,
             .range_type,

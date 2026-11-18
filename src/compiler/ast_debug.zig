@@ -177,6 +177,10 @@ pub fn print_node(node: *AST.ASTNode, depth: usize, indent_amt: usize) void {
                 print_node(element, depth + 1, indent_amt);
             }
         },
+        .optional_type => |optional_type| {
+            std.debug.print("OptionalType:\n", .{});
+            print_node(optional_type.inner, depth + 1, indent_amt);
+        },
         .array_type => |array_type| {
             std.debug.print("ArrayType:\n", .{});
             print_node(array_type.element_type, depth + 1, indent_amt);

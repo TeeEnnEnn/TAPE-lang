@@ -69,6 +69,26 @@ test "TypeRegistry - Table Types" {
     try std.testing.expectEqual(table_id, table_id2);
 }
 
+test "TypeRegistry - Optional Types" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const allocator = arena.allocator();
+
+    var registry = try TypeRegistry.init(allocator);
+    defer registry.deinit();
+
+    const opt_int = try resolveType(allocator, &registry, "?Int");
+    const opt_int2 = try resolveType(allocator, &registry, "?Int");
+    // Deduplication: the same inner type resolves to the same TypeId
+    try std.testing.expectEqual(opt_int, opt_int2);
+    try std.testing.expect(opt_int != @backingInt(PrimitiveType.Int));
+
+    // `?Nil` and nested optionals are also rejected at the registry level so
+    // aliases cannot smuggle them past the parser.
+    try std.testing.expectError(error.OptionalOfNil, registry.add_optional_type(@backingInt(PrimitiveType.Nil)));
+    try std.testing.expectError(error.NestedOptional, registry.add_optional_type(opt_int));
+}
+
 test "TypeRegistry - Function Types" {
     var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
     defer arena.deinit();

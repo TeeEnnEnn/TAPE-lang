@@ -74,6 +74,10 @@ pub const TokenType = enum {
     PIPE,
     /// '~'
     TILDE,
+    /// '?'
+    QUESTION,
+    /// '!'
+    BANG,
     /// '+='
     PLUS_EQUAL,
     /// '-='
@@ -520,7 +524,7 @@ pub const Scanner = struct {
                 break :blk self.make_token(.STAR);
             },
             '%' => self.make_token(if (self.match('=')) .PERCENT_EQUAL else .PERCENT),
-            '!' => if (self.match('=')) self.make_token(.NOT_EQUAL) else error.UnexpectedToken,
+            '!' => self.make_token(if (self.match('=')) .NOT_EQUAL else .BANG),
             '=' => if (self.match('='))
                 self.make_token(.EQUAL_EQUAL)
             else if (self.match('>'))
@@ -540,6 +544,7 @@ pub const Scanner = struct {
             '|' => self.make_token(.PIPE),
             '^' => self.make_token(.CARET),
             '~' => self.make_token(.TILDE),
+            '?' => self.make_token(.QUESTION),
             else => {
                 return ScannerError.UnexpectedCharacter;
             },

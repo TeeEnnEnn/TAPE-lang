@@ -20,6 +20,8 @@ pub const StructMethod = struct {
 pub const TypeRegistryError = error{
     UnknownType,
     TypeResolutionConflict,
+    NestedOptional,
+    OptionalOfNil,
 } || std.mem.Allocator.Error;
 
 pub const PrimitiveType = enum(TypeId) {
@@ -40,6 +42,7 @@ pub const TypeInfo = union(enum) {
     function: struct { args: []TypeId, ret: TypeId },
     native_function: struct { args: []TypeId, ret: TypeId },
     coroutine: struct { args: []TypeId, ret: TypeId, yield: TypeId, resume_with: TypeId },
+    optional: struct { inner: TypeId },
     _error: struct { name: []const u8, variants: [][]const u8, source_file: []const u8 },
     _enum: struct { name: []const u8, variants: [][]const u8, source_file: []const u8 },
     _struct: struct { name: []const u8, fields: []StructField, methods: []StructMethod, source_file: []const u8 },
@@ -153,6 +156,10 @@ pub const TypeRegistry = struct {
                 const end_id = try self.resolve(range.end);
                 return try self.add_range_type(start_id, end_id);
             },
+            .optional_type => |optional| {
+                const inner_id = try self.resolve(optional.inner);
+                return try self.add_optional_type(inner_id);
+            },
 
             .identifier_type => |identifier| {
                 const name = identifier.name.lexeme;
@@ -168,6 +175,34 @@ pub const TypeRegistry = struct {
                 return TypeRegistryError.UnknownType;
             },
         };
+    }
+
+    pub fn add_optional_type(self: *TypeRegistry, inner_type: TypeId) !TypeId {
+        // an optional of nil is not allowed
+        if (inner_type == @backingInt(PrimitiveType.Nil)) {
+            return TypeRegistryError.OptionalOfNil;
+        }
+        // a nested optional is not allowed
+        if (self.get_type_info(inner_type) == .optional) {
+            return TypeRegistryError.NestedOptional;
+        }
+
+        // check for existing type
+        for (self.types.items, 0..) |info, index| {
+            switch (info) {
+                .optional => |existing| {
+                    if (existing.inner == inner_type) {
+                        return @as(TypeId, @intCast(index));
+                    }
+                },
+                else => continue,
+            }
+        }
+
+        // add new type
+        const id = @as(TypeId, @intCast(self.types.items.len));
+        try self.types.append(self.allocator, .{ .optional = .{ .inner = inner_type } });
+        return id;
     }
 
     pub fn add_array_type(self: *TypeRegistry, element_type: TypeId) !TypeId {

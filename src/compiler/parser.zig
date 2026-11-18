@@ -14,6 +14,7 @@ const ScannerError = @import("scanner.zig").ScannerError;
 
 pub const ParserError = ScannerError || std.mem.Allocator.Error || std.fmt.ParseIntError || std.fmt.ParseFloatError || std.Io.RandomSecureError || WorkspaceError || error{
     UnexpectedToken,
+    BogusTypeDefinition,
 };
 
 pub const Parser = struct {
@@ -752,6 +753,15 @@ pub const Parser = struct {
 
     fn parse_type_expression(self: *Parser) ParserError!*AST.ASTNode {
         var left: *AST.ASTNode = undefined;
+        var optional: bool = false;
+        if (try self.match(.QUESTION)) {
+            // The VM has a single `nil` tag, so `??T` (nil vs `some(nil)`) cannot be represented.
+            if (self.check(.QUESTION)) {
+                try self.fail("Bogus Type Definition", "Nested optionals (`??T`) are not supported because `nil` and `some(nil)` cannot be distinguished at runtime.");
+                return ParserError.BogusTypeDefinition;
+            }
+            optional = true;
+        }
 
         if (try self.match(.FN)) {
             // Function Type: fn (Int, Float) -> Bool
@@ -801,6 +811,10 @@ pub const Parser = struct {
             node.* = .{ .co_type = co_type };
             left = node;
         } else if (try self.match(.NIL_TYPE)) {
+            if (optional) {
+                try self.fail("Bogus Type Definition", "`?Nil` is not allowed. Nil cannot be optional.");
+                return ParserError.BogusTypeDefinition;
+            }
             const nil_type = try self.allocator.create(AST.NilType);
             nil_type.* = .{};
             const node = try self.allocator.create(AST.ASTNode);
@@ -908,6 +922,14 @@ pub const Parser = struct {
             id_type.* = .{ .name = name, .generic_args = generic_args, .source_file = self.module.filepath };
             const node = try self.allocator.create(AST.ASTNode);
             node.* = .{ .identifier_type = id_type };
+            left = node;
+        }
+
+        if (optional) {
+            const optional_node = try self.allocator.create(AST.OptionalType);
+            optional_node.* = .{ .inner = left };
+            const node = try self.allocator.create(AST.ASTNode);
+            node.* = .{ .optional_type = optional_node };
             left = node;
         }
 

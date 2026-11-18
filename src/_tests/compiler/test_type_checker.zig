@@ -1027,3 +1027,101 @@ test "Workspace rejects an imported name that collides with a local declaration"
     try std.testing.expectEqual(@as(usize, 1), workspace.diagnostics.diagnostics.items.len);
     try std.testing.expectEqualStrings("Duplicate symbol", workspace.diagnostics.diagnostics.items[0].message);
 }
+
+// --- Optionals (?T) ---
+
+test "Type Checker - optional widening" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const allocator = arena.allocator();
+
+    // nil and T widen into ?T
+    _ = try checkSource(allocator, "var x: ?Int = nil;");
+    _ = try checkSource(allocator, "var x: ?Int = 5;");
+    _ = try checkSource(allocator, "var x: ?Int = 5; x = 6;");
+    _ = try checkSource(allocator, "var x: ?Int = 5; x = nil;");
+    // ?T -> ?T
+    _ = try checkSource(allocator, "var x: ?Int = 5; var y: ?Int = x; y = x;");
+    // inner types beyond primitives
+    _ = try checkSource(allocator, "var s: ?String = nil; s = \"hi\";");
+    _ = try checkSource(allocator, "var a: ?Array[Int] = nil; a = [1, 2];");
+    _ = try checkSource(allocator, "var b: ?Bool = nil; b = true;");
+    _ = try checkSource(allocator, "struct P { pub x: Int } var p: ?P = nil; p = new P { x = 1 };");
+}
+
+test "Type Checker - optionals do not implicitly narrow" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const allocator = arena.allocator();
+
+    try std.testing.expectError(TypeCheckerError.TypeMismatch, checkSource(allocator, "var x: ?Int = 5; var y: Int = x;"));
+    try std.testing.expectError(TypeCheckerError.TypeMismatch, checkSource(allocator, "var x: ?Int = 5; var y: Int = 0; y = x;"));
+    try std.testing.expectError(TypeCheckerError.TypeMismatch, checkSource(allocator, "var x: ?Int = \"nope\";"));
+    try std.testing.expectError(TypeCheckerError.TypeMismatch, checkSource(allocator, "var x: ?Int = 5; x = \"nope\";"));
+    try std.testing.expectError(TypeCheckerError.TypeMismatch, checkSource(allocator, "var x: ?Int = 5; var y: ?String = x;"));
+}
+
+test "Type Checker - optionals in function signatures" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const allocator = arena.allocator();
+
+    _ = try checkSource(allocator, "fn f(x: ?Int) -> ?Int { return x; } var a = f(nil); var b = f(5);");
+    _ = try checkSource(allocator, "fn f() -> ?Int { return nil; } fn g() -> ?Int { return 5; }");
+    try std.testing.expectError(TypeCheckerError.TypeMismatch, checkSource(allocator, "fn f(x: ?Int) -> ?Int { return x; } var a = f(\"s\");"));
+    try std.testing.expectError(TypeCheckerError.TypeMismatch, checkSource(allocator, "fn f() -> ?Int { return \"s\"; }"));
+}
+
+test "Type Checker - orelse on optionals" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const allocator = arena.allocator();
+
+    // ?T orelse T -> T
+    var result = try checkSource(allocator, "var x: ?Int = nil; var y: Int = x orelse 0;");
+    defer result.env.deinit();
+    defer result.registry.deinit();
+    try std.testing.expectEqual(@backingInt(PrimitiveType.Int), try result.env.lookup("y"));
+
+    // chaining: ?T orelse ?T -> ?T
+    var result2 = try checkSource(allocator, "var x: ?Int = nil; var z: ?Int = nil; var y: ?Int = x orelse z;");
+    defer result2.env.deinit();
+    defer result2.registry.deinit();
+    try std.testing.expectEqual(try result2.env.lookup("z"), try result2.env.lookup("y"));
+
+    // non-primitive inner type
+    _ = try checkSource(allocator, "var x: ?String = nil; var y: String = x orelse \"a\";");
+
+    // LHS must be an optional
+    try std.testing.expectError(TypeCheckerError.InvalidOperation, checkSource(allocator, "var x: Int = 1; var y = x orelse 0;"));
+    // fallback must match the inner type
+    try std.testing.expectError(TypeCheckerError.TypeMismatch, checkSource(allocator, "var x: ?Int = nil; var y: Int = x orelse \"s\";"));
+}
+
+test "Type Checker - optional equality" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const allocator = arena.allocator();
+
+    _ = try checkSource(allocator, "var x: ?Int = nil; var a = x == nil; var b = x != nil;");
+    _ = try checkSource(allocator, "var x: ?Int = nil; var y: ?Int = 1; var a = x == y; var b = x != y;");
+    _ = try checkSource(allocator, "var x: ?Int = nil; var a = x == 5; var b = 5 != x;");
+
+    // different inner types are not comparable
+    try std.testing.expectError(TypeCheckerError.TypeMismatch, checkSource(allocator, "var x: ?Int = nil; var a = x == \"s\";"));
+    // ordering comparisons stay strict: no implicit unwrapping
+    try std.testing.expectError(TypeCheckerError.TypeMismatch, checkSource(allocator, "var x: ?Int = nil; var a = x < 5;"));
+}
+
+test "Type Checker - optional aliases and nested-optional bans" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const allocator = arena.allocator();
+
+    // an alias of an optional resolves to the same optional type
+    _ = try checkSource(allocator, "type MaybeInt = ?Int; var x: MaybeInt = nil; var y: ?Int = x; var z: MaybeInt = 5;");
+
+    // aliases cannot smuggle in ??T or ?Nil
+    try std.testing.expectError(error.NestedOptional, checkSource(allocator, "type MaybeInt = ?Int; var x: ?MaybeInt = nil;"));
+    try std.testing.expectError(error.OptionalOfNil, checkSource(allocator, "type NoVal = Nil; var x: ?NoVal = nil;"));
+}

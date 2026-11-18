@@ -401,6 +401,38 @@ test "Parser allows fn bodies and locals inside non-entrypoint modules" {
     try std.testing.expectEqual(@as(usize, 1), program.program.declarations.len);
 }
 
+test "Parser parses optional type annotations" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const allocator = arena.allocator();
+
+    const node = try parseFirstDecl(allocator, "var x: ?Int = nil;");
+    try std.testing.expect(node.* == .var_decl);
+    const annot = node.var_decl.type_annotation.?;
+    try std.testing.expect(annot.* == .optional_type);
+    try std.testing.expect(annot.optional_type.inner.* == .int_type);
+
+    // optionals of structural types parse too
+    const node2 = try parseFirstDecl(allocator, "var xs: ?Array[Int] = nil;");
+    const annot2 = node2.var_decl.type_annotation.?;
+    try std.testing.expect(annot2.* == .optional_type);
+    try std.testing.expect(annot2.optional_type.inner.* == .array_type);
+
+    // function signatures
+    const fn_node = try parseFirstDecl(allocator, "fn f(x: ?Int) -> ?String { return nil; }");
+    try std.testing.expect(fn_node.fn_decl.params[0].type_annotation.* == .optional_type);
+    try std.testing.expect(fn_node.fn_decl.return_type_annotation.* == .optional_type);
+}
+
+test "Parser rejects ?Nil and nested optionals" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const allocator = arena.allocator();
+
+    try std.testing.expectError(ParserError.BogusTypeDefinition, parseFirstDecl(allocator, "var x: ?Nil = nil;"));
+    try std.testing.expectError(ParserError.BogusTypeDefinition, parseFirstDecl(allocator, "var x: ??Int = nil;"));
+}
+
 test "Parser accepts pub use for re-exports" {
     var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
     defer arena.deinit();

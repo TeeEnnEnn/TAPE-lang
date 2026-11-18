@@ -182,6 +182,7 @@ pub const TypeChecker = struct {
             return;
         }
         switch (type_info) {
+            .optional => |o| try self.require_pub_type(o.inner, line, column, visited),
             .array => |elem| try self.require_pub_type(elem, line, column, visited),
             .tuple => |items| {
                 for (items) |item| try self.require_pub_type(item, line, column, visited);
@@ -982,7 +983,15 @@ pub const TypeChecker = struct {
                     try self.fail("Invalid Operation", "Arithmetic operators require numeric operands.", expr.line, expr.column);
                     return TypeCheckerError.InvalidOperation;
                 } else if (std.mem.eql(u8, op, "==") or std.mem.eql(u8, op, "!=") or std.mem.eql(u8, op, "<") or std.mem.eql(u8, op, "<=") or std.mem.eql(u8, op, ">") or std.mem.eql(u8, op, ">=")) {
-                    if (left_type != right_type) {
+                    if (std.mem.eql(u8, op, "==") or std.mem.eql(u8, op, "!=")) {
+                        // Equality also accepts `?T == nil` and `?T == T`
+                        const compatible = try self.is_compatible(left_type, right_type) or
+                            try self.is_compatible(right_type, left_type);
+                        if (!compatible) {
+                            try self.fail("Type Mismatch", "Comparison operators require operands of compatible types.", expr.line, expr.column);
+                            return TypeCheckerError.TypeMismatch;
+                        }
+                    } else if (left_type != right_type) {
                         try self.fail("Type Mismatch", "Comparison operators require operands of the same type.", expr.line, expr.column);
                         return TypeCheckerError.TypeMismatch;
                     }
@@ -1019,9 +1028,34 @@ pub const TypeChecker = struct {
                     expr.resolved_type = @backingInt(PrimitiveType.Int);
                     return expr.resolved_type;
                 } else if (std.mem.eql(u8, op, "orelse")) {
-                    // TODO: optionals
-                    try self.fail("Invalid Operation", "`orelse` requires optional types (`?T`), which are not yet supported.", expr.line, expr.column);
-                    return TypeCheckerError.InvalidOperation;
+                    // `a orelse b`: if `a` is nil the result is `b`.
+                    // LHS must be `?T`; the result is `T` unless `b` is itself
+                    // optional, in which case chaining keeps `?T`.
+                    const left_info = self.registry.get_type_info(left_type);
+                    if (left_info != .optional) {
+                        try self.fail("Invalid Operation", "`orelse` requires an optional (`?T`) on the left-hand side.", expr.line, expr.column);
+                        return TypeCheckerError.InvalidOperation;
+                    }
+                    const inner = left_info.optional.inner;
+
+                    if (right_type == @backingInt(PrimitiveType.Never)) {
+                        expr.resolved_type = inner;
+                        return expr.resolved_type;
+                    }
+                    if (try self.is_compatible(inner, right_type)) {
+                        expr.resolved_type = inner;
+                        return expr.resolved_type;
+                    }
+                    const right_info = self.registry.get_type_info(right_type);
+                    if (right_info == .optional) {
+                        if (try self.is_compatible(inner, right_info.optional.inner)) {
+                            expr.resolved_type = right_type;
+                            return expr.resolved_type;
+                        }
+                    }
+
+                    try self.fail("Type Mismatch", "`orelse` fallback must match the optional's inner type.", expr.line, expr.column);
+                    return TypeCheckerError.TypeMismatch;
                 } else if (std.mem.eql(u8, op, "catch")) {
                     // TODO: error unions
                     try self.fail("Invalid Operation", "`catch` requires error unions (`E!T`), which are not yet supported.", expr.line, expr.column);
@@ -1789,12 +1823,35 @@ pub const TypeChecker = struct {
         }
     }
 
+    /// Can a `source` value be used where a `target` value is expected
+    /// `source` is the type in question
+    /// `target` is the type that we are trying to be compatible with
     fn is_compatible(self: *TypeChecker, target: AST.TypeId, source: AST.TypeId) TypeCheckerError!bool {
         if (target == source) return true;
 
+        const target_info = self.registry.get_type_info(target);
         const source_info = self.registry.get_type_info(source);
 
-        const target_info = self.registry.get_type_info(target);
+        if (target_info == .optional) {
+            const inner = target_info.optional.inner;
+
+            // nil and Never (diverging) widen into any optional.
+            if (source == @backingInt(PrimitiveType.Nil)) return true;
+            if (source == @backingInt(PrimitiveType.Never)) return true;
+
+            // T -> ?T (implicit widening)
+            if (try self.is_compatible(inner, source)) return true;
+
+            // ?S -> ?T when S is itself usable as T.
+            if (source_info == .optional) {
+                return try self.is_compatible(inner, source_info.optional.inner);
+            }
+
+            return false;
+        }
+
+        // Optionals never implicitly unwrap: ?T -> T is rejected.
+        if (source_info == .optional) return false;
 
         //  Array[Never] matches Array[T] for any T
         if (target_info == .array and source_info == .array) {
