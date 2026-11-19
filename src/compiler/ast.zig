@@ -8,7 +8,8 @@ pub const TypeId = u32;
 /// Used to emit context aware bytecode
 pub const DeclRef = union(enum) {
     node: *ASTNode,
-
+    // used because `match` can have multiple captures
+    capture: *CaptureBindingExpr,
     // not AST nodes themselves but "sub-elements" of other AST nodes
     param: struct { func: *ASTNode, index: u32 },
     import: struct { use_decl: *ASTNode, index: u32 },
@@ -339,6 +340,7 @@ pub const ContinueStmt = struct {
 pub const WhileStmt = struct {
     condition: *ASTNode,
     body: *ASTNode,
+    capture: ?*CaptureBindingExpr,
     line: usize,
     column: usize,
 };
@@ -354,17 +356,20 @@ pub const ForStmt = struct {
     body: *ASTNode,
     line: usize,
     column: usize,
+    // TODO: add captures for iterating over coroutines. Maybe
 };
 
 /// If statement node.
 ///
 /// ```
-/// if ('expr') 'then_branch' ('else_branch')
+/// if ('expr')  'then_branch' ('else_branch')
+/// if ('optional_expr') bind ('bound_name') 'then_branch' 'else_branch'
 /// ```
 pub const IfStmt = struct {
     condition: *ASTNode,
     then_branch: *ASTNode,
     else_branch: ?*ASTNode,
+    capture: ?*CaptureBindingExpr,
     line: usize,
     column: usize,
 };
@@ -628,6 +633,14 @@ pub const StructMethodField = struct {
     name: Token,
     method: *ASTNode,
     is_pub: bool, // is accessible from outside the struct
+};
+
+pub const CaptureBindingExpr = struct {
+    name: Token,
+    /// non optional type that the name is bound with
+    resolved_type: TypeId = 0,
+    line: usize,
+    column: usize,
 };
 
 pub const ImportItem = struct {

@@ -177,6 +177,14 @@ pub const TypeRegistry = struct {
         };
     }
 
+    /// Returns the inner type of an optional, or null if `id` is not optional.
+    pub fn unwrap_optional(self: *TypeRegistry, id: TypeId) ?TypeId {
+        return switch (self.get_type_info(id)) {
+            .optional => |o| o.inner,
+            else => null,
+        };
+    }
+
     pub fn add_optional_type(self: *TypeRegistry, inner_type: TypeId) !TypeId {
         // an optional of nil is not allowed
         if (inner_type == @backingInt(PrimitiveType.Nil)) {

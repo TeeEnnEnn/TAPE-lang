@@ -1185,21 +1185,43 @@ pub const Parser = struct {
     }
 
     fn parse_while_statement(self: *Parser) ParserError!*AST.ASTNode {
+        const while_token = self.previous;
         try self.consume(.LEFT_PAREN, "Expected '(' to start while statement condition.");
         const condition = try self.parse_expression();
         try self.consume(.RIGHT_PAREN, "Expected ')' to end while statement condition.");
+        const capture = try self.parse_capture();
         const body = try self.parse_statement();
         const while_stmt = try self.allocator.create(AST.WhileStmt);
-        while_stmt.* = .{ .condition = condition, .body = body, .line = self.previous.line, .column = self.previous.column };
+        while_stmt.* = .{ .condition = condition, .body = body, .capture = capture, .line = while_token.line, .column = while_token.column };
         const node = try self.allocator.create(AST.ASTNode);
         node.* = .{ .while_stmt = while_stmt };
         return node;
     }
 
+    fn parse_capture(self: *Parser) ParserError!?*AST.CaptureBindingExpr {
+        if (!try self.match(.BIND)) return null;
+
+        try self.consume(.LEFT_PAREN, "Expected '(' after `bind`");
+        try self.consume(.IDENTIFIER, "Expected identifier to bind.");
+        const name = self.previous;
+        try self.consume(.RIGHT_PAREN, "Expected ')' after bound name.");
+        const capture = try self.allocator.create(AST.CaptureBindingExpr);
+        capture.* = .{
+            .name = name,
+            .line = name.line,
+            .column = name.column,
+        };
+        return capture;
+    }
+
     fn parse_if_statement(self: *Parser) ParserError!*AST.ASTNode {
+        const if_token = self.previous;
         try self.consume(.LEFT_PAREN, "Expected '(' to start if statement condition.");
         const condition = try self.parse_expression();
         try self.consume(.RIGHT_PAREN, "Expected ')' to end if statement condition.");
+
+        const capture = try self.parse_capture();
+
         const then_branch = try self.parse_statement();
 
         var else_branch: ?*AST.ASTNode = null;
@@ -1209,7 +1231,7 @@ pub const Parser = struct {
         }
 
         const if_stmt = try self.allocator.create(AST.IfStmt);
-        if_stmt.* = .{ .condition = condition, .then_branch = then_branch, .else_branch = else_branch, .line = self.previous.line, .column = self.previous.column };
+        if_stmt.* = .{ .condition = condition, .then_branch = then_branch, .else_branch = else_branch, .capture = capture, .line = if_token.line, .column = if_token.column };
         const node = try self.allocator.create(AST.ASTNode);
         node.* = .{ .if_stmt = if_stmt };
         return node;

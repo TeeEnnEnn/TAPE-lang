@@ -1125,3 +1125,49 @@ test "Type Checker - optional aliases and nested-optional bans" {
     try std.testing.expectError(error.NestedOptional, checkSource(allocator, "type MaybeInt = ?Int; var x: ?MaybeInt = nil;"));
     try std.testing.expectError(error.OptionalOfNil, checkSource(allocator, "type NoVal = Nil; var x: ?NoVal = nil;"));
 }
+
+// --- captures (`bind`) ---
+
+test "Type Checker - if/while captures bind the inner type" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const allocator = arena.allocator();
+
+    // the bound name has the optional's inner type
+    _ = try checkSource(allocator, "var m: ?Int = 1; if (m) bind (v) { var x: Int = v; }");
+    _ = try checkSource(allocator, "var m: ?String = nil; if (m) bind (v) { var x: String = v; }");
+    _ = try checkSource(allocator, "var m: ?Int = 1; while (m) bind (v) { var x: Int = v; break; }");
+
+    // aggregates can be mutated through the capture
+    _ = try checkSource(allocator, "var m: ?Array[Int] = nil; if (m) bind (a) { a[0] = 1; }");
+    _ = try checkSource(allocator, "struct P { pub x: Int } var m: ?P = nil; if (m) bind (p) { p.x = 1; }");
+
+    // else-if chains
+    _ = try checkSource(allocator, "var a: ?Int = nil; var b: ?Int = 1; if (a) bind (x) { x; } else if (b) bind (y) { y; } else { nil; }");
+}
+
+test "Type Checker - capture errors" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const allocator = arena.allocator();
+
+    // the capture is immutable
+    try std.testing.expectError(TypeCheckerError.ConstantReassignmentAttempt, checkSource(allocator, "var m: ?Int = 1; if (m) bind (v) { v = 2; }"));
+
+    // the bound type is not arbitrary
+    try std.testing.expectError(TypeCheckerError.TypeMismatch, checkSource(allocator, "var m: ?Int = 1; if (m) bind (v) { var x: String = v; }"));
+
+    // `bind` requires an optional condition
+    try std.testing.expectError(TypeCheckerError.TypeMismatch, checkSource(allocator, "var b = true; if (b) bind (v) { v; }"));
+    try std.testing.expectError(TypeCheckerError.TypeMismatch, checkSource(allocator, "while (true) bind (v) { break; }"));
+
+    // an optional is not a boolean condition on its own
+    try std.testing.expectError(TypeCheckerError.NonBooleanCondition, checkSource(allocator, "var m: ?Int = 1; if (m) { m; }"));
+
+    // the binding is scoped to the body: not after the `if`, not in `else`
+    try std.testing.expectError(TypeCheckerError.UndefinedSymbol, checkSource(allocator, "var m: ?Int = 1; if (m) bind (v) { v; } v;"));
+    try std.testing.expectError(TypeCheckerError.UndefinedSymbol, checkSource(allocator, "var m: ?Int = 1; if (m) bind (v) { v; } else { v; }"));
+
+    // ...nor after the `while`
+    try std.testing.expectError(TypeCheckerError.UndefinedSymbol, checkSource(allocator, "var m: ?Int = 1; while (m) bind (v) { break; } v;"));
+}

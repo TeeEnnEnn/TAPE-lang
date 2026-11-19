@@ -241,21 +241,44 @@ pub const CodeGenerator = struct {
 
             .if_stmt => |stmt| {
                 try self.generate_expression(stmt.condition);
-                const then_jump = try self.emit_jump(.OP_JUMP_IF_FALSE, stmt.line);
-                try self.current.chunk().write_opcode(.OP_POP, stmt.line);
-                try self.generate_node(stmt.then_branch);
-                if (stmt.else_branch) |else_branch| {
-                    const else_jump = try self.emit_jump(.OP_JUMP, stmt.line);
+
+                if (stmt.capture) |_| {
+                    const nil_jump = try self.emit_jump(.OP_JUMP_IF_NIL, stmt.line);
+                    const pop_count = self.binding_resolution.scope_pop_counts.get(node) orelse {
+                        self.fail("Capture scope has no pop count in binding resolution.", null, stmt.line, stmt.column);
+                        return CodeGeneratorError.MissingBinding;
+                    };
+
+                    // The condition value is already sitting in the capture's stack slot.
+                    self.current.current_locals_count += 1;
+                    try self.generate_node(stmt.then_branch);
+                    self.current.current_locals_count -= 1;
+                    try self.emit_local_cleanup(stmt.then_branch, pop_count, stmt.line);
+
+                    const end_jump = try self.emit_jump(.OP_JUMP, stmt.line);
+
+                    try self.patch_jump(nil_jump);
+                    try self.current.chunk().write_opcode(.OP_POP, stmt.line); // drop nil
+
+                    if (stmt.else_branch) |else_branch| try self.generate_node(else_branch);
+                    try self.patch_jump(end_jump);
+                } else {
+                    const then_jump = try self.emit_jump(.OP_JUMP_IF_FALSE, stmt.line);
+                    try self.current.chunk().write_opcode(.OP_POP, stmt.line);
+                    try self.generate_node(stmt.then_branch);
+                    if (stmt.else_branch) |else_branch| {
+                        const else_jump = try self.emit_jump(.OP_JUMP, stmt.line);
+                        try self.patch_jump(then_jump);
+                        try self.current.chunk().write_opcode(.OP_POP, stmt.line);
+                        try self.generate_node(else_branch);
+                        try self.patch_jump(else_jump);
+                        return;
+                    }
+                    const end_jump = try self.emit_jump(.OP_JUMP, stmt.line);
                     try self.patch_jump(then_jump);
                     try self.current.chunk().write_opcode(.OP_POP, stmt.line);
-                    try self.generate_node(else_branch);
-                    try self.patch_jump(else_jump);
-                    return;
+                    try self.patch_jump(end_jump);
                 }
-                const end_jump = try self.emit_jump(.OP_JUMP, stmt.line);
-                try self.patch_jump(then_jump);
-                try self.current.chunk().write_opcode(.OP_POP, stmt.line);
-                try self.patch_jump(end_jump);
             },
 
             .while_stmt => |stmt| {
@@ -263,20 +286,34 @@ pub const CodeGenerator = struct {
 
                 var loop_context = LoopContext.init(self.allocator, self.current.current_locals_count, @intCast(loop_start), self.current_loop);
                 defer loop_context.deinit();
-
                 const prev_loop = self.current_loop;
                 self.current_loop = &loop_context;
                 defer self.current_loop = prev_loop;
-
                 try self.generate_expression(stmt.condition);
-                const exit_jump = try self.emit_jump(.OP_JUMP_IF_FALSE, stmt.line);
-                try self.current.chunk().write_opcode(.OP_POP, stmt.line);
+                if (stmt.capture) |_| {
+                    const exit_jump = try self.emit_jump(.OP_JUMP_IF_NIL, stmt.line);
+                    const pop_count = self.binding_resolution.scope_pop_counts.get(node) orelse {
+                        self.fail("Capture scope has no pop count in binding resolution.", null, stmt.line, stmt.column);
+                        return CodeGeneratorError.MissingBinding;
+                    };
 
-                try self.generate_node(stmt.body);
-                try self.emit_loop(@intCast(loop_start), stmt.line);
-                try self.patch_jump(exit_jump);
-                try self.current.chunk().write_opcode(.OP_POP, stmt.line);
+                    self.current.current_locals_count += 1; // for the captured value
+                    try self.generate_node(stmt.body);
+                    self.current.current_locals_count -= 1;
+                    try self.emit_local_cleanup(stmt.body, pop_count, stmt.line);
 
+                    try self.emit_loop(@intCast(loop_start), stmt.line);
+                    try self.patch_jump(exit_jump);
+                    try self.current.chunk().write_opcode(.OP_POP, stmt.line); // drop nil
+                } else {
+                    const exit_jump = try self.emit_jump(.OP_JUMP_IF_FALSE, stmt.line);
+                    try self.current.chunk().write_opcode(.OP_POP, stmt.line);
+
+                    try self.generate_node(stmt.body);
+                    try self.emit_loop(@intCast(loop_start), stmt.line);
+                    try self.patch_jump(exit_jump);
+                    try self.current.chunk().write_opcode(.OP_POP, stmt.line);
+                }
                 // patching all break statements
                 for (loop_context.break_jumps.items) |break_jump| {
                     try self.patch_jump(break_jump);
@@ -1232,5 +1269,14 @@ pub const CodeGenerator = struct {
             } else false,
             else => false,
         };
+    }
+
+    fn emit_local_cleanup(self: *CodeGenerator, body: *AST.ASTNode, count: u16, line: usize) CodeGeneratorError!void {
+        if (stmt_has_give(body)) {
+            try self.current.chunk().write_opcode(.OP_GIVE_POP, line);
+        } else {
+            try self.current.chunk().write_opcode(.OP_POP_N, line);
+        }
+        try self.current.chunk().write_u16(count, line);
     }
 };

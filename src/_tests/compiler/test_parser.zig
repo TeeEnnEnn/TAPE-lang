@@ -433,6 +433,42 @@ test "Parser rejects ?Nil and nested optionals" {
     try std.testing.expectError(ParserError.BogusTypeDefinition, parseFirstDecl(allocator, "var x: ??Int = nil;"));
 }
 
+test "Parser parses if and while captures" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const allocator = arena.allocator();
+
+    const if_node = try parseFirstDecl(allocator, "if (maybe) bind (real) { real; }");
+    try std.testing.expect(if_node.* == .if_stmt);
+    try std.testing.expectEqualStrings("real", if_node.if_stmt.capture.?.name.lexeme);
+    try std.testing.expect(if_node.if_stmt.else_branch == null);
+
+    // a plain `if` has no capture
+    const plain = try parseFirstDecl(allocator, "if (flag) { flag; }");
+    try std.testing.expect(plain.if_stmt.capture == null);
+
+    // captures work on `while` too, after the closing ')'
+    const while_node = try parseFirstDecl(allocator, "while (maybe) bind (real) { real; }");
+    try std.testing.expect(while_node.* == .while_stmt);
+    try std.testing.expectEqualStrings("real", while_node.while_stmt.capture.?.name.lexeme);
+
+    // else-if chains can each capture
+    const chain = try parseFirstDecl(allocator, "if (a) bind (x) { x; } else if (b) bind (y) { y; } else { nil; }");
+    try std.testing.expect(chain.if_stmt.capture != null);
+    try std.testing.expect(chain.if_stmt.else_branch.?.* == .if_stmt);
+    try std.testing.expect(chain.if_stmt.else_branch.?.if_stmt.capture != null);
+}
+
+test "Parser rejects malformed captures" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const allocator = arena.allocator();
+
+    try std.testing.expectError(ParserError.UnexpectedToken, parseFirstDecl(allocator, "if (x) bind v { v; }"));
+    try std.testing.expectError(ParserError.UnexpectedToken, parseFirstDecl(allocator, "if (x) bind () { nil; }"));
+    try std.testing.expectError(ParserError.UnexpectedToken, parseFirstDecl(allocator, "while (x) bind { nil; }"));
+}
+
 test "Parser accepts pub use for re-exports" {
     var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
     defer arena.deinit();

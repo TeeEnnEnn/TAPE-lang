@@ -281,12 +281,20 @@ pub const BindingResolver = struct {
             .break_stmt, .continue_stmt => {},
             .while_stmt => |stmt| {
                 try self.resolveNode(stmt.condition, false);
-                try self.resolveNode(stmt.body, false);
+                if (stmt.capture) |cap| {
+                    try self.resolveCaptureScope(node, cap, stmt.body);
+                } else {
+                    try self.resolveNode(stmt.body, false);
+                }
             },
             .for_stmt => |stmt| try self.resolveForStmt(node, stmt),
             .if_stmt => |stmt| {
                 try self.resolveNode(stmt.condition, false);
-                try self.resolveNode(stmt.then_branch, false);
+                if (stmt.capture) |cap| {
+                    try self.resolveCaptureScope(node, cap, stmt.then_branch);
+                } else {
+                    try self.resolveNode(stmt.then_branch, false);
+                }
                 if (stmt.else_branch) |branch| try self.resolveNode(branch, false);
             },
             .panic_stmt => |stmt| try self.resolveNode(stmt.expr, false),
@@ -455,6 +463,24 @@ pub const BindingResolver = struct {
     fn resolveBlock(self: *BindingResolver, node: *AST.ASTNode) !void {
         const floor = self.current_function().local_count;
         for (node.block_stmt.stmts) |stmt| try self.resolveNode(stmt, false);
+        const current = self.current_function();
+        const pop_count = current.local_count - floor;
+        try self.result.scope_pop_counts.put(node, pop_count);
+        current.local_count = floor;
+    }
+
+    /// Resolves the body of an `if`/`while` that has a `bind` capture.
+    ///
+    /// The capture occupies the stack slot the condition value was evaluated
+    /// into, and the body's locals live above it. The slot must therefore be
+    /// registered *before* resolving the body, and the capture stays in scope
+    /// only for the body.
+    fn resolveCaptureScope(self: *BindingResolver, node: *AST.ASTNode, cap: *AST.CaptureBindingExpr, body: *AST.ASTNode) !void {
+        const floor = self.current_function().local_count;
+
+        try self.registerLocal(.{ .capture = cap }, cap.name.lexeme, cap.resolved_type);
+        try self.resolveNode(body, false);
+
         const current = self.current_function();
         const pop_count = current.local_count - floor;
         try self.result.scope_pop_counts.put(node, pop_count);

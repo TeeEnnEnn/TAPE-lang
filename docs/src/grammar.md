@@ -63,9 +63,13 @@ statement       ::= expression ';'
                   | 'panic' expression ';'
                   | 'break' ';'
                   | 'continue' ';'
-                  | 'while' '(' expression ')' block
+                  | 'while' '(' expression ')' capture? block
                   | 'for' '(' 'var' IDENTIFIER 'in' expression ')' block
-                  | 'if' expression block ('else' (block | 'if' expression block))*
+                  | 'if' '(' expression ')' capture? block ('else' (block | 'if' '(' expression ')' capture? block))*
+
+/* Optional capture for `if`/`while`: the condition must be `?T` and the name
+   is bound to the inner `T` inside the body. */
+capture         ::= 'bind' '(' IDENTIFIER ')'
 
 block           ::= '{' declaration* '}'
 

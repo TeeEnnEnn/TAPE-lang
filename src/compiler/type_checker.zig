@@ -666,18 +666,41 @@ pub const TypeChecker = struct {
             },
             .while_stmt => |stmt| {
                 const condition_type = try self.check_expression(stmt.condition);
-                if (condition_type != @backingInt(PrimitiveType.Bool)) {
+
+                // Without a capture the condition must be a plain boolean. With a
+                // capture it must be an optional, and the body sees the inner value.
+                var capture_inner: ?AST.TypeId = null;
+                if (stmt.capture != null) {
+                    capture_inner = self.registry.unwrap_optional(condition_type) orelse {
+                        try self.fail("Type Mismatch", "`bind` requires an optional (`?T`) condition.", stmt.line, stmt.column);
+                        return TypeCheckerError.TypeMismatch;
+                    };
+                } else if (condition_type != @backingInt(PrimitiveType.Bool)) {
                     try self.fail("Type Mismatch", "While condition must be a boolean.", stmt.line, stmt.column);
                     return TypeCheckerError.TypeMismatch;
                 }
+
                 const prev_loop = self.in_loop;
                 self.in_loop = true;
-                const body_term = try self.check(stmt.body);
-                self.in_loop = prev_loop;
+                defer self.in_loop = prev_loop;
+
+                var body_term: StatementTermination = undefined;
+                if (stmt.capture) |capture| {
+                    capture.resolved_type = capture_inner.?;
+                    var capture_env = Environment.init(self.allocator, self.environment);
+                    defer capture_env.deinit();
+                    try capture_env.define_binding(capture.name.lexeme, capture_inner.?, .{ .capture = capture }, true);
+
+                    const prev_env = self.environment;
+                    self.environment = &capture_env;
+                    defer self.environment = prev_env;
+                    body_term = try self.check(stmt.body);
+                } else {
+                    body_term = try self.check(stmt.body);
+                }
+
                 // The loop body may or may not execute, so only the yield flag is
-                // propagated (existentially) — a yield inside a loop means the
-                // coroutine *can* yield. Return/panic/break/continue are not
-                // guaranteed and are intentionally dropped.
+                // propagated. Return/panic/break/continue are not guaranteed so are dropped.
                 return .{ .yield_ = body_term.yield_ };
             },
             .for_stmt => |stmt| {
@@ -706,11 +729,35 @@ pub const TypeChecker = struct {
             },
             .if_stmt => |stmt| {
                 const condition_type = try self.check_expression(stmt.condition);
-                if (condition_type != @backingInt(PrimitiveType.Bool)) {
+
+                // A plain `if` requires a boolean. A capture requires an optional
+                // condition and binds the inner value inside the body only.
+                var capture_inner: ?AST.TypeId = null;
+                if (stmt.capture != null) {
+                    capture_inner = self.registry.unwrap_optional(condition_type) orelse {
+                        try self.fail("Type Mismatch", "`bind` requires an optional (`?T`) condition.", stmt.line, stmt.column);
+                        return TypeCheckerError.TypeMismatch;
+                    };
+                } else if (condition_type != @backingInt(PrimitiveType.Bool)) {
                     try self.fail("Non-boolean condition", "If condition must be a boolean.", stmt.line, stmt.column);
                     return TypeCheckerError.NonBooleanCondition;
                 }
-                const then_term = try self.check(stmt.then_branch);
+
+                var then_term: StatementTermination = undefined;
+                if (stmt.capture) |capture| {
+                    capture.resolved_type = capture_inner.?;
+                    var capture_env = Environment.init(self.allocator, self.environment);
+                    defer capture_env.deinit();
+                    try capture_env.define_binding(capture.name.lexeme, capture_inner.?, .{ .capture = capture }, true);
+
+                    const prev_env = self.environment;
+                    self.environment = &capture_env;
+                    defer self.environment = prev_env;
+                    then_term = try self.check(stmt.then_branch);
+                } else {
+                    then_term = try self.check(stmt.then_branch);
+                }
+
                 if (stmt.else_branch) |else_branch| {
                     const else_term = try self.check(else_branch);
                     return .{
@@ -718,14 +765,11 @@ pub const TypeChecker = struct {
                         .panics = then_term.panics and else_term.panics,
                         .break_ = then_term.break_ and else_term.break_,
                         .continue_ = then_term.continue_ and else_term.continue_,
-                        // yields are existential: either branch yielding means the
-                        // coroutine can yield
+                        // either branch yielding means the coroutine can yield
                         .yield_ = then_term.yield_ or else_term.yield_,
                         .give_ = then_term.give_ and else_term.give_,
                     };
                 }
-                // no else: the then branch may or may not run, so only yield is
-                // propagated existentially
                 return .{ .yield_ = then_term.yield_ };
             },
             .break_stmt => |stmt| {

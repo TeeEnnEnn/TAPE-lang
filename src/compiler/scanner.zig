@@ -195,6 +195,8 @@ pub const TokenType = enum {
     NEVER_TYPE,
     /// 'native'
     NATIVE,
+    /// 'bind'
+    BIND,
     /// 'EOF'
     EOF,
 };
@@ -347,7 +349,11 @@ pub const Scanner = struct {
                 'n' => self.check_keyword(2, "d", .AND),
                 else => .IDENTIFIER,
             } else .IDENTIFIER,
-            'b' => self.check_keyword(1, "reak", .BREAK),
+            'b' => if (len > 1) switch (source[1]) {
+                'i' => self.check_keyword(2, "nd", .BIND),
+                'r' => self.check_keyword(2, "eak", .BREAK),
+                else => .IDENTIFIER,
+            } else .IDENTIFIER,
             'c' => if (len > 1) switch (source[1]) {
                 'o' => if (len == 2) .CO else if (len > 2) switch (source[2]) {
                     'n' => if (len > 3) switch (source[3]) {

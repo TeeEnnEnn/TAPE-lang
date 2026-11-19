@@ -89,6 +89,25 @@ test "TypeRegistry - Optional Types" {
     try std.testing.expectError(error.NestedOptional, registry.add_optional_type(opt_int));
 }
 
+test "Type Registry - Unwrap optional" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const allocator = arena.allocator();
+
+    var registry = try TypeRegistry.init(allocator);
+    defer registry.deinit();
+
+    const opt_int = try resolveType(allocator, &registry, "?Int");
+    const opt_string = try resolveType(allocator, &registry, "?String");
+
+    try std.testing.expectEqual(@backingInt(PrimitiveType.Int), registry.unwrap_optional(opt_int).?);
+    try std.testing.expectEqual(@backingInt(PrimitiveType.String), registry.unwrap_optional(opt_string).?);
+
+    // Non-optional types have nothing to unwrap.
+    try std.testing.expect(registry.unwrap_optional(@backingInt(PrimitiveType.Int)) == null);
+    try std.testing.expect(registry.unwrap_optional(@backingInt(PrimitiveType.Nil)) == null);
+}
+
 test "TypeRegistry - Function Types" {
     var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
     defer arena.deinit();

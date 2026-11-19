@@ -329,6 +329,12 @@ pub fn print_node(node: *AST.ASTNode, depth: usize, indent_amt: usize) void {
             write_location(if_stmt.line, if_stmt.column);
             std.debug.print("\n", .{});
             print_node(if_stmt.condition, depth + 1, indent_amt);
+            if (if_stmt.capture) |c| {
+                indent(depth + 1, indent_amt);
+                std.debug.print("Capture: {s}", .{c.name.lexeme});
+                write_location(c.line, c.column);
+                std.debug.print("\n", .{});
+            }
             print_node(if_stmt.then_branch, depth + 1, indent_amt);
             if (if_stmt.else_branch) |else_branch| {
                 print_node(else_branch, depth + 1, indent_amt);
@@ -460,6 +466,12 @@ pub fn print_node(node: *AST.ASTNode, depth: usize, indent_amt: usize) void {
             write_location(while_stmt.line, while_stmt.column);
             std.debug.print("\n", .{});
             print_node(while_stmt.condition, depth + 1, indent_amt);
+            if (while_stmt.capture) |c| {
+                indent(depth + 1, indent_amt);
+                std.debug.print("Capture: {s}", .{c.name.lexeme});
+                write_location(c.line, c.column);
+                std.debug.print("\n", .{});
+            }
             print_node(while_stmt.body, depth + 1, indent_amt);
         },
         .yield_expr => |yield_expr| {
