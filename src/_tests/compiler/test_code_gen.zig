@@ -80,6 +80,12 @@ test "Code Generator - emits coroutine creation and resume opcodes" {
     try expectOpcode("co f() -> (Int, Int, Int) { var r = yield 1; return r; } var c = f(); var x = resume c with 5;", .OP_RESUME);
 }
 
+test "Code Generator - emits optional unwrap" {
+    try expectOpcode("var m: ?Int = 1; var x = m.?;", .OP_OPTIONAL_UNWRAP);
+    // The unwrap must also resolve its type when it is a binary operand.
+    try expectOpcode("fn f() -> ?Int { return 1; } var x = 1 + f().?;", .OP_OPTIONAL_UNWRAP);
+}
+
 test "Code Generator - emits nil checks for captures" {
     // A plain `if` branches on falsiness; a capture branches on nil.
     try expectOpcode("var m: ?Int = 1; if (m) bind (v) { v; }", .OP_JUMP_IF_NIL);

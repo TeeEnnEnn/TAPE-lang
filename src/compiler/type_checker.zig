@@ -1109,6 +1109,15 @@ pub const TypeChecker = struct {
                     return TypeCheckerError.InvalidOperation;
                 }
             },
+            .optional_unwrap_expr => |expr| {
+                const expr_type_id = try self.check_expression(expr.expr);
+                const inner_type_id = self.registry.unwrap_optional(expr_type_id) orelse {
+                    try self.fail("Type Mismatch", "`.?` can only be used to unwrap an optional type.", expr.line, expr.column);
+                    return TypeCheckerError.TypeMismatch;
+                };
+                expr.resolved_type = inner_type_id;
+                return inner_type_id;
+            },
             .call_expr => |expr| {
                 // Struct calls inject a receiver only when the declaration names `self`.
                 if (expr.expr.* == .dot_expr) {

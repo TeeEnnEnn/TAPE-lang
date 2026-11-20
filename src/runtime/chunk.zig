@@ -123,6 +123,8 @@ pub const Opcode = enum(u8) {
     OP_FOR_PREP,
     /// Moves to the next iteration of a for loop
     OP_FOR_NEXT,
+    /// Checks the top of the stack for nil. If nil is found: panic
+    OP_OPTIONAL_UNWRAP,
 };
 
 /// A chunk of bytecode

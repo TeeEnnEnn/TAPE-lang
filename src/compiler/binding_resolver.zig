@@ -322,6 +322,9 @@ pub const BindingResolver = struct {
                 try self.resolveNode(expr.expr, false);
                 try self.resolve_dot_expression(node, expr);
             },
+            .optional_unwrap_expr => |expr| {
+                try self.resolveNode(expr.expr, false);
+            },
             .try_expr => |expr| try self.resolveNode(expr.expr, false),
             .resume_expr => |expr| {
                 try self.resolveNode(expr.expr, false);
@@ -937,6 +940,7 @@ fn resolved_type_of(node: *AST.ASTNode) AST.TypeId {
         .index_expr => |v| v.resolved_type,
         .array_expr => |v| v.resolved_type,
         .dot_expr => |v| v.resolved_type,
+        .optional_unwrap_expr => |v| v.resolved_type,
         .try_expr => |v| v.resolved_type,
         .resume_expr => |v| v.resolved_type,
         .group_expr => |v| v.resolved_type,
@@ -986,6 +990,7 @@ fn node_position(node: *AST.ASTNode) NodePosition {
         .index_expr => |v| .{ .line = v.line, .column = v.column },
         .array_expr => |v| .{ .line = v.line, .column = v.column },
         .dot_expr => |v| .{ .line = v.line, .column = v.column },
+        .optional_unwrap_expr => |v| .{ .line = v.line, .column = v.column },
         .try_expr => |v| .{ .line = v.line, .column = v.column },
         .resume_expr => |v| .{ .line = v.line, .column = v.column },
         .group_expr => |v| .{ .line = v.line, .column = v.column },

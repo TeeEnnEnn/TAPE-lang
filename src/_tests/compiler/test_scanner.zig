@@ -68,8 +68,8 @@ test "Scanner Type Keywords" {
 }
 
 test "Scanner Operators and Punctuation" {
-    const source = "( ) { } [ ] , . .. - + ; / * ** % : -> != = == => > >= < <= << >> & ^ | ~ += -= *= /= %= ++ ++= **= ? !";
-    const expected = [_]TokenType{ .LEFT_PAREN, .RIGHT_PAREN, .LEFT_BRACE, .RIGHT_BRACE, .LEFT_SQUARE, .RIGHT_SQUARE, .COMMA, .DOT, .DOT_DOT, .MINUS, .PLUS, .SEMICOLON, .SLASH, .STAR, .STAR_STAR, .PERCENT, .COLON, .ARROW, .NOT_EQUAL, .EQUAL, .EQUAL_EQUAL, .EQUAL_ARROW, .GREATER, .GREATER_EQUAL, .LESS, .LESS_EQUAL, .LEFT_SHIFT, .RIGHT_SHIFT, .AMPERSAND, .CARET, .PIPE, .TILDE, .PLUS_EQUAL, .MINUS_EQUAL, .STAR_EQUAL, .SLASH_EQUAL, .PERCENT_EQUAL, .PLUS_PLUS, .PLUS_PLUS_EQUAL, .STAR_STAR_EQUAL, .QUESTION, .BANG };
+    const source = "( ) { } [ ] , . .. .? - + ; / * ** % : -> != = == => > >= < <= << >> & ^ | ~ += -= *= /= %= ++ ++= **= ? !";
+    const expected = [_]TokenType{ .LEFT_PAREN, .RIGHT_PAREN, .LEFT_BRACE, .RIGHT_BRACE, .LEFT_SQUARE, .RIGHT_SQUARE, .COMMA, .DOT, .DOT_DOT, .DOT_QUESTION, .MINUS, .PLUS, .SEMICOLON, .SLASH, .STAR, .STAR_STAR, .PERCENT, .COLON, .ARROW, .NOT_EQUAL, .EQUAL, .EQUAL_EQUAL, .EQUAL_ARROW, .GREATER, .GREATER_EQUAL, .LESS, .LESS_EQUAL, .LEFT_SHIFT, .RIGHT_SHIFT, .AMPERSAND, .CARET, .PIPE, .TILDE, .PLUS_EQUAL, .MINUS_EQUAL, .STAR_EQUAL, .SLASH_EQUAL, .PERCENT_EQUAL, .PLUS_PLUS, .PLUS_PLUS_EQUAL, .STAR_STAR_EQUAL, .QUESTION, .BANG };
     try checkTokens(source, &expected);
 }
 

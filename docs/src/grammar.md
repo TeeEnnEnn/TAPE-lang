@@ -99,6 +99,7 @@ postfix         ::= primary (
                       '(' arguments? ')'            /* Call */
                     | '[' expression ']'            /* Index */
                     | '.' IDENTIFIER                /* Field, instance method, or type-associated function */
+                    | '.?'                         /* Optional unwrap */
                   )*
 
 primary         ::= IDENTIFIER

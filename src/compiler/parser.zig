@@ -459,6 +459,13 @@ pub const Parser = struct {
                 const node = try self.allocator.create(AST.ASTNode);
                 node.* = .{ .dot_expr = dot_expr };
                 expr = node;
+            } else if (try self.match(.DOT_QUESTION)) {
+                // optional unwrap
+                const optional_unwrap = try self.allocator.create(AST.OptionalUnwrapExpr);
+                optional_unwrap.* = .{ .expr = expr, .line = self.previous.line, .column = self.previous.column };
+                const node = try self.allocator.create(AST.ASTNode);
+                node.* = .{ .optional_unwrap_expr = optional_unwrap };
+                expr = node;
             } else {
                 break;
             }

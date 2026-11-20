@@ -28,6 +28,7 @@ pub const RuntimePanic = error{
     InvalidValue,
     FinishedCoroutineResumption,
     CoroutineAlreadyRunning,
+    FailedOptionalUnwrap,
     Panic,
 };
 

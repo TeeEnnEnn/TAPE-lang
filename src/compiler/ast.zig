@@ -73,6 +73,7 @@ pub const ASTNode = union(enum) {
     call_expr: *CallExpr, // ()
     index_expr: *IndexExpr, // []
     dot_expr: *DotExpr, // .
+    optional_unwrap_expr: *OptionalUnwrapExpr, //.?
 
     // unary
     try_expr: *TryExpr, // try
@@ -496,6 +497,13 @@ pub const ArrayExpr = struct {
 pub const DotExpr = struct {
     expr: *ASTNode,
     member: Token,
+    resolved_type: TypeId = 0,
+    line: usize,
+    column: usize,
+};
+
+pub const OptionalUnwrapExpr = struct {
+    expr: *ASTNode,
     resolved_type: TypeId = 0,
     line: usize,
     column: usize,

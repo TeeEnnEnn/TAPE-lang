@@ -1062,6 +1062,10 @@ pub const Isolate = struct {
                         frame.ip -= loop_offset;
                     }
                 },
+                .OP_OPTIONAL_UNWRAP => {
+                    const top = try self.peek_value(0);
+                    if (top == .nil) return RuntimePanic.FailedOptionalUnwrap;
+                },
             }
         }
     }

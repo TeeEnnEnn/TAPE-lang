@@ -258,6 +258,12 @@ pub fn print_node(node: *AST.ASTNode, depth: usize, indent_amt: usize) void {
             std.debug.print("\n", .{});
             print_node(dot_expr.expr, depth + 1, indent_amt);
         },
+        .optional_unwrap_expr => |optional_unwrap| {
+            std.debug.print("OptionalUnwrapExpr:", .{});
+            write_location(optional_unwrap.line, optional_unwrap.column);
+            std.debug.print("\n", .{});
+            print_node(optional_unwrap.expr, depth + 1, indent_amt);
+        },
         .expr_stmt => |expr_stmt| {
             std.debug.print("ExprStmt:", .{});
             write_location(expr_stmt.line, expr_stmt.column);

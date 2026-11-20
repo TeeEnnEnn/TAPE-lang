@@ -210,6 +210,7 @@ pub const ChunkDisassembler = struct {
             .OP_DUP_TWO,
             .OP_PANIC,
             .OP_RANGE,
+            .OP_OPTIONAL_UNWRAP,
             => {
                 return disassemble_simple_instruction(chunk, offset);
             },

@@ -424,6 +424,33 @@ test "Parser parses optional type annotations" {
     try std.testing.expect(fn_node.fn_decl.return_type_annotation.* == .optional_type);
 }
 
+test "Parser parses optional unwrap expressions" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const allocator = arena.allocator();
+
+    // `.?` is a postfix, just like `.field` and `[index]`.
+    const node = try parseFirstDecl(allocator, "var x = maybe.?;");
+    const unwrap = node.var_decl.initializer;
+    try std.testing.expect(unwrap.* == .optional_unwrap_expr);
+    try std.testing.expect(unwrap.optional_unwrap_expr.expr.* == .identifier_expr);
+    try std.testing.expectEqualStrings("maybe", unwrap.optional_unwrap_expr.expr.identifier_expr.name.lexeme);
+    // The node points at the operator, not the token after it.
+    try std.testing.expectEqual(@as(usize, 1), unwrap.optional_unwrap_expr.line);
+    try std.testing.expectEqual(@as(usize, 14), unwrap.optional_unwrap_expr.column);
+
+    // Unwrapping a call result.
+    const call_node = try parseFirstDecl(allocator, "var x = f().?;");
+    const call_unwrap = call_node.var_decl.initializer;
+    try std.testing.expect(call_unwrap.* == .optional_unwrap_expr);
+    try std.testing.expect(call_unwrap.optional_unwrap_expr.expr.* == .call_expr);
+
+    // Chaining: `maybe.?.field` is a field access on the unwrapped value.
+    const chain = try parseFirstDecl(allocator, "var x = maybe.?.field;");
+    try std.testing.expect(chain.var_decl.initializer.* == .dot_expr);
+    try std.testing.expect(chain.var_decl.initializer.dot_expr.expr.* == .optional_unwrap_expr);
+}
+
 test "Parser rejects ?Nil and nested optionals" {
     var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
     defer arena.deinit();

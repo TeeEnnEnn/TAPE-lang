@@ -76,6 +76,8 @@ pub const TokenType = enum {
     TILDE,
     /// '?'
     QUESTION,
+    /// '.?'
+    DOT_QUESTION,
     /// '!'
     BANG,
     /// '+='
@@ -505,7 +507,15 @@ pub const Scanner = struct {
             ';' => self.make_token(.SEMICOLON),
             ',' => self.make_token(.COMMA),
             ':' => self.make_token(.COLON),
-            '.' => self.make_token(if (self.match('.')) .DOT_DOT else .DOT),
+            '.' => blk: {
+                if (self.match('?')) {
+                    break :blk self.make_token(.DOT_QUESTION);
+                } else if (self.match('.')) {
+                    break :blk self.make_token(.DOT_DOT);
+                } else {
+                    break :blk self.make_token(.DOT);
+                }
+            },
             '-' => if (self.match('>'))
                 self.make_token(.ARROW)
             else

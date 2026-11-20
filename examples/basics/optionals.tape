@@ -66,3 +66,21 @@ if (display != "tape") { panic "display should be tape"; }
 name = nil;
 var missing_name: String = name orelse "unknown";
 if (missing_name != "unknown") { panic "missing name should be unknown"; }
+
+// `.?` unwraps a present optional into a plain value. Unwrapping nil panics.
+var count: ?Int = 41;
+var unwrapped: Int = count.?;
+if (unwrapped != 41) { panic "count.? should be 41"; }
+if (1 + count.? != 42) { panic "count.? should work inside expressions"; }
+
+// Unwrap works on call results too
+if (find(true).? != 11) { panic "find(true).? should be 11"; }
+
+// ...and value parts of a non-primitive optional
+var numbers: ?Array[Int] = [3, 4, 5];
+if (numbers.?[1] != 4) { panic "numbers.?[1] should be 4"; }
+
+struct Box { pub value: Int }
+var box: ?Box = new Box { value = 7 };
+if (box.?.value != 7) { panic "box.?.value should be 7"; }
+

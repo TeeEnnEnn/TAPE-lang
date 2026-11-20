@@ -1098,6 +1098,28 @@ test "Type Checker - orelse on optionals" {
     try std.testing.expectError(TypeCheckerError.TypeMismatch, checkSource(allocator, "var x: ?Int = nil; var y: Int = x orelse \"s\";"));
 }
 
+test "Type Checker - optional unwrap yields the inner type" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const allocator = arena.allocator();
+
+    // `?T.?` is a plain `T`
+    var result = try checkSource(allocator, "var m: ?Int = 5; var y = m.?;");
+    defer result.env.deinit();
+    defer result.registry.deinit();
+    try std.testing.expectEqual(@backingInt(PrimitiveType.Int), try result.env.lookup("y"));
+
+    _ = try checkSource(allocator, "var s: ?String = nil; var y: String = s.?;");
+    _ = try checkSource(allocator, "var b: ?Bool = nil; var y: Bool = b.?;");
+    _ = try checkSource(allocator, "var a: ?Array[Int] = nil; var y: Int = a.?[0];");
+    _ = try checkSource(allocator, "struct P { pub x: Int } var p: ?P = nil; var y: Int = p.?.x;");
+    _ = try checkSource(allocator, "fn f() -> ?Int { return nil; } var y: Int = f().?;");
+
+    // The operand must really be an optional.
+    try std.testing.expectError(TypeCheckerError.TypeMismatch, checkSource(allocator, "var x: Int = 1; var y = x.?;"));
+    try std.testing.expectError(TypeCheckerError.TypeMismatch, checkSource(allocator, "var y = \"s\".?;"));
+}
+
 test "Type Checker - optional equality" {
     var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
     defer arena.deinit();

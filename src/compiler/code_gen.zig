@@ -157,6 +157,7 @@ pub const CodeGenerator = struct {
             .call_expr => |n| n.resolved_type,
             .index_expr => |n| n.resolved_type,
             .dot_expr => |n| n.resolved_type,
+            .optional_unwrap_expr => |n| n.resolved_type,
             .group_expr => |n| n.resolved_type,
             .tuple_expr => |n| n.resolved_type,
             .table_expr => |n| n.resolved_type,
@@ -762,6 +763,10 @@ pub const CodeGenerator = struct {
                     },
                     else => return CodeGeneratorError.UnsupportedNode,
                 }
+            },
+            .optional_unwrap_expr => |expr| {
+                try self.generate_expression(expr.expr);
+                try self.current.chunk().write_opcode(.OP_OPTIONAL_UNWRAP, expr.line);
             },
 
             .new_expr => |expr| {
