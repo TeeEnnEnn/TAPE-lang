@@ -22,6 +22,10 @@ pub const TypeRegistryError = error{
     TypeResolutionConflict,
     NestedOptional,
     OptionalOfNil,
+    /// In the error position of a union type, a non error type was given
+    NonErrorUnionError,
+    /// Error unions cannot be nested as the success type (`E1!(E2!T)`)
+    NestedErrorUnion,
 } || std.mem.Allocator.Error;
 
 pub const PrimitiveType = enum(TypeId) {
@@ -43,6 +47,8 @@ pub const TypeInfo = union(enum) {
     native_function: struct { args: []TypeId, ret: TypeId },
     coroutine: struct { args: []TypeId, ret: TypeId, yield: TypeId, resume_with: TypeId },
     optional: struct { inner: TypeId },
+    /// null err typeId allows any error type
+    error_union: struct { err: ?TypeId, ok: TypeId },
     _error: struct { name: []const u8, variants: [][]const u8, source_file: []const u8 },
     _enum: struct { name: []const u8, variants: [][]const u8, source_file: []const u8 },
     _struct: struct { name: []const u8, fields: []StructField, methods: []StructMethod, source_file: []const u8 },
@@ -160,6 +166,11 @@ pub const TypeRegistry = struct {
                 const inner_id = try self.resolve(optional.inner);
                 return try self.add_optional_type(inner_id);
             },
+            .error_union_type => |error_union| {
+                const err_id: ?TypeId = if (error_union.err) |err| try self.resolve(err) else null;
+                const ok_id = try self.resolve(error_union.ok);
+                return try self.add_error_union_type(err_id, ok_id);
+            },
 
             .identifier_type => |identifier| {
                 const name = identifier.name.lexeme;
@@ -183,6 +194,35 @@ pub const TypeRegistry = struct {
             .optional => |o| o.inner,
             else => null,
         };
+    }
+
+    pub fn add_error_union_type(self: *TypeRegistry, err_type: ?TypeId, ok_type: TypeId) !TypeId {
+        if (err_type) |e| {
+            const error_type_info = self.get_type_info(e);
+            if (error_type_info != ._error) {
+                return TypeRegistryError.NonErrorUnionError;
+            }
+        }
+        // disallow nesting of error unions in the success part of the union
+        if (self.get_type_info(ok_type) == .error_union) {
+            return TypeRegistryError.NestedErrorUnion;
+        }
+
+        for (self.types.items, 0..) |info, index| {
+            switch (info) {
+                .error_union => |existing| {
+                    if (existing.err == err_type and existing.ok == ok_type) {
+                        return @as(TypeId, @intCast(index));
+                    }
+                },
+                else => continue,
+            }
+        }
+
+        // add new type
+        const id = @as(TypeId, @intCast(self.types.items.len));
+        try self.types.append(self.allocator, .{ .error_union = .{ .err = err_type, .ok = ok_type } });
+        return id;
     }
 
     pub fn add_optional_type(self: *TypeRegistry, inner_type: TypeId) !TypeId {

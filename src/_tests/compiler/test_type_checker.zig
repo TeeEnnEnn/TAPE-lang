@@ -1148,6 +1148,47 @@ test "Type Checker - optional aliases and nested-optional bans" {
     try std.testing.expectError(error.OptionalOfNil, checkSource(allocator, "type NoVal = Nil; var x: ?NoVal = nil;"));
 }
 
+test "Type Checker - error unions accept success values and errors" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const allocator = arena.allocator();
+
+    // T -> E!T
+    _ = try checkSource(allocator, "error E { A } var x: E!Int = 5;");
+    // E -> E!T
+    _ = try checkSource(allocator, "error E { A } var x: E!Int = E.A;");
+    // `!T` accepts any error set and any success value
+    _ = try checkSource(allocator, "error E { A } var x: !Int = E.A; var y: !Int = 5;");
+    // Error unions widen into `!T` but keep their success type.
+    _ = try checkSource(allocator, "error E { A } fn f() -> E!Int { return E.A; } var x: E!Int = f(); var y: !Int = x;");
+    // Optional success types.
+    _ = try checkSource(allocator, "error E { A } var x: E!?Int = nil; var y: E!?Int = 5;");
+    // A union whose success arm is `Never` only ever yields errors, so it can
+    // flow into a union with a different success type.
+    _ = try checkSource(allocator, "error E { A } fn f() -> E!Never { return E.A; } var x: E!Int = f();");
+    // Assignment follows the same rules.
+    _ = try checkSource(allocator, "error E { A } var x: !Int = E.A; x = 5;");
+}
+
+test "Type Checker - error unions reject mismatches" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const allocator = arena.allocator();
+
+    // An error value is not a plain value.
+    try std.testing.expectError(TypeCheckerError.TypeMismatch, checkSource(allocator, "error E { A } var x: Int = E.A;"));
+    // The success side still has to match.
+    try std.testing.expectError(TypeCheckerError.TypeMismatch, checkSource(allocator, "error E { A } var x: E!Int = \"s\";"));
+    // A different error set is not assignable.
+    try std.testing.expectError(TypeCheckerError.TypeMismatch, checkSource(allocator, "error E { A } error F { B } var x: E!Int = F.B;"));
+    // `!T` means "any error", so it cannot narrow to a specific set.
+    try std.testing.expectError(TypeCheckerError.TypeMismatch, checkSource(allocator, "error E { A } fn f() -> !Int { return 1; } var x: E!Int = f();"));
+    // An error union is not implicitly unwrapped into its success type.
+    try std.testing.expectError(TypeCheckerError.TypeMismatch, checkSource(allocator, "error E { A } fn f() -> E!Int { return 1; } var x: Int = f();"));
+    // nil only fits an optional success type.
+    try std.testing.expectError(TypeCheckerError.TypeMismatch, checkSource(allocator, "error E { A } var x: E!Int = nil;"));
+}
+
 // --- captures (`bind`) ---
 
 test "Type Checker - if/while captures bind the inner type" {

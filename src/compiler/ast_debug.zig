@@ -181,6 +181,16 @@ pub fn print_node(node: *AST.ASTNode, depth: usize, indent_amt: usize) void {
             std.debug.print("OptionalType:\n", .{});
             print_node(optional_type.inner, depth + 1, indent_amt);
         },
+        .error_union_type => |error_union_type| {
+            std.debug.print("ErrorUnionType:\n", .{});
+            if (error_union_type.err) |err| {
+                print_node(err, depth + 1, indent_amt);
+            } else {
+                indent(depth + 1, indent_amt);
+                std.debug.print("InferredErrorSet\n", .{});
+            }
+            print_node(error_union_type.ok, depth + 1, indent_amt);
+        },
         .array_type => |array_type| {
             std.debug.print("ArrayType:\n", .{});
             print_node(array_type.element_type, depth + 1, indent_amt);

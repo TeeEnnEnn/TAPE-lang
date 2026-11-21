@@ -758,9 +758,26 @@ pub const Parser = struct {
         return field;
     }
 
+    fn make_optional_type(self: *Parser, inner: *AST.ASTNode) ParserError!*AST.ASTNode {
+        const optional_node = try self.allocator.create(AST.OptionalType);
+        optional_node.* = .{ .inner = inner };
+        const node = try self.allocator.create(AST.ASTNode);
+        node.* = .{ .optional_type = optional_node };
+        return node;
+    }
+
+    fn make_error_union_type(self: *Parser, err: ?*AST.ASTNode, ok: *AST.ASTNode) ParserError!*AST.ASTNode {
+        const error_union_type = try self.allocator.create(AST.ErrorUnionType);
+        error_union_type.* = .{ .err = err, .ok = ok };
+        const node = try self.allocator.create(AST.ASTNode);
+        node.* = .{ .error_union_type = error_union_type };
+        return node;
+    }
+
     fn parse_type_expression(self: *Parser) ParserError!*AST.ASTNode {
         var left: *AST.ASTNode = undefined;
         var optional: bool = false;
+
         if (try self.match(.QUESTION)) {
             // The VM has a single `nil` tag, so `??T` (nil vs `some(nil)`) cannot be represented.
             if (self.check(.QUESTION)) {
@@ -768,6 +785,14 @@ pub const Parser = struct {
                 return ParserError.BogusTypeDefinition;
             }
             optional = true;
+        }
+
+        // `!T`: the error set is inferred, so any error can be carried.
+        if (try self.match(.BANG)) {
+            const ok = try self.parse_type_expression();
+            var node = try self.make_error_union_type(null, ok);
+            if (optional) node = try self.make_optional_type(node);
+            return node;
         }
 
         if (try self.match(.FN)) {
@@ -932,12 +957,14 @@ pub const Parser = struct {
             left = node;
         }
 
+        // `?` and `!` apply to the expression just parsed, so `E!?T` reads as `E! (?T)`.
+        if (try self.match(.BANG)) {
+            const ok = try self.parse_type_expression();
+            left = try self.make_error_union_type(left, ok);
+        }
+
         if (optional) {
-            const optional_node = try self.allocator.create(AST.OptionalType);
-            optional_node.* = .{ .inner = left };
-            const node = try self.allocator.create(AST.ASTNode);
-            node.* = .{ .optional_type = optional_node };
-            left = node;
+            left = try self.make_optional_type(left);
         }
 
         return left;

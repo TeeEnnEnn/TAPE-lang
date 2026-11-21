@@ -183,6 +183,12 @@ pub const TypeChecker = struct {
         }
         switch (type_info) {
             .optional => |o| try self.require_pub_type(o.inner, line, column, visited),
+            .error_union => |eu| {
+                if (eu.err) |e| {
+                    try self.require_pub_type(e, line, column, visited);
+                }
+                try self.require_pub_type(eu.ok, line, column, visited);
+            },
             .array => |elem| try self.require_pub_type(elem, line, column, visited),
             .tuple => |items| {
                 for (items) |item| try self.require_pub_type(item, line, column, visited);
@@ -1884,6 +1890,38 @@ pub const TypeChecker = struct {
 
         const target_info = self.registry.get_type_info(target);
         const source_info = self.registry.get_type_info(source);
+
+        if (target_info == .error_union) {
+            const target_err = target_info.error_union.err;
+            const target_ok = target_info.error_union.ok;
+
+            if (source == @backingInt(PrimitiveType.Never)) return true;
+
+            // Another error union:
+            // the success sides must be compatible and,
+            // the target's error set must cover the source's error set.
+            if (source_info == .error_union) {
+                if (target_err) |target_error| {
+                    const source_error = source_info.error_union.err orelse
+                        // `!T` means "any error", so it cannot narrow into `E!T`.
+                        return false;
+                    if (target_error != source_error) return false;
+                }
+                // a union like `E!Never` can only ever carry an error.
+                //  There is no success value that could mismatch `target_ok`, and the error sets matched above.
+                if (source_info.error_union.ok == @backingInt(PrimitiveType.Never)) return true;
+                return try self.is_compatible(target_ok, source_info.error_union.ok);
+            }
+
+            // A bare error value fills the error slot.
+            if (source_info == ._error) {
+                if (target_err) |target_error| return target_error == source;
+                return true;
+            }
+
+            // success promotion: `T` -> `E!T`.
+            return try self.is_compatible(target_ok, source);
+        }
 
         if (target_info == .optional) {
             const inner = target_info.optional.inner;

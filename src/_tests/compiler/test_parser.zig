@@ -451,6 +451,45 @@ test "Parser parses optional unwrap expressions" {
     try std.testing.expect(chain.var_decl.initializer.dot_expr.expr.* == .optional_unwrap_expr);
 }
 
+test "Parser parses error union types" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const allocator = arena.allocator();
+
+    // `E!T` keeps a named error set in the error position.
+    const node = try parseFirstDecl(allocator, "var x: E!Int = 1;");
+    const annot = node.var_decl.type_annotation.?;
+    try std.testing.expect(annot.* == .error_union_type);
+    try std.testing.expect(annot.error_union_type.err.?.* == .identifier_type);
+    try std.testing.expectEqualStrings("E", annot.error_union_type.err.?.identifier_type.name.lexeme);
+    try std.testing.expect(annot.error_union_type.ok.* == .int_type);
+
+    // `!T` leaves the error set inferred.
+    const any_node = try parseFirstDecl(allocator, "var x: !Int = 1;");
+    const any_annot = any_node.var_decl.type_annotation.?;
+    try std.testing.expect(any_annot.* == .error_union_type);
+    try std.testing.expect(any_annot.error_union_type.err == null);
+
+    // `!` binds looser than `?`: `E!?Int` is `E! (?Int)`.
+    const nested = try parseFirstDecl(allocator, "var x: E!?Int = nil;");
+    const nested_annot = nested.var_decl.type_annotation.?;
+    try std.testing.expect(nested_annot.* == .error_union_type);
+    try std.testing.expect(nested_annot.error_union_type.ok.* == .optional_type);
+    try std.testing.expect(nested_annot.error_union_type.ok.optional_type.inner.* == .int_type);
+
+    // `?` binds tighter than `!`, so `?E!Int` is `?(E!Int)`.
+    const opt = try parseFirstDecl(allocator, "var x: ?E!Int = nil;");
+    const opt_annot = opt.var_decl.type_annotation.?;
+    try std.testing.expect(opt_annot.* == .optional_type);
+    try std.testing.expect(opt_annot.optional_type.inner.* == .error_union_type);
+
+    // Error unions nest in structural types.
+    const array_node = try parseFirstDecl(allocator, "var x: Array[E!Int] = [1];");
+    const array_annot = array_node.var_decl.type_annotation.?;
+    try std.testing.expect(array_annot.* == .array_type);
+    try std.testing.expect(array_annot.array_type.element_type.* == .error_union_type);
+}
+
 test "Parser rejects ?Nil and nested optionals" {
     var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
     defer arena.deinit();

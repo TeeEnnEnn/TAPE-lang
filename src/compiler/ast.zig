@@ -119,6 +119,7 @@ pub const ASTNode = union(enum) {
     fn_type: *FnType,
     co_type: *CoType,
     optional_type: *OptionalType,
+    error_union_type: *ErrorUnionType,
 };
 
 // Node Types
@@ -756,6 +757,12 @@ pub const IdentifierType = struct {
 
 pub const OptionalType = struct {
     inner: *ASTNode,
+};
+
+pub const ErrorUnionType = struct {
+    /// null means the error set is inferred (`!T`), i.e. any error.
+    err: ?*ASTNode,
+    ok: *ASTNode,
 };
 
 // match patterns
