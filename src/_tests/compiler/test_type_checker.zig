@@ -501,8 +501,11 @@ test "Type Checker - pub const import via use_decl hoist looks up from exports m
     var workspace = Workspace.init(allocator, io);
     defer workspace.deinit();
 
-    // Create and process the "lib" module with a pub var
-    const lib_mod = try Module.init("lib", "pub const x: Int = 42;", allocator, false);
+    // Create and process the "lib" module with a pub var.
+    // The workspace owns these strings and frees them in `deinit`.
+    const lib_path = try allocator.dupe(u8, "lib");
+    const lib_source = try allocator.dupe(u8, "pub const x: Int = 42;");
+    const lib_mod = try Module.init(lib_path, lib_source, allocator, false);
     var group = std.Io.Group.init;
     var parser = try Parser.init(allocator, &workspace, lib_mod, io, &group);
     lib_mod.ast = try parser.parse();
@@ -1187,6 +1190,69 @@ test "Type Checker - error unions reject mismatches" {
     try std.testing.expectError(TypeCheckerError.TypeMismatch, checkSource(allocator, "error E { A } fn f() -> E!Int { return 1; } var x: Int = f();"));
     // nil only fits an optional success type.
     try std.testing.expectError(TypeCheckerError.TypeMismatch, checkSource(allocator, "error E { A } var x: E!Int = nil;"));
+}
+
+test "Type Checker - try unwraps error unions and propagates matching errors" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const allocator = arena.allocator();
+
+    _ = try checkSource(allocator, "error E { A } fn f() -> E!Int { return E.A; } fn g() -> E!Int { var x = try f(); return x; }");
+    // A concrete error set widens into `!T`.
+    _ = try checkSource(allocator, "error E { A } fn f() -> E!Int { return E.A; } fn g() -> !Int { var x = try f(); return x; }");
+    // `try` yields the success payload, not the error union.
+    _ = try checkSource(allocator, "error E { A } fn f() -> E!Int { return E.A; } fn g() -> E!Int { var x: Int = try f(); return x; }");
+}
+
+test "Type Checker - try errors" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const allocator = arena.allocator();
+
+    // `try` must be inside a function or coroutine.
+    try std.testing.expectError(TypeCheckerError.TryOutsideFunction, checkSource(allocator, "error E { A } fn f() -> E!Int { return E.A; } var x = try f();"));
+    // The enclosing function must return an error union.
+    try std.testing.expectError(TypeCheckerError.TypeMismatch, checkSource(allocator, "error E { A } fn f() -> E!Int { return E.A; } fn g() -> Int { var x = try f(); return x; }"));
+    // The operand must be an error union.
+    try std.testing.expectError(TypeCheckerError.TypeMismatch, checkSource(allocator, "error E { A } fn g() -> E!Int { var x = try 1; return E.A; }"));
+    // The operand's error set must match the enclosing function's error set.
+    try std.testing.expectError(TypeCheckerError.TypeMismatch, checkSource(allocator, "error E { A } error F { B } fn f() -> E!Int { return E.A; } fn g() -> F!Int { var x = try f(); return x; }"));
+    // `!T` cannot narrow into a specific error set.
+    try std.testing.expectError(TypeCheckerError.TypeMismatch, checkSource(allocator, "error E { A } fn f() -> !Int { return 1; } fn g() -> E!Int { var x = try f(); return x; }"));
+}
+
+test "Type Checker - catch uses the success type as its result" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const allocator = arena.allocator();
+
+    var result = try checkSource(allocator, "error E { A } fn f() -> E!Int { return E.A; } var x = f() catch 0;");
+    defer result.env.deinit();
+    defer result.registry.deinit();
+    try std.testing.expectEqual(@backingInt(PrimitiveType.Int), try result.env.lookup("x"));
+
+    // The fallback may be any value compatible with the success type.
+    _ = try checkSource(allocator, "error E { A } fn f() -> E!?Int { return nil; } var x: ?Int = f() catch nil;");
+    _ = try checkSource(allocator, "error E { A } fn f() -> E!Int { return E.A; } var x: Int = f() catch 1 + 2;");
+
+    // A `Never` success type can only fail, so the fallback determines the type.
+    var never_result = try checkSource(allocator, "error E { A } fn f() -> E!Never { return E.A; } var x = f() catch \"fallback\";");
+    defer never_result.env.deinit();
+    defer never_result.registry.deinit();
+    try std.testing.expectEqual(@backingInt(PrimitiveType.String), try never_result.env.lookup("x"));
+}
+
+test "Type Checker - catch errors" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const allocator = arena.allocator();
+
+    // The left side must be an error union.
+    try std.testing.expectError(TypeCheckerError.TypeMismatch, checkSource(allocator, "var x = 1 catch 0;"));
+    // The fallback must match the success type.
+    try std.testing.expectError(TypeCheckerError.TypeMismatch, checkSource(allocator, "error E { A } fn f() -> E!Int { return E.A; } var x = f() catch \"s\";"));
+    // An error value is not a valid fallback for a plain success type.
+    try std.testing.expectError(TypeCheckerError.TypeMismatch, checkSource(allocator, "error E { A } fn f() -> E!Int { return E.A; } var x = f() catch E.A;"));
 }
 
 // --- captures (`bind`) ---

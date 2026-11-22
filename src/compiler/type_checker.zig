@@ -1005,13 +1005,33 @@ pub const TypeChecker = struct {
                 return type_info.coroutine.yield;
             },
             .try_expr => |expr| {
-                //  TODO: error unions
                 if (self.expected_return_type == null) {
                     try self.fail("`try` used outside function or coroutine", "`try` returns an error and so must be within a function or coroutine.", expr.line, expr.column);
                     return TypeCheckerError.TryOutsideFunction;
                 }
-                try self.fail("Invalid Operation", "`try` requires error unions (`E!T`), which are not yet supported.", expr.line, expr.column);
-                return TypeCheckerError.InvalidOperation;
+                const return_type_info = self.registry.get_type_info(self.expected_return_type.?);
+                if (return_type_info != .error_union) {
+                    try self.fail("Type Mismatch", "`try` can only be used in a function that returns an error union.", expr.line, expr.column);
+                    return TypeCheckerError.TypeMismatch;
+                }
+                const expr_type = try self.check_expression(expr.expr);
+                const type_info = self.registry.get_type_info(expr_type);
+                if (type_info != .error_union) {
+                    try self.fail("Type Mismatch", "`try` must be used with an error union type: `E!T`", expr.line, expr.column);
+                    return TypeCheckerError.TypeMismatch;
+                }
+                if (return_type_info.error_union.err) |return_err| {
+                    const expr_err = type_info.error_union.err orelse {
+                        try self.fail("Type Mismatch", "`try` cannot narrow an any-error union into a specific error set.", expr.line, expr.column);
+                        return TypeCheckerError.TypeMismatch;
+                    };
+                    if (return_err != expr_err) {
+                        try self.fail("Type Mismatch", "`try` error set does not match the enclosing function's error set.", expr.line, expr.column);
+                        return TypeCheckerError.TypeMismatch;
+                    }
+                }
+                expr.resolved_type = type_info.error_union.ok;
+                return type_info.error_union.ok;
             },
             .binary_expr => |expr| {
                 const left_type: AST.TypeId = try self.check_expression(expr.left);
@@ -1107,9 +1127,24 @@ pub const TypeChecker = struct {
                     try self.fail("Type Mismatch", "`orelse` fallback must match the optional's inner type.", expr.line, expr.column);
                     return TypeCheckerError.TypeMismatch;
                 } else if (std.mem.eql(u8, op, "catch")) {
-                    // TODO: error unions
-                    try self.fail("Invalid Operation", "`catch` requires error unions (`E!T`), which are not yet supported.", expr.line, expr.column);
-                    return TypeCheckerError.InvalidOperation;
+                    const left_info = self.registry.get_type_info(left_type);
+                    if (left_info != .error_union) {
+                        try self.fail("Type Mismatch", "`catch` must be used with an error union type: `E!T`.", expr.line, expr.column);
+                        return TypeCheckerError.TypeMismatch;
+                    }
+                    const ok_type = left_info.error_union.ok;
+                    if (ok_type == @backingInt(PrimitiveType.Never)) {
+                        // The success branch can never produce a value, so the
+                        // fallback is the only value this expression can yield.
+                        expr.resolved_type = right_type;
+                        return expr.resolved_type;
+                    }
+                    if (!try self.is_compatible(ok_type, right_type)) {
+                        try self.fail("Type Mismatch", "`catch` fallback must match the error union's success type.", expr.line, expr.column);
+                        return TypeCheckerError.TypeMismatch;
+                    }
+                    expr.resolved_type = ok_type;
+                    return expr.resolved_type;
                 } else {
                     try self.fail("Invalid Operation", "Unsupported binary operator.", expr.line, expr.column);
                     return TypeCheckerError.InvalidOperation;
@@ -1882,80 +1917,82 @@ pub const TypeChecker = struct {
         }
     }
 
-    /// Can a `source` value be used where a `target` value is expected
-    /// `source` is the type in question
-    /// `target` is the type that we are trying to be compatible with
-    fn is_compatible(self: *TypeChecker, target: AST.TypeId, source: AST.TypeId) TypeCheckerError!bool {
-        if (target == source) return true;
+    /// Returns whether a value of type `provided_type` can be used where
+    /// `expected_type` is required.
+    ///
+    /// `expected_type` is the destination/declared type.
+    /// `provided_type` is the actual type of the value being checked.
+    fn is_compatible(self: *TypeChecker, expected_type: AST.TypeId, provided_type: AST.TypeId) TypeCheckerError!bool {
+        if (expected_type == provided_type) return true;
 
-        const target_info = self.registry.get_type_info(target);
-        const source_info = self.registry.get_type_info(source);
+        const expected_info = self.registry.get_type_info(expected_type);
+        const provided_info = self.registry.get_type_info(provided_type);
 
-        if (target_info == .error_union) {
-            const target_err = target_info.error_union.err;
-            const target_ok = target_info.error_union.ok;
+        if (expected_info == .error_union) {
+            const expected_err = expected_info.error_union.err;
+            const expected_ok = expected_info.error_union.ok;
 
-            if (source == @backingInt(PrimitiveType.Never)) return true;
+            if (provided_type == @backingInt(PrimitiveType.Never)) return true;
 
             // Another error union:
             // the success sides must be compatible and,
-            // the target's error set must cover the source's error set.
-            if (source_info == .error_union) {
-                if (target_err) |target_error| {
-                    const source_error = source_info.error_union.err orelse
+            // the expected error set must cover the provided error set.
+            if (provided_info == .error_union) {
+                if (expected_err) |expected_error| {
+                    const provided_error = provided_info.error_union.err orelse
                         // `!T` means "any error", so it cannot narrow into `E!T`.
                         return false;
-                    if (target_error != source_error) return false;
+                    if (expected_error != provided_error) return false;
                 }
                 // a union like `E!Never` can only ever carry an error.
-                //  There is no success value that could mismatch `target_ok`, and the error sets matched above.
-                if (source_info.error_union.ok == @backingInt(PrimitiveType.Never)) return true;
-                return try self.is_compatible(target_ok, source_info.error_union.ok);
+                //  There is no success value that could mismatch `expected_ok`, and the error sets matched above.
+                if (provided_info.error_union.ok == @backingInt(PrimitiveType.Never)) return true;
+                return try self.is_compatible(expected_ok, provided_info.error_union.ok);
             }
 
             // A bare error value fills the error slot.
-            if (source_info == ._error) {
-                if (target_err) |target_error| return target_error == source;
+            if (provided_info == ._error) {
+                if (expected_err) |expected_error| return expected_error == provided_type;
                 return true;
             }
 
             // success promotion: `T` -> `E!T`.
-            return try self.is_compatible(target_ok, source);
+            return try self.is_compatible(expected_ok, provided_type);
         }
 
-        if (target_info == .optional) {
-            const inner = target_info.optional.inner;
+        if (expected_info == .optional) {
+            const inner = expected_info.optional.inner;
 
             // nil and Never (diverging) widen into any optional.
-            if (source == @backingInt(PrimitiveType.Nil)) return true;
-            if (source == @backingInt(PrimitiveType.Never)) return true;
+            if (provided_type == @backingInt(PrimitiveType.Nil)) return true;
+            if (provided_type == @backingInt(PrimitiveType.Never)) return true;
 
             // T -> ?T (implicit widening)
-            if (try self.is_compatible(inner, source)) return true;
+            if (try self.is_compatible(inner, provided_type)) return true;
 
             // ?S -> ?T when S is itself usable as T.
-            if (source_info == .optional) {
-                return try self.is_compatible(inner, source_info.optional.inner);
+            if (provided_info == .optional) {
+                return try self.is_compatible(inner, provided_info.optional.inner);
             }
 
             return false;
         }
 
         // Optionals never implicitly unwrap: ?T -> T is rejected.
-        if (source_info == .optional) return false;
+        if (provided_info == .optional) return false;
 
         //  Array[Never] matches Array[T] for any T
-        if (target_info == .array and source_info == .array) {
-            if (source_info.array == @backingInt(PrimitiveType.Never)) {
+        if (expected_info == .array and provided_info == .array) {
+            if (provided_info.array == @backingInt(PrimitiveType.Never)) {
                 return true;
             }
-            return target_info.array == source_info.array;
+            return expected_info.array == provided_info.array;
         }
 
         // Table[Never, Never] matches Table[K, V] for any K, V
-        if (target_info == .table and source_info == .table) {
-            const key_compat = (source_info.table.key == @backingInt(PrimitiveType.Never)) or (target_info.table.key == source_info.table.key);
-            const val_compat = (source_info.table.value == @backingInt(PrimitiveType.Never)) or (target_info.table.value == source_info.table.value);
+        if (expected_info == .table and provided_info == .table) {
+            const key_compat = (provided_info.table.key == @backingInt(PrimitiveType.Never)) or (expected_info.table.key == provided_info.table.key);
+            const val_compat = (provided_info.table.value == @backingInt(PrimitiveType.Never)) or (expected_info.table.value == provided_info.table.value);
             return key_compat and val_compat;
         }
         return false;
