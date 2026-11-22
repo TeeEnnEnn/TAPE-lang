@@ -689,14 +689,14 @@ test "Type Checker - resume on non-coroutine" {
     try std.testing.expectError(TypeCheckerError.InvalidOperation, checkSource(allocator, "var x = 5; var y = resume x;"));
 }
 
-test "Type Checker - resume matches yield and return types" {
+test "Type Checker - resume returns optional yield type independently of return type" {
     var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
     defer arena.deinit();
     const allocator = arena.allocator();
 
-    // while yield and return agree, resume produces the coroutine's yield type
+    // Yield and return types are independent; resume distinguishes completion with nil.
     var result = try checkSource(allocator,
-        \\co gen() -> (Int, Nil, Int) { yield 1; return 2; }
+        \\co gen() -> (Int, Nil, String) { yield 1; return "done"; }
         \\var c = gen();
         \\var v = resume c;
     );
@@ -704,15 +704,8 @@ test "Type Checker - resume matches yield and return types" {
     defer result.registry.deinit();
 
     const v_type = try result.env.lookup("v");
-    try std.testing.expectEqual(@backingInt(PrimitiveType.Int), v_type);
-
-    // Temporary bridge: until `resume` produces `?Y`, coroutines whose yield
-    // and return types differ cannot be resumed.
-    try std.testing.expectError(TypeCheckerError.TypeMismatch, checkSource(allocator,
-        \\co gen() -> (Int, Nil, String) { yield 1; return "done"; }
-        \\var c = gen();
-        \\var v = resume c;
-    ));
+    try std.testing.expect(result.registry.get_type_info(v_type) == .optional);
+    try std.testing.expectEqual(@backingInt(PrimitiveType.Int), result.registry.get_type_info(v_type).optional.inner);
 }
 
 test "Type Checker - coroutine member access" {
@@ -721,17 +714,21 @@ test "Type Checker - coroutine member access" {
     const allocator = arena.allocator();
 
     var result = try checkSource(allocator,
-        \\co f() -> (Int, Nil, Nil) { yield 1; }
+        \\co f() -> (Int, Nil, Int) { yield 1; return 2; }
         \\var c = f();
         \\var a: Bool = c.suspended;
         \\var b: Bool = c.finished;
         \\var d: Bool = c.running;
+        \\var e: ?Int = c.returned();
+        \\var finished_query: Bool = c.is_finished();
     );
     defer result.env.deinit();
     defer result.registry.deinit();
     try std.testing.expectEqual(@backingInt(PrimitiveType.Bool), try result.env.lookup("a"));
     try std.testing.expectEqual(@backingInt(PrimitiveType.Bool), try result.env.lookup("b"));
     try std.testing.expectEqual(@backingInt(PrimitiveType.Bool), try result.env.lookup("d"));
+    try std.testing.expect(result.registry.get_type_info(try result.env.lookup("e")) == .optional);
+    try std.testing.expectEqual(@backingInt(PrimitiveType.Bool), try result.env.lookup("finished_query"));
 
     // unknown member
     try std.testing.expectError(TypeCheckerError.InvalidMemberAccess, checkSource(allocator, "co f() -> (Int, Nil, Nil) { yield 1; } var c = f(); var x = c.nope;"));

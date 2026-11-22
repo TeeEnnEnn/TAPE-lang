@@ -1,6 +1,5 @@
 //! Code generation for the TAPE compiler.
 //! Because the contents of the chunk are vulnerable to garbage collection, all allocations should be guarded with stack push/pops
-//! NOTE: This file is mostly AI Generated. I will remove this comment when I am comfortable to take ownership of this file's contents
 
 const std = @import("std");
 
@@ -14,6 +13,7 @@ const AST = @import("ast.zig");
 const BindingResolver = @import("binding_resolver.zig");
 const Module = @import("workspace.zig").Module;
 const TypeRegistry = @import("type_registry.zig");
+const Natives = @import("../natives/natives.zig").Natives;
 const ConstValue = @import("const_value.zig").ConstValue;
 
 const INTERNAL_ERROR_MESSAGE = "This is an internal error. Please write a bug report.";
@@ -662,6 +662,20 @@ pub const CodeGenerator = struct {
             .identifier_expr => |expr| try self.generate_identifier_expr(node, expr),
             .assign_expr => |expr| try self.generate_assignment_expression(expr),
             .call_expr => |expr| {
+                if (expr.expr.* == .dot_expr) {
+                    const dot = expr.expr.dot_expr;
+                    if (self.registry.get_type_info(resolve_typeof(dot.expr)) == .coroutine and
+                        (std.mem.eql(u8, dot.member.lexeme, "returned") or std.mem.eql(u8, dot.member.lexeme, "is_finished")))
+                    {
+                        const native_name = if (std.mem.eql(u8, dot.member.lexeme, "returned")) "coroutine_returned" else "coroutine_is_finished";
+                        const native_slot = Natives.find(native_name) orelse return CodeGeneratorError.MissingBinding;
+                        try self.generate_expression(dot.expr);
+                        try self.current.chunk().write_opcode(.OP_CALL_NATIVE, expr.line);
+                        try self.current.chunk().write_u16(1, expr.line);
+                        try self.current.chunk().write_u16(native_slot, expr.line);
+                        return;
+                    }
+                }
                 // instance method call
                 if (expr.expr.* == .dot_expr) {
                     if (self.binding_resolution.member_infos.get(expr.expr)) |member_info| {

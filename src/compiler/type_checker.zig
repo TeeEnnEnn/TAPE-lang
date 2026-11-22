@@ -996,13 +996,8 @@ pub const TypeChecker = struct {
                     return TypeCheckerError.TypeMismatch;
                 }
 
-                // TODO: optionals
-                if (type_info.coroutine.yield != type_info.coroutine.ret) {
-                    try self.fail("Type Mismatch", "`resume` requires the coroutine's yield type and return type to match until `resume` produces `?Y`.", expr.line, expr.column);
-                    return TypeCheckerError.TypeMismatch;
-                }
-                expr.resolved_type = type_info.coroutine.yield;
-                return type_info.coroutine.yield;
+                expr.resolved_type = try self.coroutine_observation_type(type_info.coroutine.yield);
+                return expr.resolved_type;
             },
             .try_expr => |expr| {
                 if (self.expected_return_type == null) {
@@ -1160,6 +1155,26 @@ pub const TypeChecker = struct {
                 return inner_type_id;
             },
             .call_expr => |expr| {
+                if (expr.expr.* == .dot_expr) {
+                    const dot = expr.expr.dot_expr;
+                    const receiver_type = try self.check_expression(dot.expr);
+                    const receiver_info = self.registry.get_type_info(receiver_type);
+                    if (receiver_info == .coroutine and
+                        (std.mem.eql(u8, dot.member.lexeme, "returned") or std.mem.eql(u8, dot.member.lexeme, "is_finished")))
+                    {
+                        if (expr.args.len != 0) {
+                            try self.fail("Invalid argument count", "Coroutine member expects no arguments.", expr.line, expr.column);
+                            return TypeCheckerError.InvalidArgumentCount;
+                        }
+                        if (std.mem.eql(u8, dot.member.lexeme, "is_finished")) {
+                            expr.resolved_type = @backingInt(PrimitiveType.Bool);
+                        } else {
+                            expr.resolved_type = try self.coroutine_observation_type(receiver_info.coroutine.ret);
+                        }
+                        dot.resolved_type = expr.resolved_type;
+                        return expr.resolved_type;
+                    }
+                }
                 // Struct calls inject a receiver only when the declaration names `self`.
                 if (expr.expr.* == .dot_expr) {
                     const dot = expr.expr.dot_expr;
@@ -1418,12 +1433,12 @@ pub const TypeChecker = struct {
                         return TypeCheckerError.InvalidMemberAccess;
                     },
                     .coroutine => {
-                        // corotines have suspended, finished, and running members - which are boolean values
+                        // Coroutine state flags are properties; returned() and is_finished() are methods.
                         if (std.mem.eql(u8, expr.member.lexeme, "suspended") or std.mem.eql(u8, expr.member.lexeme, "finished") or std.mem.eql(u8, expr.member.lexeme, "running") or std.mem.eql(u8, expr.member.lexeme, "started")) {
                             expr.resolved_type = @backingInt(PrimitiveType.Bool);
                             return @backingInt(PrimitiveType.Bool);
                         } else {
-                            try self.fail("Invalid Member Access", "Coroutines only expose `started`, `suspended`, `finished`, and `running` members.", expr.line, expr.column);
+                            try self.fail("Invalid Member Access", "Use `returned()` or `is_finished()` to inspect coroutine completion.", expr.line, expr.column);
                             return TypeCheckerError.InvalidMemberAccess;
                         }
                     },
@@ -1922,6 +1937,13 @@ pub const TypeChecker = struct {
     ///
     /// `expected_type` is the destination/declared type.
     /// `provided_type` is the actual type of the value being checked.
+    fn coroutine_observation_type(self: *TypeChecker, payload_type: AST.TypeId) TypeCheckerError!AST.TypeId {
+        if (payload_type == @backingInt(PrimitiveType.Nil) or self.registry.unwrap_optional(payload_type) != null) {
+            return payload_type;
+        }
+        return self.registry.add_optional_type(payload_type);
+    }
+
     fn is_compatible(self: *TypeChecker, expected_type: AST.TypeId, provided_type: AST.TypeId) TypeCheckerError!bool {
         if (expected_type == provided_type) return true;
 

@@ -225,5 +225,5 @@ co match_in_co(x: Int) -> (Int, Nil, Int) {
     return v + 1;
 }
 var co_h = match_in_co(1);
-if (resume co_h != 10) { panic "match in co yield failed"; }
-if (resume co_h != 11) { panic "match in co return failed"; }
+if ((resume co_h).? != 10) { panic "match in co yield failed"; }
+if (resume co_h != nil or co_h.returned().? != 11) { panic "match in co return failed"; }

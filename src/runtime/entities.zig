@@ -136,10 +136,10 @@ pub const ObjectUpvalue = struct {
     closed: bool = false,
 };
 
-pub const CoroutineState = enum {
+pub const CoroutineState = union(enum) {
     SUSPENDED,
     RUNNING,
-    FINISHED,
+    FINISHED: Value,
 };
 
 pub const ExecutionState = struct {
@@ -649,6 +649,10 @@ pub fn blacken_object(garbage_collector: *basic_gc, obj: *ObjectHeader) !void {
             const coroutine: *ObjectCoroutine = @ptrCast(obj);
             try mark_object(garbage_collector, @ptrCast(coroutine.closure));
             try coroutine.execution_state.mark_execution_state(garbage_collector);
+            switch (coroutine.state) {
+                .FINISHED => |ret_val| try mark_value(garbage_collector, ret_val),
+                .SUSPENDED, .RUNNING => {},
+            }
         },
         .ObjectString => {},
         .ObjectTuple => {

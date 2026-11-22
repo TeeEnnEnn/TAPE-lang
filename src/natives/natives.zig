@@ -24,7 +24,7 @@ pub const Entry = struct {
 };
 
 /// files that will be searches for native functions
-const native_files = .{ .io = @import("src/io.zig") };
+const native_files = .{ .io = @import("src/io.zig"), .coroutine = @import("src/coroutine.zig") };
 
 /// Ensure that a function `T` matches the expected NativeCallable type.
 fn matches_native_signature(comptime T: type) bool {

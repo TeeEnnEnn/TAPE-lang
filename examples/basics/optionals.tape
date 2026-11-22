@@ -46,14 +46,14 @@ co ticks() -> (Int, Nil, Int) {
 var co1 = ticks();
 var present: ?Int = 100;
 // The coroutine must NOT be resumed here.
-var short_circuit: Int = present orelse resume co1;
+var short_circuit: Int = present orelse (resume co1).?;
 if (short_circuit != 100) { panic "orelse should keep the present value"; }
-var first_tick = resume co1;
+var first_tick = (resume co1).?;
 if (first_tick != 1) { panic "orelse resumed the coroutine when it should not have"; }
 
 // ...but it IS evaluated when the optional is nil.
 var absent: ?Int = nil;
-var next_tick: Int = absent orelse resume co1;
+var next_tick: Int = absent orelse (resume co1).?;
 if (next_tick != 2) { panic "orelse should have resumed the coroutine"; }
 
 // Optionals of non-primitive types

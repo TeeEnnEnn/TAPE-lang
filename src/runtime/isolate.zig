@@ -910,7 +910,10 @@ pub const Isolate = struct {
                     const coroutine_value = try self.peek_value(0); // keep the coroutine on the stack
                     const coroutine_object: *Entities.ObjectCoroutine = object_as(Entities.ObjectCoroutine, coroutine_value.object);
 
-                    if (coroutine_object.state == .FINISHED) return RuntimePanic.FinishedCoroutineResumption;
+                    switch (coroutine_object.state) {
+                        .FINISHED => return RuntimePanic.FinishedCoroutineResumption,
+                        .SUSPENDED, .RUNNING => {},
+                    }
                     if (coroutine_object.state == .RUNNING) return RuntimePanic.CoroutineAlreadyRunning;
 
                     const prev_execution_state = self.current;
@@ -931,8 +934,8 @@ pub const Isolate = struct {
 
                     switch (try result) {
                         .Ok => |value| {
-                            coroutine_object.state = .FINISHED;
-                            try self.push_value(value);
+                            coroutine_object.state = .{ .FINISHED = value };
+                            try self.push_value(.nil);
                         },
                         .Yielded => |value| {
                             coroutine_object.state = .SUSPENDED;
