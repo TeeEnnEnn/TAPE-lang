@@ -958,6 +958,8 @@ pub const BindingResolver = struct {
 
 fn resolved_type_of(node: *AST.ASTNode) AST.TypeId {
     return switch (node.*) {
+        .block_stmt => |v| v.resolved_type,
+        .if_stmt => |v| v.resolved_type,
         .assign_expr => |v| v.resolved_type,
         .identifier_expr => |v| v.resolved_type,
         .unary_expr => |v| v.resolved_type,

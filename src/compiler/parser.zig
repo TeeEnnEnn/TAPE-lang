@@ -484,14 +484,24 @@ pub const Parser = struct {
             return try self.parse_identifier_expression();
         } else if (try self.match(.LEFT_SQUARE)) {
             return try self.parse_array_literal();
-        } else if (try self.match(.LEFT_BRACE)) {
-            return try self.parse_table_literal();
+        } else if (self.check(.LEFT_BRACE)) {
+            if (self.is_table_literal_lookahead() or self.is_empty_brace_lookahead()) {
+                _ = try self.match(.LEFT_BRACE);
+                return try self.parse_table_literal();
+            }
+            const block = try self.parse_block_statement();
+            block.block_stmt.is_expr = true;
+            return block;
         } else if (self.check(.LEFT_PAREN)) {
             return try self.parse_group_or_tuple();
         } else if (try self.match(.NEW)) {
             return try self.parse_new_expression();
         } else if (try self.match(.MATCH)) {
             return try self.parse_match_expression();
+        } else if (try self.match(.IF)) {
+            const node = try self.parse_if_statement();
+            node.if_stmt.is_expr = true;
+            return node;
         } else {
             try self.fail("Unexpected Token at primary expression position", "Please check the language grammar documentation for guidance on how to correct this error.");
             return ParserError.UnexpectedToken;
@@ -1269,6 +1279,13 @@ pub const Parser = struct {
         const node = try self.allocator.create(AST.ASTNode);
         node.* = .{ .if_stmt = if_stmt };
         return node;
+    }
+
+    fn is_empty_brace_lookahead(self: *Parser) bool {
+        if (!self.check(.LEFT_BRACE)) return false;
+        var tmp = self.scanner;
+        const next = tmp.scan_token() catch return false;
+        return next.token_type == .RIGHT_BRACE;
     }
 
     fn parse_expression_statement(self: *Parser) ParserError!*AST.ASTNode {

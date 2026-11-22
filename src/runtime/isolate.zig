@@ -681,6 +681,7 @@ pub const Isolate = struct {
                         0 => false,
                         1 => true,
                         2 => if (self.current.stack_top_index > 0) self.current.stack[self.current.stack_top_index - 1] == .error_ else false,
+                        3 => false,
                         else => return RuntimePanic.CorruptedState,
                     };
                     const saved_value = if (mode != 0) try self.peek_value(0) else null;

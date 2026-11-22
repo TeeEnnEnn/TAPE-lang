@@ -84,6 +84,21 @@ pub const FunctionCompiler = struct {
     }
 };
 
+pub const GiveContext = struct {
+    allocator: std.mem.Allocator,
+    end_jumps: std.ArrayList(usize),
+    local_floor: u16,
+    defer_scope_floor: u16,
+
+    fn init(allocator: std.mem.Allocator, local_floor: u16, defer_scope_floor: u16) GiveContext {
+        return .{ .allocator = allocator, .end_jumps = .empty, .local_floor = local_floor, .defer_scope_floor = defer_scope_floor };
+    }
+
+    fn deinit(self: *GiveContext) void {
+        self.end_jumps.deinit(self.allocator);
+    }
+};
+
 pub const CodeGenerator = struct {
     /// base allocator - not for runtime managed entities
     allocator: std.mem.Allocator,
@@ -103,6 +118,7 @@ pub const CodeGenerator = struct {
     module: *Module,
     ///The stack of currently executing loop
     current_loop: ?*LoopContext = null,
+    current_give: ?*GiveContext = null,
 
     pub fn init(
         allocator: std.mem.Allocator,
@@ -148,6 +164,8 @@ pub const CodeGenerator = struct {
     /// Only covers expression nodes
     pub fn resolve_typeof(node: *AST.ASTNode) AST.TypeId {
         return switch (node.*) {
+            .block_stmt => |n| n.resolved_type,
+            .if_stmt => |n| n.resolved_type,
             .int_lit => |n| n.resolved_type,
             .float_lit => |n| n.resolved_type,
             .str_lit => |n| n.resolved_type,
@@ -222,6 +240,15 @@ pub const CodeGenerator = struct {
             },
 
             .block_stmt => |stmt| {
+                var give_context: GiveContext = undefined;
+                const previous_give = self.current_give;
+                if (stmt.is_expr) {
+                    give_context = GiveContext.init(self.allocator, self.current.current_locals_count, self.current.defer_scope_depth);
+                    self.current_give = &give_context;
+                }
+                defer self.current_give = previous_give;
+                defer if (stmt.is_expr) give_context.deinit();
+
                 try self.current.chunk().write_opcode(.OP_DEFER_SCOPE, stmt.line);
                 self.current.defer_scope_depth += 1;
                 for (stmt.stmts) |blk_stmt| {
@@ -237,18 +264,23 @@ pub const CodeGenerator = struct {
                 };
 
                 if (pop_count > 0) {
-                    if (stmt_has_give(node)) {
-                        try self.current.chunk().write_opcode(.OP_GIVE_POP, stmt.line);
-                        try self.current.chunk().write_u16(pop_count, stmt.line);
-                    } else {
-                        try self.current.chunk().write_opcode(.OP_POP_N, stmt.line);
-                        try self.current.chunk().write_u16(pop_count, stmt.line);
-                    }
+                    try self.current.chunk().write_opcode(.OP_POP_N, stmt.line);
+                    try self.current.chunk().write_u16(pop_count, stmt.line);
                     self.current.current_locals_count -= pop_count;
                 }
+                if (stmt.is_expr) for (give_context.end_jumps.items) |jump| try self.patch_jump(jump);
             },
 
             .if_stmt => |stmt| {
+                var give_context: GiveContext = undefined;
+                const previous_give = self.current_give;
+                if (stmt.is_expr) {
+                    give_context = GiveContext.init(self.allocator, self.current.current_locals_count, self.current.defer_scope_depth);
+                    self.current_give = &give_context;
+                }
+                defer self.current_give = previous_give;
+                defer if (stmt.is_expr) give_context.deinit();
+
                 try self.generate_expression(stmt.condition);
 
                 if (stmt.capture) |_| {
@@ -285,13 +317,14 @@ pub const CodeGenerator = struct {
                         try self.current.chunk().write_opcode(.OP_POP, stmt.line);
                         try self.generate_node(else_branch);
                         try self.patch_jump(else_jump);
-                        return;
+                    } else {
+                        const end_jump = try self.emit_jump(.OP_JUMP, stmt.line);
+                        try self.patch_jump(then_jump);
+                        try self.current.chunk().write_opcode(.OP_POP, stmt.line);
+                        try self.patch_jump(end_jump);
                     }
-                    const end_jump = try self.emit_jump(.OP_JUMP, stmt.line);
-                    try self.patch_jump(then_jump);
-                    try self.current.chunk().write_opcode(.OP_POP, stmt.line);
-                    try self.patch_jump(end_jump);
                 }
+                if (stmt.is_expr) for (give_context.end_jumps.items) |jump| try self.patch_jump(jump);
             },
 
             .while_stmt => |stmt| {
@@ -415,6 +448,13 @@ pub const CodeGenerator = struct {
 
             .give_stmt => |stmt| {
                 try self.generate_expression(stmt.expr);
+                const give_context = self.current_give orelse return CodeGeneratorError.InvalidPosition;
+                const locals_to_pop = self.current.current_locals_count - give_context.local_floor;
+                try self.emit_defer_runs(self.current.defer_scope_depth - give_context.defer_scope_floor, 3, stmt.line);
+                try self.current.chunk().write_opcode(.OP_GIVE_POP, stmt.line);
+                try self.current.chunk().write_u16(locals_to_pop, stmt.line);
+                const end_jump = try self.emit_jump(.OP_JUMP, stmt.line);
+                try give_context.end_jumps.append(self.allocator, end_jump);
             },
 
             .defer_stmt => |stmt| try self.generate_defer_statement(stmt),
@@ -491,7 +531,10 @@ pub const CodeGenerator = struct {
         // Start nested function with its own parameter count:
         const new_function = try FunctionCompiler.init(self.allocator, function_object, self.current, binding.param_count);
         const enclosing = self.current;
+        const enclosing_give = self.current_give;
         self.current = new_function;
+        self.current_give = null;
+        defer self.current_give = enclosing_give;
 
         // Generate body for the inner function
         try self.current.chunk().write_opcode(.OP_DEFER_SCOPE, callable_decl.line);
@@ -640,6 +683,7 @@ pub const CodeGenerator = struct {
 
     fn generate_expression(self: *CodeGenerator, node: *AST.ASTNode) CodeGeneratorError!void {
         switch (node.*) {
+            .block_stmt, .if_stmt => try self.generate_node(node),
             .int_lit => |lit| {
                 try self.current.chunk().emit_constant(.{ .int = lit.value }, lit.line);
             },
@@ -841,6 +885,11 @@ pub const CodeGenerator = struct {
             },
 
             .match_expr => |expr| {
+                var give_context = GiveContext.init(self.allocator, self.current.current_locals_count, self.current.defer_scope_depth);
+                const previous_give = self.current_give;
+                self.current_give = &give_context;
+                defer self.current_give = previous_give;
+                defer give_context.deinit();
                 // match target expression
                 try self.generate_expression(expr.expr);
 
@@ -858,10 +907,7 @@ pub const CodeGenerator = struct {
 
                         try self.generate_node(case.stmt);
 
-                        // if no give then emit nil
-                        if (!stmt_has_give(case.stmt)) {
-                            try self.current.chunk().write_opcode(.OP_NIL, case.line);
-                        }
+                        try self.current.chunk().write_opcode(.OP_NIL, case.line);
 
                         // Jump to end of match
                         const jump_to_end = try self.emit_jump(.OP_JUMP, case.line);
@@ -890,10 +936,7 @@ pub const CodeGenerator = struct {
                     // case body
                     try self.generate_node(case.stmt);
 
-                    // if no give then emit nil
-                    if (!stmt_has_give(case.stmt)) {
-                        try self.current.chunk().write_opcode(.OP_NIL, case.line);
-                    }
+                    try self.current.chunk().write_opcode(.OP_NIL, case.line);
 
                     // Jump to end of match
                     const jump_to_end = try self.emit_jump(.OP_JUMP, case.line);
@@ -914,6 +957,7 @@ pub const CodeGenerator = struct {
                 for (end_jumps.items) |end_jump| {
                     try self.patch_jump(end_jump);
                 }
+                for (give_context.end_jumps.items) |jump| try self.patch_jump(jump);
             },
 
             .try_expr => |expr| {
@@ -1300,7 +1344,10 @@ pub const CodeGenerator = struct {
         const function_object = try Entities.new_function_object(self.isolate, self.module.filepath);
         const new_function = try FunctionCompiler.init(self.allocator, function_object, self.current, binding.param_count);
         const enclosing = self.current;
+        const enclosing_give = self.current_give;
         self.current = new_function;
+        self.current_give = null;
+        defer self.current_give = enclosing_give;
 
         try self.current.chunk().write_opcode(.OP_DEFER_SCOPE, line);
         self.current.defer_scope_depth += 1;
@@ -1330,28 +1377,9 @@ pub const CodeGenerator = struct {
         }
     }
 
-    fn stmt_has_give(node: *AST.ASTNode) bool {
-        return switch (node.*) {
-            .give_stmt => true,
-            .block_stmt => |b| for (b.stmts) |s| {
-                if (stmt_has_give(s)) return true;
-            } else false,
-            .if_stmt => |s| stmt_has_give(s.then_branch) or (if (s.else_branch) |e| stmt_has_give(e) else false),
-            .while_stmt => |s| stmt_has_give(s.body),
-            .for_stmt => |s| stmt_has_give(s.body),
-            .match_expr => |e| for (e.cases) |c| {
-                if (stmt_has_give(c.stmt)) return true;
-            } else false,
-            else => false,
-        };
-    }
-
     fn emit_local_cleanup(self: *CodeGenerator, body: *AST.ASTNode, count: u16, line: usize) CodeGeneratorError!void {
-        if (stmt_has_give(body)) {
-            try self.current.chunk().write_opcode(.OP_GIVE_POP, line);
-        } else {
-            try self.current.chunk().write_opcode(.OP_POP_N, line);
-        }
+        _ = body;
+        try self.current.chunk().write_opcode(.OP_POP_N, line);
         try self.current.chunk().write_u16(count, line);
     }
 };

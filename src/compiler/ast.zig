@@ -252,6 +252,8 @@ pub const ErrorDecl = struct {
 /// ```
 pub const BlockStmt = struct {
     stmts: []*ASTNode,
+    is_expr: bool = false,
+    resolved_type: TypeId = 0,
     line: usize,
     column: usize,
 };
@@ -373,6 +375,8 @@ pub const IfStmt = struct {
     then_branch: *ASTNode,
     else_branch: ?*ASTNode,
     capture: ?*CaptureBindingExpr,
+    is_expr: bool = false,
+    resolved_type: TypeId = 0,
     line: usize,
     column: usize,
 };

@@ -72,6 +72,34 @@ test "Optional unwrap - a present value passes through unchanged" {
     );
 }
 
+test "give returns values from expression blocks and if expressions" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const allocator = arena.allocator();
+
+    try runSource(allocator,
+        \\var x = {
+        \\  var a = 10;
+        \\  if (a > 5) { give a * 2; }
+        \\  give a;
+        \\};
+        \\if (x != 20) { panic "statement if did not give to its enclosing block"; }
+        \\var y = if (x == 20) { var tmp = 1; give tmp + 1; } else { give 0; };
+        \\if (y != 2) { panic "if expression result was incorrect"; }
+        \\var maybe = if (false) { give 42; } else { give nil; };
+        \\if (maybe != nil) { panic "nil arm should widen result to optional"; }
+    );
+
+    try runSource(allocator,
+        \\fn cleanup() -> Int {
+        \\  var x = 1;
+        \\  var result = { defer { x = 9; } give 4; };
+        \\  return x + result;
+        \\}
+        \\if (cleanup() != 13) { panic "give did not run deferred cleanup"; }
+    );
+}
+
 test "Optional unwrap - unwrapping nil panics" {
     var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
     defer arena.deinit();

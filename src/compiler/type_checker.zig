@@ -66,6 +66,12 @@ pub const StatementTermination = struct {
     continue_: bool = false,
     yield_: bool = false,
     give_: bool = false,
+    falls_through: bool = true,
+};
+
+const GiveContext = struct {
+    expected_type: ?AST.TypeId = null,
+    saw_give: bool = false,
 };
 
 pub const TypeChecker = struct {
@@ -77,7 +83,7 @@ pub const TypeChecker = struct {
     workspace: *Workspace,
 
     expected_return_type: ?AST.TypeId = null,
-    expected_give_type: ?AST.TypeId = null,
+    current_give: ?*GiveContext = null,
     expected_yield_type: ?AST.TypeId = null,
     expected_resume_with_type: ?AST.TypeId = null,
 
@@ -426,8 +432,11 @@ pub const TypeChecker = struct {
 
                 // Track expected return type
                 const prev_return = self.expected_return_type;
+                const prev_give_context = self.current_give;
                 self.expected_return_type = type_info.function.ret;
+                self.current_give = null;
                 defer self.expected_return_type = prev_return;
+                defer self.current_give = prev_give_context;
 
                 // Push function scope
                 var local_env = Environment.init(self.allocator, self.environment);
@@ -544,8 +553,11 @@ pub const TypeChecker = struct {
 
                 // Track expected return type
                 const prev_return = self.expected_return_type;
+                const prev_give_context = self.current_give;
                 self.expected_return_type = type_info.coroutine.ret;
+                self.current_give = null;
                 defer self.expected_return_type = prev_return;
+                defer self.current_give = prev_give_context;
 
                 // track expected yield type
                 const prev_yield = self.expected_yield_type;
@@ -612,6 +624,10 @@ pub const TypeChecker = struct {
                 const prev_env = self.environment;
                 self.environment = &local_env;
                 defer self.environment = prev_env;
+                var give_context: GiveContext = .{};
+                const previous_give = self.current_give;
+                if (stmt.is_expr) self.current_give = &give_context;
+                defer self.current_give = previous_give;
                 var last: StatementTermination = .{};
 
                 for (stmt.stmts) |statement| {
@@ -626,23 +642,27 @@ pub const TypeChecker = struct {
                     }
                 }
 
-                var terminated = false;
                 for (stmt.stmts) |child| {
                     // `yield` is now an expression, so yields nested anywhere in a
                     // statement (var initializer, condition, call arg, ...) are
                     // tracked via the saw_yield flag rather than a statement flag.
                     self.saw_yield = false;
                     const term = try self.check(child);
-                    if (terminated) continue; // unreachable code doesn't contribute to termination
+                    if (!last.falls_through) continue; // unreachable code doesn't contribute to flow
                     last.return_ = last.return_ or term.return_;
                     last.panics = last.panics or term.panics;
                     last.break_ = last.break_ or term.break_;
                     last.continue_ = last.continue_ or term.continue_;
                     last.yield_ = last.yield_ or term.yield_ or self.saw_yield;
                     last.give_ = last.give_ or term.give_;
-                    if (term.return_ or term.panics or term.break_ or term.continue_) {
-                        terminated = true;
+                    last.falls_through = term.falls_through;
+                }
+                if (stmt.is_expr) {
+                    if (last.falls_through) {
+                        try self.fail("Incomplete give expression", "An expression block must `give` a value or diverge on every path.", stmt.line, stmt.column);
+                        return TypeCheckerError.InvalidOperation;
                     }
+                    stmt.resolved_type = give_context.expected_type orelse @backingInt(PrimitiveType.Never);
                 }
                 return last;
             },
@@ -661,7 +681,7 @@ pub const TypeChecker = struct {
                     try self.fail("Invalid Operation", "Return statement used outside of a function or coroutine.", stmt.line, stmt.column);
                     return TypeCheckerError.InvalidOperation; // Return outside of function
                 }
-                return .{ .return_ = true };
+                return .{ .return_ = true, .falls_through = false };
             },
             .give_stmt => |stmt| {
                 if (self.in_defer) {
@@ -669,17 +689,25 @@ pub const TypeChecker = struct {
                     return TypeCheckerError.InvalidOperation;
                 }
                 const provided_type = try self.check_expression(stmt.expr);
-
-                if (self.expected_give_type) |expected_type| {
-                    if (!try self.is_compatible(expected_type, provided_type)) {
-                        try self.fail("Type Mismatch", "Gave value does not match the type of earlier give statements.", stmt.line, stmt.column);
-                        return TypeCheckerError.TypeMismatch;
+                const context = self.current_give orelse {
+                    try self.fail("Invalid Operation", "`give` must be inside a match or expression-position if/block.", stmt.line, stmt.column);
+                    return TypeCheckerError.InvalidOperation;
+                };
+                context.saw_give = true;
+                if (provided_type != @backingInt(PrimitiveType.Never)) {
+                    if (context.expected_type) |expected_type| {
+                        const merged = try self.merge_give_types(expected_type, provided_type);
+                        if (merged) |type_id| {
+                            context.expected_type = type_id;
+                        } else {
+                            try self.fail("Type Mismatch", "Gave value does not match the type of earlier give statements.", stmt.line, stmt.column);
+                            return TypeCheckerError.TypeMismatch;
+                        }
+                    } else {
+                        context.expected_type = provided_type;
                     }
-                } else {
-                    // first give in a match — set the expected type
-                    self.expected_give_type = provided_type;
                 }
-                return .{ .give_ = true };
+                return .{ .give_ = true, .falls_through = false };
             },
             .defer_stmt => |stmt| {
                 if (!self.in_function and !self.in_coroutine) {
@@ -689,19 +717,19 @@ pub const TypeChecker = struct {
                 const prev_return = self.expected_return_type;
                 const prev_yield = self.expected_yield_type;
                 const prev_resume = self.expected_resume_with_type;
-                const prev_give = self.expected_give_type;
+                const prev_give = self.current_give;
                 const prev_loop = self.in_loop;
                 const prev_in_defer = self.in_defer;
                 self.expected_return_type = null;
                 self.expected_yield_type = null;
                 self.expected_resume_with_type = null;
-                self.expected_give_type = null;
+                self.current_give = null;
                 self.in_loop = false;
                 self.in_defer = true;
                 defer self.expected_return_type = prev_return;
                 defer self.expected_yield_type = prev_yield;
                 defer self.expected_resume_with_type = prev_resume;
-                defer self.expected_give_type = prev_give;
+                defer self.current_give = prev_give;
                 defer self.in_loop = prev_loop;
                 defer self.in_defer = prev_in_defer;
                 _ = try self.check(stmt.body);
@@ -772,6 +800,10 @@ pub const TypeChecker = struct {
             },
             .if_stmt => |stmt| {
                 const condition_type = try self.check_expression(stmt.condition);
+                var give_context: GiveContext = .{};
+                const previous_give = self.current_give;
+                if (stmt.is_expr) self.current_give = &give_context;
+                defer self.current_give = previous_give;
 
                 // A plain `if` requires a boolean. A capture requires an optional
                 // condition and binds the inner value inside the body only.
@@ -801,33 +833,45 @@ pub const TypeChecker = struct {
                     then_term = try self.check(stmt.then_branch);
                 }
 
-                if (stmt.else_branch) |else_branch| {
-                    const else_term = try self.check(else_branch);
-                    return .{
-                        .return_ = then_term.return_ and else_term.return_,
-                        .panics = then_term.panics and else_term.panics,
-                        .break_ = then_term.break_ and else_term.break_,
-                        .continue_ = then_term.continue_ and else_term.continue_,
-                        // either branch yielding means the coroutine can yield
-                        .yield_ = then_term.yield_ or else_term.yield_,
-                        .give_ = then_term.give_ and else_term.give_,
-                    };
+                const else_term = if (stmt.else_branch) |else_branch|
+                    try self.check(else_branch)
+                else
+                    StatementTermination{};
+
+                if (stmt.is_expr) {
+                    if (stmt.else_branch == null or then_term.falls_through or else_term.falls_through) {
+                        try self.fail("Incomplete if expression", "An if expression needs an else branch, and each branch must `give` or diverge.", stmt.line, stmt.column);
+                        return TypeCheckerError.InvalidOperation;
+                    }
+                    stmt.resolved_type = give_context.expected_type orelse @backingInt(PrimitiveType.Never);
+                    return .{ .give_ = give_context.saw_give, .yield_ = then_term.yield_ or else_term.yield_, .falls_through = false };
                 }
-                return .{ .yield_ = then_term.yield_ };
+                if (stmt.condition.* == .bool_lit) {
+                    return if (stmt.condition.bool_lit.value) then_term else else_term;
+                }
+                return .{
+                    .return_ = then_term.return_ and else_term.return_,
+                    .panics = then_term.panics and else_term.panics,
+                    .break_ = then_term.break_ and else_term.break_,
+                    .continue_ = then_term.continue_ and else_term.continue_,
+                    .yield_ = then_term.yield_ or else_term.yield_,
+                    .give_ = then_term.give_ or else_term.give_,
+                    .falls_through = then_term.falls_through or else_term.falls_through,
+                };
             },
             .break_stmt => |stmt| {
                 if (!self.in_loop) {
                     try self.fail("Invalid Operation", "Break statement used outside of a loop.", stmt.line, stmt.column);
                     return TypeCheckerError.BreakOutsideLoop;
                 }
-                return .{ .break_ = true };
+                return .{ .break_ = true, .falls_through = false };
             },
             .continue_stmt => |stmt| {
                 if (!self.in_loop) {
                     try self.fail("Invalid Operation", "Continue statement used outside of a loop.", stmt.line, stmt.column);
                     return TypeCheckerError.ContinueOutsideLoop;
                 }
-                return .{ .continue_ = true };
+                return .{ .continue_ = true, .falls_through = false };
             },
             .expr_stmt => |stmt| {
                 var term: StatementTermination = .{};
@@ -836,7 +880,7 @@ pub const TypeChecker = struct {
             },
             .panic_stmt => |stmt| {
                 _ = try self.check_expression(stmt.expr); // any expression type is allowed - so we can ignore the result
-                return .{ .panics = true, .return_ = true };
+                return .{ .panics = true, .return_ = true, .falls_through = false };
             },
             else => {
                 return .{};
@@ -913,6 +957,18 @@ pub const TypeChecker = struct {
 
     fn check_expression_term(self: *TypeChecker, node: *AST.ASTNode, out_term: ?*StatementTermination) TypeCheckerError!AST.TypeId {
         return switch (node.*) {
+            .block_stmt => |stmt| {
+                if (!stmt.is_expr) return TypeCheckerError.UnknownExpression;
+                const term = try self.check(node);
+                if (out_term) |out| out.* = term;
+                return stmt.resolved_type;
+            },
+            .if_stmt => |stmt| {
+                if (!stmt.is_expr) return TypeCheckerError.UnknownExpression;
+                const term = try self.check(node);
+                if (out_term) |out| out.* = term;
+                return stmt.resolved_type;
+            },
             .assign_expr => |expr| {
                 if (expr.left.* == .identifier_expr) {
                     const info = self.environment.lookup_binding(expr.left.identifier_expr.name.lexeme) catch {
@@ -1668,9 +1724,10 @@ pub const TypeChecker = struct {
                 return struct_typeid;
             },
             .match_expr => |expr| {
-                const prev_give = self.expected_give_type;
-                self.expected_give_type = null;
-                defer self.expected_give_type = prev_give;
+                var give_context: GiveContext = .{};
+                const previous_give = self.current_give;
+                self.current_give = &give_context;
+                defer self.current_give = previous_give;
                 const expr_typeid = try self.check_expression(expr.expr);
                 // duplicate default detection
                 {
@@ -1685,6 +1742,7 @@ pub const TypeChecker = struct {
                 }
                 try self.check_match_exhaustiveness(expr_typeid, expr);
                 var all_return = expr.cases.len > 0;
+                var all_non_fallthrough = expr.cases.len > 0;
                 for (expr.cases) |case| {
                     // default pattern is catch-all - skip type compatibility
                     if (case.pattern.* != .default_pat) {
@@ -1695,16 +1753,22 @@ pub const TypeChecker = struct {
                         }
                     }
                     const case_term = try self.check(case.stmt); // check the body of the case
+                    all_non_fallthrough = all_non_fallthrough and !case_term.falls_through;
                     if (!case_term.return_ and !case_term.panics) {
                         all_return = false;
                     }
                 }
-                if (out_term) |t| {
-                    t.* = if (all_return) .{ .return_ = true, .panics = false, .break_ = false, .continue_ = false, .yield_ = false, .give_ = false } else .{};
+                if (give_context.saw_give and !all_non_fallthrough) {
+                    try self.fail("Incomplete match expression", "Every match arm must `give` a value or diverge when any arm uses `give`.", expr.line, expr.column);
+                    return TypeCheckerError.InvalidOperation;
                 }
-                if (self.expected_give_type) |typeid| {
-                    expr.resolved_type = typeid;
-                    return typeid;
+                if (out_term) |t| {
+                    t.* = if (all_return) .{ .return_ = true, .panics = false, .break_ = false, .continue_ = false, .yield_ = false, .give_ = false, .falls_through = false } else .{};
+                }
+                if (give_context.saw_give) {
+                    const result_type = give_context.expected_type orelse @backingInt(PrimitiveType.Never);
+                    expr.resolved_type = result_type;
+                    return result_type;
                 } else {
                     // there was not a give type, so we return nil
                     expr.resolved_type = @backingInt(PrimitiveType.Nil);
@@ -1739,8 +1803,11 @@ pub const TypeChecker = struct {
 
                 // Typecheck inner body
                 const prev_ret = self.expected_return_type;
+                const prev_give_context = self.current_give;
                 self.expected_return_type = ret_typeid;
+                self.current_give = null;
                 defer self.expected_return_type = prev_ret;
+                defer self.current_give = prev_give_context;
 
                 const prev_in_func = self.in_function;
                 const prev_in_defer = self.in_defer;
@@ -1772,8 +1839,11 @@ pub const TypeChecker = struct {
                 const resume_with_typeid = try self.registry.resolve(expr.resume_with_type_annotation);
 
                 const prev_ret = self.expected_return_type;
+                const prev_give_context = self.current_give;
                 self.expected_return_type = ret_typeid;
+                self.current_give = null;
                 defer self.expected_return_type = prev_ret;
+                defer self.current_give = prev_give_context;
 
                 const prev_yield = self.expected_yield_type;
                 self.expected_yield_type = yield_typeid;
@@ -1985,6 +2055,21 @@ pub const TypeChecker = struct {
             return payload_type;
         }
         return self.registry.add_optional_type(payload_type);
+    }
+
+    fn merge_give_types(self: *TypeChecker, current: AST.TypeId, provided: AST.TypeId) TypeCheckerError!?AST.TypeId {
+        const never = @backingInt(PrimitiveType.Never);
+        const nil = @backingInt(PrimitiveType.Nil);
+        if (provided == never) return current;
+        if (current == never) return provided;
+        if (current == provided) return current;
+        if (current == nil) return try self.coroutine_observation_type(provided);
+        if (provided == nil) return try self.coroutine_observation_type(current);
+        if (try self.is_compatible(current, provided)) return current;
+        if (self.registry.unwrap_optional(provided)) |provided_inner| {
+            if (try self.is_compatible(provided_inner, current)) return provided;
+        }
+        return null;
     }
 
     fn is_compatible(self: *TypeChecker, expected_type: AST.TypeId, provided_type: AST.TypeId) TypeCheckerError!bool {
