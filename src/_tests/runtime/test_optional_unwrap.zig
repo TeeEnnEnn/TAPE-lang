@@ -93,3 +93,85 @@ test "Optional unwrap - unwrapping nil panics" {
         ),
     );
 }
+
+test "defer and errdefer run in LIFO order on the matching exit" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const allocator = arena.allocator();
+
+    try runSource(allocator,
+        \\fn deferred_value() -> Array[Int] {
+        \\    var values = [0];
+        \\    defer { values[0] = values[0] * 10 + 1; }
+        \\    defer { values[0] = values[0] * 10 + 2; }
+        \\    return values;
+        \\}
+        \\if (deferred_value()[0] != 21) { panic "defer order or return cleanup failed"; }
+        \\fn increment(values: Array[Int]) -> Nil { values[0] += 1; }
+        \\fn deferred_call() -> Array[Int] {
+        \\    var values = [0];
+        \\    defer increment(values);
+        \\    return values;
+        \\}
+        \\if (deferred_call()[0] != 1) { panic "deferred call did not run"; }
+        \\fn deferred_local() -> Array[Int] {
+        \\    var values = [0];
+        \\    var visible = 7;
+        \\    defer { var temporary = [visible]; values[0] = temporary[0]; }
+        \\    var later_local = 99;
+        \\    return values;
+        \\}
+        \\if (deferred_local()[0] != 7) { panic "defer local slots overlapped live locals"; }
+        \\fn conditional(flag: Bool) -> Array[Int] {
+        \\    var values = [0];
+        \\    if (flag) defer { values[0] = 1; }
+        \\    return values;
+        \\}
+        \\if (conditional(false)[0] != 0 or conditional(true)[0] != 1) { panic "conditional defer registration failed"; }
+        \\fn capture_defer() -> Array[Int] {
+        \\    var values: ?Array[Int] = [0];
+        \\    if (values) bind (captured) defer { captured[0] = 4; }
+        \\    return values.?;
+        \\}
+        \\if (capture_defer()[0] != 4) { panic "capture scope defer failed"; }
+        \\fn loop_defer() -> Array[Int] {
+        \\    var values = [0];
+        \\    var index = 0;
+        \\    while (index < 2) {
+        \\        defer { values[0] += 1; }
+        \\        index += 1;
+        \\    }
+        \\    return values;
+        \\}
+        \\if (loop_defer()[0] != 2) { panic "loop defer scope failed"; }
+        \\fn break_defer() -> Array[Int] {
+        \\    var values = [0];
+        \\    while (true) {
+        \\        defer { values[0] = 3; }
+        \\        break;
+        \\    }
+        \\    return values;
+        \\}
+        \\if (break_defer()[0] != 3) { panic "break did not run defer"; }
+        \\error E { Bad }
+        \\fn fail() -> E!Int { return E.Bad; }
+        \\fn error_path() -> Array[Int] {
+        \\    var values = [0];
+        \\    fn inner() -> E!Int {
+        \\        errdefer { values[0] = values[0] * 10 + 1; }
+        \\        defer { values[0] = values[0] * 10 + 2; }
+        \\        return try fail();
+        \\    }
+        \\    var ignored = inner() catch 0;
+        \\    return values;
+        \\}
+        \\if (error_path()[0] != 21) { panic "defer and errdefer did not run on try propagation"; }
+        \\fn success_path() -> Array[Int] {
+        \\    var values = [0];
+        \\    errdefer { values[0] = 1; }
+        \\    defer { values[0] = 2; }
+        \\    return values;
+        \\}
+        \\if (success_path()[0] != 2) { panic "errdefer ran on success or defer did not run"; }
+    );
+}

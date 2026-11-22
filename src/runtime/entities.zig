@@ -142,6 +142,16 @@ pub const CoroutineState = union(enum) {
     FINISHED: Value,
 };
 
+pub const DeferredEntry = struct { target_ip: usize, is_errdefer: bool };
+pub const DeferredScope = struct { entry_start: usize, frame_index: usize };
+pub const DeferredRun = struct {
+    entry_start: usize,
+    continuation_ip: usize,
+    frame_index: usize,
+    run_error_defers: bool,
+    saved_value: ?Value,
+};
+
 pub const ExecutionState = struct {
     stack: [*]Value,
     stack_top_index: usize,
@@ -150,6 +160,9 @@ pub const ExecutionState = struct {
     frame_count: usize,
     frame_capacity: usize,
     open_upvalues: ?*ObjectUpvalue,
+    deferred_entries: std.ArrayList(DeferredEntry),
+    deferred_scopes: std.ArrayList(DeferredScope),
+    deferred_runs: std.ArrayList(DeferredRun),
 
     pub fn init(allocator: std.mem.Allocator, frame_capacity: usize, stack_size: usize) !ExecutionState {
         const frames: [*]CallFrame = @ptrCast(@alignCast(try allocator.alloc(CallFrame, frame_capacity)));
@@ -164,12 +177,18 @@ pub const ExecutionState = struct {
             .stack_size = stack_size,
             .frame_capacity = frame_capacity,
             .open_upvalues = null,
+            .deferred_entries = .empty,
+            .deferred_scopes = .empty,
+            .deferred_runs = .empty,
         };
     }
 
     pub fn deinit(self: *ExecutionState, allocator: std.mem.Allocator) void {
         allocator.free(self.frames[0..self.frame_capacity]);
         allocator.free(self.stack[0..self.stack_size]);
+        self.deferred_entries.deinit(allocator);
+        self.deferred_scopes.deinit(allocator);
+        self.deferred_runs.deinit(allocator);
         self.open_upvalues = null;
     }
 
@@ -189,6 +208,9 @@ pub const ExecutionState = struct {
         // mark the stack
         for (self.stack[0..self.stack_top_index]) |value| {
             try mark_value(garbage_collector, value);
+        }
+        for (self.deferred_runs.items) |run| {
+            if (run.saved_value) |value| try mark_value(garbage_collector, value);
         }
     }
 };

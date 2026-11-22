@@ -125,6 +125,10 @@ pub const Opcode = enum(u8) {
     OP_FOR_NEXT,
     /// Checks the top of the stack for nil. If nil is found: panic
     OP_OPTIONAL_UNWRAP,
+    OP_DEFER_SCOPE,
+    OP_DEFER_PUSH,
+    OP_DEFER_RUN,
+    OP_DEFER_END,
 };
 
 /// A chunk of bytecode

@@ -35,17 +35,19 @@ pub const LoopContext = struct {
     continue_jumps: std.ArrayList(usize),
     /// Local variable count at the loop's outer boundary - for cleanup
     scope_local_floor: u16,
+    defer_scope_floor: u16,
     /// where to jump for `continue` statement (null => forward jump to be patched, used by `for` loops)
     continue_target: ?u32,
     /// parent loop
     enclosing: ?*LoopContext,
 
-    pub fn init(allocator: std.mem.Allocator, scope_floor: u16, continue_target: ?u32, enclosing: ?*LoopContext) LoopContext {
+    pub fn init(allocator: std.mem.Allocator, scope_floor: u16, defer_floor: u16, continue_target: ?u32, enclosing: ?*LoopContext) LoopContext {
         return .{
             .allocator = allocator,
             .break_jumps = .empty,
             .continue_jumps = .empty,
             .scope_local_floor = scope_floor,
+            .defer_scope_floor = defer_floor,
             .continue_target = continue_target,
             .enclosing = enclosing,
         };
@@ -64,6 +66,7 @@ pub const FunctionCompiler = struct {
     /// The enclosing function
     enclosing: ?*FunctionCompiler,
     current_locals_count: u16 = 0,
+    defer_scope_depth: u16 = 0,
 
     pub fn init(allocator: std.mem.Allocator, function: *Entities.ObjectFunction, enclosing: ?*FunctionCompiler, initial_locals: u16) !*FunctionCompiler {
         const compiler = try allocator.create(FunctionCompiler);
@@ -219,9 +222,14 @@ pub const CodeGenerator = struct {
             },
 
             .block_stmt => |stmt| {
+                try self.current.chunk().write_opcode(.OP_DEFER_SCOPE, stmt.line);
+                self.current.defer_scope_depth += 1;
                 for (stmt.stmts) |blk_stmt| {
                     try self.generate_node(blk_stmt);
                 }
+
+                try self.emit_defer_run(0, stmt.line);
+                self.current.defer_scope_depth -= 1;
 
                 const pop_count = self.binding_resolution.scope_pop_counts.get(node) orelse {
                     self.fail("Block scope has no pop count in binding resolution.", null, stmt.line, stmt.column);
@@ -252,7 +260,11 @@ pub const CodeGenerator = struct {
 
                     // The condition value is already sitting in the capture's stack slot.
                     self.current.current_locals_count += 1;
+                    try self.current.chunk().write_opcode(.OP_DEFER_SCOPE, stmt.line);
+                    self.current.defer_scope_depth += 1;
                     try self.generate_node(stmt.then_branch);
+                    try self.emit_defer_run(0, stmt.line);
+                    self.current.defer_scope_depth -= 1;
                     self.current.current_locals_count -= 1;
                     try self.emit_local_cleanup(stmt.then_branch, pop_count, stmt.line);
 
@@ -285,7 +297,7 @@ pub const CodeGenerator = struct {
             .while_stmt => |stmt| {
                 const loop_start = self.current.chunk().code.items.len;
 
-                var loop_context = LoopContext.init(self.allocator, self.current.current_locals_count, @intCast(loop_start), self.current_loop);
+                var loop_context = LoopContext.init(self.allocator, self.current.current_locals_count, self.current.defer_scope_depth, @intCast(loop_start), self.current_loop);
                 defer loop_context.deinit();
                 const prev_loop = self.current_loop;
                 self.current_loop = &loop_context;
@@ -299,7 +311,11 @@ pub const CodeGenerator = struct {
                     };
 
                     self.current.current_locals_count += 1; // for the captured value
+                    try self.current.chunk().write_opcode(.OP_DEFER_SCOPE, stmt.line);
+                    self.current.defer_scope_depth += 1;
                     try self.generate_node(stmt.body);
+                    try self.emit_defer_run(0, stmt.line);
+                    self.current.defer_scope_depth -= 1;
                     self.current.current_locals_count -= 1;
                     try self.emit_local_cleanup(stmt.body, pop_count, stmt.line);
 
@@ -327,6 +343,7 @@ pub const CodeGenerator = struct {
                 } else {
                     try self.current.chunk().write_opcode(.OP_NIL, stmt.line);
                 }
+                try self.emit_defer_runs(self.current.defer_scope_depth, 2, stmt.line);
                 try self.current.chunk().write_opcode(.OP_RETURN, stmt.line);
             },
 
@@ -351,7 +368,7 @@ pub const CodeGenerator = struct {
 
                 // set up loop context
                 const body_start: u32 = @intCast(self.current.chunk().code.items.len);
-                var loop_context = LoopContext.init(self.allocator, self.current.current_locals_count, null, self.current_loop);
+                var loop_context = LoopContext.init(self.allocator, self.current.current_locals_count, self.current.defer_scope_depth, null, self.current_loop);
                 defer loop_context.deinit();
 
                 const prev_loop = self.current_loop;
@@ -400,6 +417,8 @@ pub const CodeGenerator = struct {
                 try self.generate_expression(stmt.expr);
             },
 
+            .defer_stmt => |stmt| try self.generate_defer_statement(stmt),
+
             .break_stmt => |stmt| {
                 const loop_context = self.current_loop orelse {
                     self.fail("`break` statement outside of loop", null, stmt.line, stmt.column);
@@ -407,6 +426,7 @@ pub const CodeGenerator = struct {
                 };
 
                 const locals_to_pop = self.current.current_locals_count - loop_context.scope_local_floor;
+                try self.emit_defer_runs(self.current.defer_scope_depth - loop_context.defer_scope_floor, 0, stmt.line);
                 if (locals_to_pop > 0) {
                     try self.current.chunk().write_opcode(.OP_POP_N, stmt.line);
                     try self.current.chunk().write_u16(locals_to_pop, stmt.line);
@@ -423,6 +443,7 @@ pub const CodeGenerator = struct {
                 };
 
                 const locals_to_pop = self.current.current_locals_count - loop_context.scope_local_floor;
+                try self.emit_defer_runs(self.current.defer_scope_depth - loop_context.defer_scope_floor, 0, stmt.line);
                 if (locals_to_pop > 0) {
                     try self.current.chunk().write_opcode(.OP_POP_N, stmt.line);
                     try self.current.chunk().write_u16(locals_to_pop, stmt.line);
@@ -473,8 +494,12 @@ pub const CodeGenerator = struct {
         self.current = new_function;
 
         // Generate body for the inner function
+        try self.current.chunk().write_opcode(.OP_DEFER_SCOPE, callable_decl.line);
+        self.current.defer_scope_depth += 1;
         try self.generate_node(callable_decl.body);
 
+        try self.emit_defer_run(0, callable_decl.line);
+        self.current.defer_scope_depth -= 1;
         try self.current.chunk().write_opcode(.OP_NIL, callable_decl.line);
         try self.current.chunk().write_opcode(.OP_RETURN, callable_decl.line);
 
@@ -899,6 +924,7 @@ pub const CodeGenerator = struct {
 
                 // early return
                 try self.patch_jump(err_jump);
+                try self.emit_defer_runs(self.current.defer_scope_depth, 1, expr.line);
                 try self.current.chunk().write_opcode(.OP_RETURN, expr.line);
 
                 // non error success case
@@ -1142,6 +1168,32 @@ pub const CodeGenerator = struct {
         try self.patch_jump(end_jump);
     }
 
+    fn emit_defer_run(self: *CodeGenerator, mode: u8, line: usize) CodeGeneratorError!void {
+        try self.current.chunk().write_opcode(.OP_DEFER_RUN, line);
+        try self.current.chunk().write_u8(mode, line);
+    }
+
+    fn emit_defer_runs(self: *CodeGenerator, count: u16, mode: u8, line: usize) CodeGeneratorError!void {
+        for (0..count) |_| try self.emit_defer_run(mode, line);
+    }
+
+    fn generate_defer_statement(self: *CodeGenerator, stmt: *AST.DeferStmt) CodeGeneratorError!void {
+        try self.current.chunk().write_opcode(.OP_DEFER_PUSH, stmt.line);
+        const target_operand = self.current.chunk().code.items.len;
+        try self.current.chunk().write_u32(0, stmt.line);
+        try self.current.chunk().write_u8(if (stmt.is_errdefer) 1 else 0, stmt.line);
+        const skip_body = try self.emit_jump(.OP_JUMP, stmt.line);
+
+        const target: u32 = @intCast(self.current.chunk().code.items.len);
+        self.current.chunk().code.items[target_operand] = @truncate(target >> 24);
+        self.current.chunk().code.items[target_operand + 1] = @truncate(target >> 16);
+        self.current.chunk().code.items[target_operand + 2] = @truncate(target >> 8);
+        self.current.chunk().code.items[target_operand + 3] = @truncate(target);
+        try self.generate_node(stmt.body);
+        try self.current.chunk().write_opcode(.OP_DEFER_END, stmt.line);
+        try self.patch_jump(skip_body);
+    }
+
     fn emit_jump_placeholder(self: *CodeGenerator, line: usize) CodeGeneratorError!usize {
         try self.current.chunk().write_u8(0xff, line);
         try self.current.chunk().write_u8(0xff, line);
@@ -1250,9 +1302,13 @@ pub const CodeGenerator = struct {
         const enclosing = self.current;
         self.current = new_function;
 
+        try self.current.chunk().write_opcode(.OP_DEFER_SCOPE, line);
+        self.current.defer_scope_depth += 1;
         try self.generate_node(body);
 
         // implicit return
+        try self.emit_defer_run(0, line);
+        self.current.defer_scope_depth -= 1;
         try self.current.chunk().write_opcode(.OP_NIL, line);
         try self.current.chunk().write_opcode(.OP_RETURN, line);
 

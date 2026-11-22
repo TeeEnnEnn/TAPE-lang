@@ -1568,7 +1568,7 @@ pub const Parser = struct {
 
         // If the content starts with a declaration/statement keyword, it's a block, not a table.
         switch (first.token_type) {
-            .VAR, .CONST, .STRUCT, .TYPE, .ENUM, .ERROR, .USE, .IF, .FOR, .WHILE, .RETURN, .GIVE, .BREAK, .CONTINUE, .PANIC, .PUB => return false,
+            .VAR, .CONST, .STRUCT, .TYPE, .ENUM, .ERROR, .USE, .IF, .FOR, .WHILE, .RETURN, .GIVE, .BREAK, .CONTINUE, .PANIC, .DEFER, .ERRDEFER, .PUB => return false,
             .FN, .CO => {
                 var peek_tmp = tmp;
                 const second = peek_tmp.scan_token() catch return false;
@@ -1625,9 +1625,33 @@ pub const Parser = struct {
             return try self.parse_continue_statement();
         } else if (try self.match(.PANIC)) {
             return try self.parse_panic_statement();
+        } else if (try self.match(.DEFER)) {
+            return try self.parse_defer_statement(false);
+        } else if (try self.match(.ERRDEFER)) {
+            return try self.parse_defer_statement(true);
         } else {
             return try self.parse_expression_statement();
         }
+    }
+
+    fn parse_defer_statement(self: *Parser, is_errdefer: bool) ParserError!*AST.ASTNode {
+        const keyword = self.previous;
+        var body: *AST.ASTNode = undefined;
+        if (self.check(.LEFT_BRACE)) {
+            body = try self.parse_block_statement();
+        } else {
+            const expression = try self.parse_expression();
+            try self.consume(.SEMICOLON, "Expected ';' after deferred expression.");
+            const statement = try self.allocator.create(AST.ExprStmt);
+            statement.* = .{ .expr = expression, .line = keyword.line, .column = keyword.column };
+            body = try self.allocator.create(AST.ASTNode);
+            body.* = .{ .expr_stmt = statement };
+        }
+        const defer_stmt = try self.allocator.create(AST.DeferStmt);
+        defer_stmt.* = .{ .body = body, .is_errdefer = is_errdefer, .line = keyword.line, .column = keyword.column };
+        const node = try self.allocator.create(AST.ASTNode);
+        node.* = .{ .defer_stmt = defer_stmt };
+        return node;
     }
 
     /// Parses one program element. `top_level` is true only for the program's

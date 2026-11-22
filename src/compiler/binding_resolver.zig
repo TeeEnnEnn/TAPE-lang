@@ -125,8 +125,9 @@ const FunctionContext = struct {
     max_local_count: u16,
     upvalues: std.ArrayList(UpvalueInfo),
     upvalue_slots: std.AutoHashMap(AST.DeclRef, u16),
+    enclosing_defer_scope: ?*std.ArrayList(*AST.DeferStmt),
 
-    fn init(allocator: std.mem.Allocator, function_node: *AST.ASTNode, param_count: u16) FunctionContext {
+    fn init(allocator: std.mem.Allocator, function_node: *AST.ASTNode, param_count: u16, defer_scope: ?*std.ArrayList(*AST.DeferStmt)) FunctionContext {
         return .{
             .function_node = function_node,
             .param_count = param_count,
@@ -134,6 +135,7 @@ const FunctionContext = struct {
             .max_local_count = param_count,
             .upvalues = .empty,
             .upvalue_slots = std.AutoHashMap(AST.DeclRef, u16).init(allocator),
+            .enclosing_defer_scope = defer_scope,
         };
     }
 
@@ -152,6 +154,7 @@ pub const BindingResolver = struct {
     result: BindingResolution,
     functions: std.ArrayList(FunctionContext),
     local_owners: std.AutoHashMap(AST.DeclRef, *AST.ASTNode),
+    current_defer_scope: ?*std.ArrayList(*AST.DeferStmt) = null,
 
     pub fn init(
         allocator: std.mem.Allocator,
@@ -169,6 +172,7 @@ pub const BindingResolver = struct {
             .result = BindingResolution.init(allocator),
             .functions = .empty,
             .local_owners = std.AutoHashMap(AST.DeclRef, *AST.ASTNode).init(allocator),
+            .current_defer_scope = null,
         };
     }
 
@@ -298,6 +302,13 @@ pub const BindingResolver = struct {
                 if (stmt.else_branch) |branch| try self.resolveNode(branch, false);
             },
             .panic_stmt => |stmt| try self.resolveNode(stmt.expr, false),
+            .defer_stmt => |stmt| {
+                if (self.current_defer_scope) |scope| {
+                    try scope.append(self.allocator, stmt);
+                } else {
+                    try self.resolveNode(stmt.body, false);
+                }
+            },
             .expr_stmt => |stmt| try self.resolveNode(stmt.expr, false),
             .assign_expr => |expr| {
                 try self.resolveNode(expr.left, false);
@@ -466,7 +477,13 @@ pub const BindingResolver = struct {
 
     fn resolveBlock(self: *BindingResolver, node: *AST.ASTNode) !void {
         const floor = self.current_function().local_count;
+        var pending_defers: std.ArrayList(*AST.DeferStmt) = .empty;
+        defer pending_defers.deinit(self.allocator);
+        const previous_defer_scope = self.current_defer_scope;
+        self.current_defer_scope = &pending_defers;
+        defer self.current_defer_scope = previous_defer_scope;
         for (node.block_stmt.stmts) |stmt| try self.resolveNode(stmt, false);
+        for (pending_defers.items) |defer_stmt| try self.resolveNode(defer_stmt.body, false);
         const current = self.current_function();
         const pop_count = current.local_count - floor;
         try self.result.scope_pop_counts.put(node, pop_count);
@@ -481,9 +498,15 @@ pub const BindingResolver = struct {
     /// only for the body.
     fn resolveCaptureScope(self: *BindingResolver, node: *AST.ASTNode, cap: *AST.CaptureBindingExpr, body: *AST.ASTNode) !void {
         const floor = self.current_function().local_count;
+        var pending_defers: std.ArrayList(*AST.DeferStmt) = .empty;
+        defer pending_defers.deinit(self.allocator);
+        const previous_defer_scope = self.current_defer_scope;
+        self.current_defer_scope = &pending_defers;
+        defer self.current_defer_scope = previous_defer_scope;
 
         try self.registerLocal(.{ .capture = cap }, cap.name.lexeme, cap.resolved_type);
         try self.resolveNode(body, false);
+        for (pending_defers.items) |defer_stmt| try self.resolveNode(defer_stmt.body, false);
 
         const current = self.current_function();
         const pop_count = current.local_count - floor;
@@ -759,11 +782,13 @@ pub const BindingResolver = struct {
     }
 
     fn begin_function(self: *BindingResolver, node: *AST.ASTNode, param_count: u16) !void {
-        try self.functions.append(self.allocator, FunctionContext.init(self.allocator, node, param_count));
+        try self.functions.append(self.allocator, FunctionContext.init(self.allocator, node, param_count, self.current_defer_scope));
+        self.current_defer_scope = null;
     }
 
     fn end_function(self: *BindingResolver) !void {
         var function_context = self.functions.pop().?;
+        self.current_defer_scope = function_context.enclosing_defer_scope;
         const upvalues = try function_context.upvalues.toOwnedSlice(self.allocator);
         errdefer self.allocator.free(upvalues);
         function_context.upvalue_slots.deinit();

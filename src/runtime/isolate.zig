@@ -151,6 +151,21 @@ pub const Isolate = struct {
         return self.current.stack[self.current.stack_top_index - 1 - offset];
     }
 
+    fn continue_deferred_run(self: *Isolate, frame: *Entities.CallFrame) RuntimePanic!void {
+        if (self.current.deferred_runs.items.len == 0) return RuntimePanic.CorruptedState;
+        const run_index = self.current.deferred_runs.items.len - 1;
+        const run = self.current.deferred_runs.items[run_index];
+        while (self.current.deferred_entries.items.len > run.entry_start) {
+            const entry = self.current.deferred_entries.pop() orelse return RuntimePanic.CorruptedState;
+            if (entry.is_errdefer and !run.run_error_defers) continue;
+            frame.ip = entry.target_ip;
+            return;
+        }
+        const finished_run = self.current.deferred_runs.pop() orelse return RuntimePanic.CorruptedState;
+        if (finished_run.saved_value) |value| try self.push_value(value);
+        frame.ip = run.continuation_ip;
+    }
+
     /// Returns an upvalue pointing at the given stack slot, reusing an existing open
     /// upvalue so multiple closures capturing the same local share it. The open-upvalue
     /// list is kept sorted by descending stack address so that close_upvalues can stop
@@ -640,6 +655,47 @@ pub const Isolate = struct {
                     }
                     self.current.stack_top_index -= pop_count;
                 },
+
+                .OP_DEFER_SCOPE => {
+                    self.current.deferred_scopes.append(self.gc.managed_allocator.allocator(), .{
+                        .entry_start = self.current.deferred_entries.items.len,
+                        .frame_index = self.current.frame_count - 1,
+                    }) catch return RuntimePanic.OutOfMemory;
+                },
+
+                .OP_DEFER_PUSH => {
+                    const target_ip = frame.read_u32();
+                    const is_errdefer = frame.read_u8() != 0;
+                    self.current.deferred_entries.append(self.gc.managed_allocator.allocator(), .{
+                        .target_ip = target_ip,
+                        .is_errdefer = is_errdefer,
+                    }) catch return RuntimePanic.OutOfMemory;
+                },
+
+                .OP_DEFER_RUN => {
+                    const mode = frame.read_u8();
+                    if (self.current.deferred_scopes.items.len == 0) return RuntimePanic.CorruptedState;
+                    const scope = self.current.deferred_scopes.pop() orelse return RuntimePanic.CorruptedState;
+                    if (scope.frame_index != self.current.frame_count - 1) return RuntimePanic.CorruptedState;
+                    const run_error_defers = switch (mode) {
+                        0 => false,
+                        1 => true,
+                        2 => if (self.current.stack_top_index > 0) self.current.stack[self.current.stack_top_index - 1] == .error_ else false,
+                        else => return RuntimePanic.CorruptedState,
+                    };
+                    const saved_value = if (mode != 0) try self.peek_value(0) else null;
+                    self.current.deferred_runs.append(self.gc.managed_allocator.allocator(), .{
+                        .entry_start = scope.entry_start,
+                        .continuation_ip = frame.ip,
+                        .frame_index = scope.frame_index,
+                        .run_error_defers = run_error_defers,
+                        .saved_value = saved_value,
+                    }) catch return RuntimePanic.OutOfMemory;
+                    if (mode != 0) _ = try self.pop_value();
+                    try self.continue_deferred_run(frame);
+                },
+
+                .OP_DEFER_END => try self.continue_deferred_run(frame),
 
                 .OP_GIVE_POP => {
                     const pop_count = frame.read_u16();

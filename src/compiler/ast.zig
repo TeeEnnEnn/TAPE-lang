@@ -58,6 +58,7 @@ pub const ASTNode = union(enum) {
     if_stmt: *IfStmt,
     expr_stmt: *ExprStmt,
     panic_stmt: *PanicStmt,
+    defer_stmt: *DeferStmt,
 
     // Expressions
     assign_expr: *AssignExpr, // =, +=, -=, *=, /=, %=, <<=, >>=, &=, |=, ^=
@@ -383,6 +384,14 @@ pub const IfStmt = struct {
 /// ```
 pub const PanicStmt = struct {
     expr: *ASTNode,
+    line: usize,
+    column: usize,
+};
+
+/// `defer` and `errdefer` actions run when their lexical block exits.
+pub const DeferStmt = struct {
+    body: *ASTNode,
+    is_errdefer: bool,
     line: usize,
     column: usize,
 };

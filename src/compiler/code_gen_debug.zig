@@ -63,6 +63,19 @@ pub const ChunkDisassembler = struct {
         return offset + 1 + 2; // +1 for opcode +2 for u16 param_count
     }
 
+    fn disassemble_defer_push(chunk: *Chunk, offset: usize) usize {
+        const target = read_u32(chunk, offset + 1);
+        const is_errdefer = chunk.code.items[offset + 5] != 0;
+        std.debug.print("OP_DEFER_PUSH  target={d} errdefer={}", .{ target, is_errdefer });
+        std.debug.print("\n", .{});
+        return offset + 6;
+    }
+
+    fn disassemble_defer_run(chunk: *Chunk, offset: usize) usize {
+        std.debug.print("OP_DEFER_RUN  mode={d}", .{chunk.code.items[offset + 1]});
+        return offset + 2;
+    }
+
     fn disassemble_jump_instruction(chunk: *Chunk, offset: usize, direction: JumpDirection) usize {
         const opcode: Opcode = @fromBackingInt(@intCast(chunk.code.items[offset]));
         const jump_amount = read_u16(chunk, offset + 1);
@@ -211,9 +224,14 @@ pub const ChunkDisassembler = struct {
             .OP_PANIC,
             .OP_RANGE,
             .OP_OPTIONAL_UNWRAP,
+            .OP_DEFER_SCOPE,
+            .OP_DEFER_END,
             => {
                 return disassemble_simple_instruction(chunk, offset);
             },
+
+            .OP_DEFER_PUSH => return disassemble_defer_push(chunk, offset),
+            .OP_DEFER_RUN => return disassemble_defer_run(chunk, offset),
 
             .OP_CALL,
             .OP_COROUTINE,

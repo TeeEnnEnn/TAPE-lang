@@ -50,9 +50,9 @@ test "Scanner Emits Error For Unterminated String" {
 test "Scanner Keywords" {
     const allocator = std.testing.allocator;
     _ = allocator;
-    const source = "bind native resume and as break co const continue catch default else false for fn from give if in match new nil not or orelse panic pub return struct true type use var while try yield with";
+    const source = "bind native resume and as break co const continue catch default defer errdefer else false for fn from give if in match new nil not or orelse panic pub return struct true type use var while try yield with";
     const expected = [_]TokenType{
-        .BIND, .NATIVE, .RESUME, .AND, .AS, .BREAK, .CO, .CONST, .CONTINUE, .CATCH, .DEFAULT, .ELSE, .FALSE, .FOR, .FN, .FROM, .GIVE, .IF, .IN, .MATCH, .NEW, .NIL, .NOT, .OR, .ORELSE, .PANIC, .PUB, .RETURN, .STRUCT, .TRUE, .TYPE, .USE, .VAR, .WHILE, .TRY, .YIELD, .WITH,
+        .BIND, .NATIVE, .RESUME, .AND, .AS, .BREAK, .CO, .CONST, .CONTINUE, .CATCH, .DEFAULT, .DEFER, .ERRDEFER, .ELSE, .FALSE, .FOR, .FN, .FROM, .GIVE, .IF, .IN, .MATCH, .NEW, .NIL, .NOT, .OR, .ORELSE, .PANIC, .PUB, .RETURN, .STRUCT, .TRUE, .TYPE, .USE, .VAR, .WHILE, .TRY, .YIELD, .WITH,
     };
     try checkTokens(source, &expected);
 }

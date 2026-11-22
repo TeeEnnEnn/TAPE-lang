@@ -82,6 +82,7 @@ pub const TypeChecker = struct {
     expected_resume_with_type: ?AST.TypeId = null,
 
     in_loop: bool = false,
+    in_defer: bool = false,
     in_coroutine: bool = false,
     in_function: bool = false,
     current_struct_type: ?AST.TypeId = null,
@@ -454,8 +455,11 @@ pub const TypeChecker = struct {
                 }
 
                 const prev_in_func = self.in_function;
+                const prev_in_defer = self.in_defer;
                 self.in_function = true;
+                self.in_defer = false;
                 defer self.in_function = prev_in_func;
+                defer self.in_defer = prev_in_defer;
                 const body_term = try self.check(decl.body);
 
                 const needs_return = type_info.function.ret != @backingInt(PrimitiveType.Nil) and type_info.function.ret != @backingInt(PrimitiveType.Never);
@@ -574,8 +578,11 @@ pub const TypeChecker = struct {
                 }
 
                 const prev_in_coroutine = self.in_coroutine;
+                const prev_in_defer = self.in_defer;
                 self.in_coroutine = true;
+                self.in_defer = false;
                 defer self.in_coroutine = prev_in_coroutine;
+                defer self.in_defer = prev_in_defer;
                 const body_term = try self.check(decl.body);
                 const needs_return = type_info.coroutine.ret != @backingInt(PrimitiveType.Nil) and type_info.coroutine.ret != @backingInt(PrimitiveType.Never);
                 const needs_yield = type_info.coroutine.yield != @backingInt(PrimitiveType.Nil);
@@ -657,6 +664,10 @@ pub const TypeChecker = struct {
                 return .{ .return_ = true };
             },
             .give_stmt => |stmt| {
+                if (self.in_defer) {
+                    try self.fail("Invalid Operation", "`give` cannot be used inside a deferred action.", stmt.line, stmt.column);
+                    return TypeCheckerError.InvalidOperation;
+                }
                 const provided_type = try self.check_expression(stmt.expr);
 
                 if (self.expected_give_type) |expected_type| {
@@ -669,6 +680,32 @@ pub const TypeChecker = struct {
                     self.expected_give_type = provided_type;
                 }
                 return .{ .give_ = true };
+            },
+            .defer_stmt => |stmt| {
+                if (!self.in_function and !self.in_coroutine) {
+                    try self.fail("Invalid Operation", "`defer` and `errdefer` must be used inside a function or coroutine.", stmt.line, stmt.column);
+                    return TypeCheckerError.InvalidOperation;
+                }
+                const prev_return = self.expected_return_type;
+                const prev_yield = self.expected_yield_type;
+                const prev_resume = self.expected_resume_with_type;
+                const prev_give = self.expected_give_type;
+                const prev_loop = self.in_loop;
+                const prev_in_defer = self.in_defer;
+                self.expected_return_type = null;
+                self.expected_yield_type = null;
+                self.expected_resume_with_type = null;
+                self.expected_give_type = null;
+                self.in_loop = false;
+                self.in_defer = true;
+                defer self.expected_return_type = prev_return;
+                defer self.expected_yield_type = prev_yield;
+                defer self.expected_resume_with_type = prev_resume;
+                defer self.expected_give_type = prev_give;
+                defer self.in_loop = prev_loop;
+                defer self.in_defer = prev_in_defer;
+                _ = try self.check(stmt.body);
+                return .{};
             },
             .while_stmt => |stmt| {
                 const condition_type = try self.check_expression(stmt.condition);
@@ -1706,8 +1743,11 @@ pub const TypeChecker = struct {
                 defer self.expected_return_type = prev_ret;
 
                 const prev_in_func = self.in_function;
+                const prev_in_defer = self.in_defer;
                 self.in_function = true;
+                self.in_defer = false;
                 defer self.in_function = prev_in_func;
+                defer self.in_defer = prev_in_defer;
 
                 const body_term = try self.check(expr.body);
                 const needs_return = ret_typeid != @backingInt(PrimitiveType.Nil) and ret_typeid != @backingInt(PrimitiveType.Never);
@@ -1757,8 +1797,11 @@ pub const TypeChecker = struct {
                 }
 
                 const prev_in_co = self.in_coroutine;
+                const prev_in_defer = self.in_defer;
                 self.in_coroutine = true;
+                self.in_defer = false;
                 defer self.in_coroutine = prev_in_co;
+                defer self.in_defer = prev_in_defer;
 
                 const body_term = try self.check(expr.body);
                 const needs_return = ret_typeid != @backingInt(PrimitiveType.Nil) and ret_typeid != @backingInt(PrimitiveType.Never);

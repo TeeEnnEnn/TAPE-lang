@@ -401,6 +401,12 @@ pub fn print_node(node: *AST.ASTNode, depth: usize, indent_amt: usize) void {
             std.debug.print("\n", .{});
             print_node(panic_stmt.expr, depth + 1, indent_amt);
         },
+        .defer_stmt => |defer_stmt| {
+            std.debug.print("{s}:", .{if (defer_stmt.is_errdefer) "ErrDeferStmt" else "DeferStmt"});
+            write_location(defer_stmt.line, defer_stmt.column);
+            std.debug.print("\n", .{});
+            print_node(defer_stmt.body, depth + 1, indent_amt);
+        },
         .range_type => |range_type| {
             std.debug.print("RangeType:\n", .{});
             print_node(range_type.start, depth + 1, indent_amt);
