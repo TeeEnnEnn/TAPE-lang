@@ -233,7 +233,12 @@ pub const TypeChecker = struct {
 
     fn hoist(self: *TypeChecker, node: *AST.ASTNode) TypeCheckerError!void {
         switch (node.*) {
-            .program => |program| for (program.declarations) |decl| try self.hoist(decl),
+            .program => |program| {
+                for (program.declarations) |decl| {
+                    if (decl.* == .enum_decl) try self.pre_register_enum(decl, decl.enum_decl);
+                }
+                for (program.declarations) |decl| try self.hoist(decl);
+            },
             .use_decl => |decl| {
                 const imported_module = self.workspace.modules.get(decl.resolved_module_path) orelse {
                     return TypeCheckerError.UndefinedSymbol;
@@ -339,13 +344,16 @@ pub const TypeChecker = struct {
                 }
             },
             .enum_decl => |decl| {
-                var variants: std.ArrayList([]const u8) = .empty;
-                defer variants.deinit(self.allocator);
+                const enum_id = try self.environment.lookup(decl.name.lexeme);
+                const has_payloads = for (decl.variants) |variant| {
+                    if (variant.type_annotation != null) break true;
+                } else false;
+                var variants: std.ArrayList(TypeRegistry.EnumVariant) = .empty;
                 for (decl.variants) |variant| {
-                    try variants.append(self.allocator, variant.lexeme);
+                    const payload_type = if (variant.type_annotation) |annotation| try self.registry.resolve(annotation) else null;
+                    try variants.append(self.allocator, .{ .name = variant.variant_name.lexeme, .type = payload_type });
                 }
-                const enum_id = try self.registry.add_enum_type(decl.name.lexeme, try variants.toOwnedSlice(self.allocator), self.module.filepath);
-                try self.environment.define_type_binding(decl.name.lexeme, enum_id, .{ .node = node }, true);
+                try self.registry.set_enum_variants(enum_id, try variants.toOwnedSlice(self.allocator), has_payloads);
                 if (decl.modifier_pub) {
                     try self.export_symbol(decl.name.lexeme, enum_id, node);
                 }
@@ -364,6 +372,16 @@ pub const TypeChecker = struct {
             },
             else => {},
         }
+    }
+
+    fn pre_register_enum(self: *TypeChecker, node: *AST.ASTNode, decl: *AST.EnumDecl) TypeCheckerError!void {
+        const has_payloads = for (decl.variants) |variant| {
+            if (variant.type_annotation != null) break true;
+        } else false;
+        var placeholders: std.ArrayList(TypeRegistry.EnumVariant) = .empty;
+        for (decl.variants) |variant| try placeholders.append(self.allocator, .{ .name = variant.variant_name.lexeme, .type = null });
+        const enum_id = try self.registry.add_enum_type(decl.name.lexeme, try placeholders.toOwnedSlice(self.allocator), self.module.filepath, has_payloads);
+        try self.environment.define_type_binding(decl.name.lexeme, enum_id, .{ .node = node }, true);
     }
 
     pub fn check(self: *TypeChecker, node: *AST.ASTNode) TypeCheckerError!StatementTermination {
@@ -608,15 +626,9 @@ pub const TypeChecker = struct {
                 }
                 return .{};
             },
-            .enum_decl => { // fully handled in the hoist phase
-                return .{};
-            },
-            .error_decl => { // fully handled in the hoist phase
-                return .{};
-            },
-            .use_decl => { // fully handled in the hoist phase
-                return .{};
-            },
+            // fully handled in hoist phase
+            .anon_struct_decl, .enum_decl, .use_decl, .error_decl => return .{},
+
             .block_stmt => |stmt| {
                 var local_env = Environment.init(self.allocator, self.environment);
                 defer local_env.deinit();
@@ -1252,33 +1264,13 @@ pub const TypeChecker = struct {
                     const dot = expr.expr.dot_expr;
                     const receiver_type = try self.check_expression(dot.expr);
                     const receiver_info = self.registry.get_type_info(receiver_type);
-                    if (receiver_info == .coroutine and
-                        (std.mem.eql(u8, dot.member.lexeme, "returned") or std.mem.eql(u8, dot.member.lexeme, "is_finished")))
-                    {
-                        if (expr.args.len != 0) {
-                            try self.fail("Invalid argument count", "Coroutine member expects no arguments.", expr.line, expr.column);
-                            return TypeCheckerError.InvalidArgumentCount;
-                        }
-                        if (std.mem.eql(u8, dot.member.lexeme, "is_finished")) {
-                            expr.resolved_type = @backingInt(PrimitiveType.Bool);
-                        } else {
-                            expr.resolved_type = try self.coroutine_observation_type(receiver_info.coroutine.ret);
-                        }
-                        dot.resolved_type = expr.resolved_type;
-                        return expr.resolved_type;
-                    }
-                }
-                // Struct calls inject a receiver only when the declaration names `self`.
-                if (expr.expr.* == .dot_expr) {
-                    const dot = expr.expr.dot_expr;
-                    const receiver_type = try self.check_expression(dot.expr);
-                    const receiver_info = self.registry.get_type_info(receiver_type);
                     var receiver_is_type = false;
                     if (dot.expr.* == .identifier_expr) {
                         const binding = self.environment.lookup_binding(dot.expr.identifier_expr.name.lexeme) catch null;
                         receiver_is_type = if (binding) |b| b.is_type else false;
                     }
 
+                    // Struct calls inject a receiver only when the declaration names `self`.
                     if (receiver_info == ._struct) {
                         for (receiver_info._struct.methods) |method| {
                             if (std.mem.eql(u8, method.name, dot.member.lexeme)) {
@@ -1329,6 +1321,51 @@ pub const TypeChecker = struct {
                                 dot.resolved_type = method.type;
                                 expr.resolved_type = return_type;
                                 return expr.resolved_type;
+                            }
+                        }
+                    }
+
+                    if (receiver_info == .coroutine and
+                        (std.mem.eql(u8, dot.member.lexeme, "returned") or std.mem.eql(u8, dot.member.lexeme, "is_finished")))
+                    {
+                        if (expr.args.len != 0) {
+                            try self.fail("Invalid argument count", "Coroutine member expects no arguments.", expr.line, expr.column);
+                            return TypeCheckerError.InvalidArgumentCount;
+                        }
+                        if (std.mem.eql(u8, dot.member.lexeme, "is_finished")) {
+                            expr.resolved_type = @backingInt(PrimitiveType.Bool);
+                        } else {
+                            expr.resolved_type = try self.coroutine_observation_type(receiver_info.coroutine.ret);
+                        }
+                        dot.resolved_type = expr.resolved_type;
+                        return expr.resolved_type;
+                    }
+
+                    if (receiver_info == ._enum) {
+                        if (!receiver_is_type) {
+                            try self.fail("Variant access requires the type name", "Construct enum values through the enum type, such as `Shape.Circle(value)`.", expr.line, expr.column);
+                            return TypeCheckerError.InvalidMemberAccess;
+                        }
+                        for (receiver_info._enum.variants) |variant| {
+                            if (!std.mem.eql(u8, dot.member.lexeme, variant.name)) {
+                                continue;
+                            }
+                            if (variant.type) |variant_type| {
+                                dot.resolved_type = receiver_type;
+                                if (expr.args.len != 1) {
+                                    try self.fail("Invalid argument count", "An enum payload variant takes exactly one value.", expr.line, expr.column);
+                                    return TypeCheckerError.InvalidArgumentCount;
+                                }
+                                const provided_type = try self.check_expression(expr.args[0]);
+                                if (!try self.is_compatible(variant_type, provided_type)) {
+                                    try self.fail("Type Mismatch", "Enum payload value does not match the variant's declared payload type.", expr.line, expr.column);
+                                    return TypeCheckerError.TypeMismatch;
+                                }
+                                expr.resolved_type = receiver_type;
+                                return receiver_type;
+                            } else {
+                                try self.fail("Invalid Access", "Attempting to access a non-payload variant of an enum.", expr.line, expr.column);
+                                return TypeCheckerError.InvalidMemberAccess;
                             }
                         }
                     }
@@ -1555,7 +1592,12 @@ pub const TypeChecker = struct {
                             return TypeCheckerError.InvalidMemberAccess;
                         }
                         for (existing_enum.variants) |variant| {
-                            if (std.mem.eql(u8, variant, expr.member.lexeme)) {
+                            if (std.mem.eql(u8, variant.name, expr.member.lexeme)) {
+                                if (variant.type) |var_type| {
+                                    _ = var_type;
+                                    try self.fail("Payload variant requires a value", "Call this variant with its payload, for example `Enum.Variant(value)`.", expr.line, expr.column);
+                                    return TypeCheckerError.InvalidMemberAccess;
+                                }
                                 expr.resolved_type = obj_type;
                                 return obj_type;
                             }
@@ -1650,6 +1692,27 @@ pub const TypeChecker = struct {
                 }
 
                 return table_type;
+            },
+            .anon_struct_instance => |expr| {
+                var fields: std.ArrayList(TypeRegistry.StructField) = .empty;
+                for (expr.fields) |provided| {
+                    for (fields.items) |existing| {
+                        if (std.mem.eql(u8, existing.name, provided.name.lexeme)) {
+                            try self.fail("Duplicate struct field", "Anonymous struct values cannot provide the same field more than once.", provided.name.line, provided.name.column);
+                            return TypeCheckerError.DuplicateSymbol;
+                        }
+                    }
+                    try fields.append(self.allocator, .{
+                        .name = provided.name.lexeme,
+                        .type = try self.check_expression(provided.value),
+                        .is_pub = true,
+                        .default_value = null,
+                    });
+                }
+                const methods = try self.allocator.alloc(TypeRegistry.StructMethod, 0);
+                const struct_type = try self.registry.add_struct_type("<anonymous>", try fields.toOwnedSlice(self.allocator), methods, "");
+                expr.resolved_type = struct_type;
+                return struct_type;
             },
             .new_expr => |expr| {
                 const struct_typeid = self.environment.lookup(expr.struct_name.lexeme) catch {
@@ -1746,13 +1809,79 @@ pub const TypeChecker = struct {
                 for (expr.cases) |case| {
                     // default pattern is catch-all - skip type compatibility
                     if (case.pattern.* != .default_pat) {
-                        const case_typeid = try self.check_expression(case.pattern);
-                        if (!try self.is_compatible(expr_typeid, case_typeid)) {
-                            try self.fail("Type Mismatch", "Match case pattern does not match the matched expression type.", expr.line, expr.column);
-                            return TypeCheckerError.TypeMismatch;
+                        if (case.payload_binding) |capture| {
+                            if (case.pattern.* != .dot_expr) {
+                                try self.fail("Invalid payload pattern", "Bind a payload on an enum variant arm, for example `Shape.Circle => bind (radius) { ... }`.", case.line, case.column);
+                                return TypeCheckerError.InvalidOperation;
+                            }
+                            const dot = case.pattern.dot_expr;
+                            const receiver_type = try self.check_expression(dot.expr);
+                            const receiver_binding = if (dot.expr.* == .identifier_expr)
+                                (self.environment.lookup_binding(dot.expr.identifier_expr.name.lexeme) catch null)
+                            else
+                                null;
+                            if (receiver_type != expr_typeid or receiver_binding == null or !receiver_binding.?.is_type) {
+                                try self.fail("Invalid enum pattern", "Payload patterns must name a variant of the matched enum type.", case.line, case.column);
+                                return TypeCheckerError.TypeMismatch;
+                            }
+                            const enum_info = self.registry.get_type_info(expr_typeid);
+                            if (enum_info != ._enum) return TypeCheckerError.TypeMismatch;
+                            var found_variant = false;
+                            for (enum_info._enum.variants, 0..) |variant, tag| {
+                                if (!std.mem.eql(u8, variant.name, dot.member.lexeme)) continue;
+                                const payload_type = variant.type orelse {
+                                    try self.fail("Unit variant cannot bind a payload", "This enum variant has no payload to bind.", case.line, case.column);
+                                    return TypeCheckerError.TypeMismatch;
+                                };
+                                capture.resolved_type = payload_type;
+                                case.payload_type = payload_type;
+                                case.enum_tag = @intCast(tag);
+                                dot.resolved_type = expr_typeid;
+                                found_variant = true;
+                                break;
+                            }
+                            if (!found_variant) {
+                                try self.fail("Enum has no variant with this name", null, dot.line, dot.column);
+                                return TypeCheckerError.InvalidMemberAccess;
+                            }
+                        } else {
+                            if (case.pattern.* == .call_expr and case.pattern.call_expr.expr.* == .dot_expr) {
+                                const call_dot = case.pattern.call_expr.expr.dot_expr;
+                                const receiver_type = try self.check_expression(call_dot.expr);
+                                if (self.registry.get_type_info(receiver_type) == ._enum) {
+                                    try self.fail("Payload match arm requires bind", "Write `Enum.Variant => bind (value) { ... }` to bind the payload.", case.line, case.column);
+                                    return TypeCheckerError.InvalidOperation;
+                                }
+                            }
+                            const case_typeid = try self.check_expression(case.pattern);
+                            if (!try self.is_compatible(expr_typeid, case_typeid)) {
+                                try self.fail("Type Mismatch", "Match case pattern does not match the matched expression type.", expr.line, expr.column);
+                                return TypeCheckerError.TypeMismatch;
+                            }
+                            if (case.pattern.* == .dot_expr and case.pattern.dot_expr.expr.* == .identifier_expr and self.registry.get_type_info(expr_typeid) == ._enum) {
+                                const dot = case.pattern.dot_expr;
+                                const enum_info = self.registry.get_type_info(expr_typeid)._enum;
+                                for (enum_info.variants, 0..) |variant, tag| {
+                                    if (std.mem.eql(u8, variant.name, dot.member.lexeme)) {
+                                        case.enum_tag = @intCast(tag);
+                                        break;
+                                    }
+                                }
+                            }
                         }
                     }
-                    const case_term = try self.check(case.stmt); // check the body of the case
+                    var case_term: StatementTermination = undefined;
+                    if (case.payload_binding) |capture| {
+                        var arm_env = Environment.init(self.allocator, self.environment);
+                        defer arm_env.deinit();
+                        try arm_env.define_binding(capture.name.lexeme, capture.resolved_type, .{ .capture = capture }, true);
+                        const previous_env = self.environment;
+                        self.environment = &arm_env;
+                        defer self.environment = previous_env;
+                        case_term = try self.check(case.stmt);
+                    } else {
+                        case_term = try self.check(case.stmt);
+                    }
                     all_non_fallthrough = all_non_fallthrough and !case_term.falls_through;
                     if (!case_term.return_ and !case_term.panics) {
                         all_return = false;
@@ -1951,10 +2080,9 @@ pub const TypeChecker = struct {
             return;
         }
 
-        if (has_default) return; // default covers remaining values, anywhere
-
         // Bool and Nil are finite - check exhaustive without default
         if (matched_type == @backingInt(PrimitiveType.Bool)) {
+            if (has_default) return;
             var has_true = false;
             var has_false = false;
             for (expr.cases) |case| {
@@ -1967,6 +2095,7 @@ pub const TypeChecker = struct {
             return TypeCheckerError.NonExhaustiveMatch;
         }
         if (matched_type == @backingInt(PrimitiveType.Nil)) {
+            if (has_default) return;
             var has_nil = false;
             for (expr.cases) |case| {
                 if (case.pattern.* == .nil_lit) has_nil = true;
@@ -1991,7 +2120,7 @@ pub const TypeChecker = struct {
                 switch (inf) {
                     ._enum => |e| {
                         has.* = true;
-                        for (e.variants) |v| try out.append(s.allocator, v);
+                        for (e.variants) |v| try out.append(s.allocator, v.name);
                     },
                     ._error => |e| {
                         has.* = true;
@@ -2005,6 +2134,7 @@ pub const TypeChecker = struct {
         try collect(self, matched_type, &expected_variants, &has_enum_error);
 
         if (!has_enum_error) {
+            if (has_default) return;
             // Should have been caught by primitive check, but be safe
             try self.fail("Non-exhaustive match", "Match requires `default` for this type.", expr.line, expr.column);
             return TypeCheckerError.NonExhaustiveMatch;
@@ -2017,18 +2147,27 @@ pub const TypeChecker = struct {
         var covered = std.ArrayList([]const u8).empty;
         defer covered.deinit(self.allocator);
         for (expr.cases) |case| {
+            if (case.pattern.* == .default_pat) continue;
             if (case.pattern.* != .dot_expr) continue;
             const pattern_dot = case.pattern.dot_expr;
             if (pattern_dot.expr.* != .identifier_expr) continue;
             const recv_info = self.environment.lookup_binding(pattern_dot.expr.identifier_expr.name.lexeme) catch continue;
-            if (!recv_info.is_type) continue;
+            if (!recv_info.is_type or recv_info.type_id != matched_type) continue;
             for (expected_variants.items) |variant| {
                 if (std.mem.eql(u8, variant, pattern_dot.member.lexeme)) {
+                    for (covered.items) |already_covered| {
+                        if (std.mem.eql(u8, already_covered, variant)) {
+                            try self.fail("Duplicate match variant", "Each enum variant may appear in only one match arm.", case.line, case.column);
+                            return TypeCheckerError.DuplicateSymbol;
+                        }
+                    }
                     try covered.append(self.allocator, pattern_dot.member.lexeme);
                     break;
                 }
             }
         }
+
+        if (has_default) return;
 
         for (expected_variants.items) |variant| {
             var found = false;

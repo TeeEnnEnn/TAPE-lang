@@ -1126,6 +1126,40 @@ pub const Isolate = struct {
                     const top = try self.peek_value(0);
                     if (top == .nil) return RuntimePanic.FailedOptionalUnwrap;
                 },
+                .OP_NEW_ENUM => {
+                    const type_id = frame.read_u32();
+                    const tag = frame.read_u32();
+                    const payload_count = frame.read_u16();
+                    const enum_object = try self.gc.allocate_object(Entities.ObjectEnum, .ObjectEnum);
+                    enum_object.type_id = type_id;
+                    enum_object.tag = tag;
+                    enum_object.payloads = &.{};
+                    try self.push_value(.{ .object = &enum_object.header });
+                    if (payload_count > 0) {
+                        const payload_len: usize = @intCast(payload_count);
+                        const payloads = try self.gc.managed_allocator.allocator().alloc(TapeValue, payload_len);
+                        for (0..payload_len) |i| payloads[payload_len - i - 1] = try self.peek_value(i + 1);
+                        enum_object.payloads = payloads;
+                    }
+                    _ = try self.pop_value();
+                    for (0..payload_count) |_| _ = try self.pop_value();
+                    try self.push_value(.{ .object = &enum_object.header });
+                },
+                .OP_ENUM_TAG => {
+                    const enum_value = try self.pop_value();
+                    const enum_object = object_as(Entities.ObjectEnum, enum_value.object);
+                    try self.push_value(.{ .int = @intCast(enum_object.tag) });
+                },
+                .OP_ENUM_UNIT_TAG => {
+                    const enum_value = try self.pop_value();
+                    try self.push_value(.{ .int = @intCast(enum_value.enum_.index) });
+                },
+                .OP_ENUM_FIELD => {
+                    const index = frame.read_u16();
+                    const enum_value = try self.pop_value();
+                    const enum_object = object_as(Entities.ObjectEnum, enum_value.object);
+                    try self.push_value(enum_object.payloads[index]);
+                },
             }
         }
     }

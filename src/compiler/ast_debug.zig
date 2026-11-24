@@ -93,6 +93,26 @@ pub fn print_node(node: *AST.ASTNode, depth: usize, indent_amt: usize) void {
                 print_node(method.method, depth + 2, indent_amt);
             }
         },
+        .anon_struct_decl => |struct_decl| {
+            std.debug.print("AnonStructType", .{});
+            write_location(struct_decl.line, struct_decl.column);
+            std.debug.print("\n", .{});
+            for (struct_decl.fields) |field| {
+                indent(depth + 1, indent_amt);
+                std.debug.print("Field: {s}\n", .{field.name.lexeme});
+                print_node(field.type_annotation, depth + 2, indent_amt);
+            }
+        },
+        .anon_struct_instance => |instance| {
+            std.debug.print("AnonStructInstance", .{});
+            write_location(instance.line, instance.column);
+            std.debug.print("\n", .{});
+            for (instance.fields) |field| {
+                indent(depth + 1, indent_amt);
+                std.debug.print("Field: {s}\n", .{field.name.lexeme});
+                print_node(field.value, depth + 2, indent_amt);
+            }
+        },
         .enum_decl => |enum_decl| {
             std.debug.print("EnumDecl: {s}", .{enum_decl.name.lexeme});
             write_location(enum_decl.line, enum_decl.column);
@@ -100,7 +120,8 @@ pub fn print_node(node: *AST.ASTNode, depth: usize, indent_amt: usize) void {
             std.debug.print("\n", .{});
             for (enum_decl.variants) |variant| {
                 indent(depth + 1, indent_amt);
-                std.debug.print("Variant: {s}\n", .{variant.lexeme});
+                std.debug.print("Variant: {s}\n", .{variant.variant_name.lexeme});
+                if (variant.type_annotation) |payload_type| print_node(payload_type, depth + 2, indent_amt);
             }
         },
         .error_decl => |error_decl| {
@@ -373,6 +394,10 @@ pub fn print_node(node: *AST.ASTNode, depth: usize, indent_amt: usize) void {
                 indent(depth + 1, indent_amt);
                 std.debug.print("Case:\n", .{});
                 print_node(case.pattern, depth + 2, indent_amt);
+                if (case.payload_binding) |binding| {
+                    indent(depth + 2, indent_amt);
+                    std.debug.print("Bind: {s}\n", .{binding.name.lexeme});
+                }
                 print_node(case.stmt, depth + 2, indent_amt);
             }
         },

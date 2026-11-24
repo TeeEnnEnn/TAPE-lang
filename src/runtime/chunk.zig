@@ -129,6 +129,15 @@ pub const Opcode = enum(u8) {
     OP_DEFER_PUSH,
     OP_DEFER_RUN,
     OP_DEFER_END,
+
+    /// creates a runtime enum object
+    OP_NEW_ENUM,
+    /// reads a tag from a payload enum
+    OP_ENUM_TAG,
+    /// reads a tag from a inline (non payload enum)
+    OP_ENUM_UNIT_TAG,
+    /// reads a payload value from thestruct
+    OP_ENUM_FIELD,
 };
 
 /// A chunk of bytecode

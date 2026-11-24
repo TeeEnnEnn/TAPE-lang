@@ -251,6 +251,7 @@ pub const ChunkDisassembler = struct {
             .OP_STORE_UPVALUE,
             .OP_GET_FIELD,
             .OP_SET_FIELD,
+            .OP_ENUM_FIELD,
             => {
                 return disassemble_load_store_instruction(chunk, offset);
             },
@@ -278,6 +279,14 @@ pub const ChunkDisassembler = struct {
             .OP_STRUCT => {
                 return disassemble_struct_instruction(chunk, offset);
             },
+            .OP_NEW_ENUM => {
+                const type_id = read_u32(chunk, offset + 1);
+                const tag = read_u32(chunk, offset + 5);
+                const payload_count = read_u16(chunk, offset + 9);
+                std.debug.print("OP_NEW_ENUM type={d} tag={d} payloads={d}\n", .{ type_id, tag, payload_count });
+                return offset + 11;
+            },
+            .OP_ENUM_TAG, .OP_ENUM_UNIT_TAG => return disassemble_simple_instruction(chunk, offset),
             .OP_FOR_PREP,
             .OP_FOR_NEXT,
             => {

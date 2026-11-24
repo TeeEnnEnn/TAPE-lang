@@ -3,6 +3,11 @@ const AST = @import("ast.zig");
 
 pub const TypeId = AST.TypeId;
 
+fn optional_type_ids_equal(a: ?TypeId, b: ?TypeId) bool {
+    if (a) |a_id| return if (b) |b_id| a_id == b_id else false;
+    return b == null;
+}
+
 pub const StructField = struct {
     name: []const u8,
     type: TypeId,
@@ -15,6 +20,11 @@ pub const StructMethod = struct {
     type: TypeId,
     is_pub: bool,
     method_node: *AST.ASTNode,
+};
+
+pub const EnumVariant = struct {
+    name: []const u8,
+    type: ?TypeId,
 };
 
 pub const TypeRegistryError = error{
@@ -50,7 +60,7 @@ pub const TypeInfo = union(enum) {
     /// null err typeId allows any error type
     error_union: struct { err: ?TypeId, ok: TypeId },
     _error: struct { name: []const u8, variants: [][]const u8, source_file: []const u8 },
-    _enum: struct { name: []const u8, variants: [][]const u8, source_file: []const u8 },
+    _enum: struct { name: []const u8, variants: []EnumVariant, source_file: []const u8, has_payloads: bool },
     _struct: struct { name: []const u8, fields: []StructField, methods: []StructMethod, source_file: []const u8 },
     _type: struct { name: []const u8, resolved_type: TypeId, source_file: []const u8 },
     native_type: struct { name: []const u8, source_file: []const u8 },
@@ -134,6 +144,19 @@ pub const TypeRegistry = struct {
                     try element_ids.append(self.allocator, element_id);
                 }
                 return try self.add_tuple_type(try element_ids.toOwnedSlice(self.allocator));
+            },
+            .anon_struct_decl => |decl| {
+                var fields: std.ArrayList(StructField) = .empty;
+                for (decl.fields) |field| {
+                    try fields.append(self.allocator, .{
+                        .name = field.name.lexeme,
+                        .type = try self.resolve(field.type_annotation),
+                        .is_pub = true,
+                        .default_value = field.default_value,
+                    });
+                }
+                const empty_methods = try self.allocator.alloc(StructMethod, 0);
+                return try self.add_struct_type("<anonymous>", try fields.toOwnedSlice(self.allocator), empty_methods, "");
             },
             .fn_type => |function| {
                 const args = function.params;
@@ -454,6 +477,7 @@ pub const TypeRegistry = struct {
                 ._struct => |existing_struct| {
                     if (!std.mem.eql(u8, existing_struct.name, name) or !std.mem.eql(u8, existing_struct.source_file, source_file)) continue;
                     if (existing_struct.fields.len != fields.len or existing_struct.methods.len != methods.len) {
+                        if (std.mem.eql(u8, name, "<anonymous>")) continue;
                         self.allocator.free(fields);
                         self.allocator.free(methods);
                         return TypeRegistryError.TypeResolutionConflict; // names are the same but the number of fields or methods differ
@@ -520,11 +544,11 @@ pub const TypeRegistry = struct {
         return id;
     }
 
-    pub fn add_enum_type(self: *TypeRegistry, name: []const u8, variants: [][]const u8, source_file: []const u8) !TypeId {
+    pub fn add_enum_type(self: *TypeRegistry, name: []const u8, variants: []EnumVariant, source_file: []const u8, has_payloads: bool) !TypeId {
         for (self.types.items, 0..) |info, index| {
             switch (info) {
                 ._enum => |existing_enum| {
-                    if (!std.mem.eql(u8, existing_enum.name, name) or !std.mem.eql(u8, existing_enum.source_file, source_file)) continue;
+                    if (!std.mem.eql(u8, existing_enum.name, name) or !std.mem.eql(u8, existing_enum.source_file, source_file) or existing_enum.has_payloads != has_payloads) continue;
                     if (existing_enum.variants.len != variants.len) {
                         self.allocator.free(variants);
                         return TypeRegistryError.TypeResolutionConflict; // names are the same but the number of variants differ
@@ -532,7 +556,7 @@ pub const TypeRegistry = struct {
 
                     var match = true;
                     for (existing_enum.variants, 0..) |ev, i| {
-                        if (!std.mem.eql(u8, ev, variants[i])) {
+                        if (!std.mem.eql(u8, ev.name, variants[i].name) or !optional_type_ids_equal(ev.type, variants[i].type)) {
                             match = false;
                             break;
                         }
@@ -548,8 +572,16 @@ pub const TypeRegistry = struct {
 
         // add new type
         const id = @as(TypeId, @intCast(self.types.items.len));
-        try self.types.append(self.allocator, .{ ._enum = .{ .name = name, .variants = variants, .source_file = source_file } });
+        try self.types.append(self.allocator, .{ ._enum = .{ .name = name, .variants = variants, .source_file = source_file, .has_payloads = has_payloads } });
         return id;
+    }
+
+    pub fn set_enum_variants(self: *TypeRegistry, id: TypeId, variants: []EnumVariant, has_payloads: bool) !void {
+        const entry = &self.types.items[id];
+        if (entry.* != ._enum) return TypeRegistryError.TypeResolutionConflict;
+        self.allocator.free(entry._enum.variants);
+        entry._enum.variants = variants;
+        entry._enum.has_payloads = has_payloads;
     }
 
     pub fn get_type_info(self: *TypeRegistry, id: TypeId) TypeInfo {

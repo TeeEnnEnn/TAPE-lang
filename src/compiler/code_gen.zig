@@ -185,6 +185,7 @@ pub const CodeGenerator = struct {
             .array_expr => |n| n.resolved_type,
             .new_expr => |n| n.resolved_type,
             .match_expr => |n| n.resolved_type,
+            .anon_struct_instance => |n| n.resolved_type,
             .anon_fn_expr => |n| n.resolved_type,
             .anon_co_expr => |n| n.resolved_type,
             .try_expr => |n| n.resolved_type,
@@ -732,6 +733,19 @@ pub const CodeGenerator = struct {
             .assign_expr => |expr| try self.generate_assignment_expression(expr),
             .call_expr => |expr| {
                 if (expr.expr.* == .dot_expr) {
+                    if (self.binding_resolution.member_infos.get(expr.expr)) |member| {
+                        if (member == .enum_variant and member.enum_variant.payload_type != null) {
+                            if (expr.args.len != 1) return CodeGeneratorError.UnsupportedNode;
+                            try self.generate_expression(expr.args[0]);
+                            try self.current.chunk().write_opcode(.OP_NEW_ENUM, expr.line);
+                            try self.current.chunk().write_u32(member.enum_variant.type_id, expr.line);
+                            try self.current.chunk().write_u32(@intCast(member.enum_variant.index), expr.line);
+                            try self.current.chunk().write_u16(1, expr.line);
+                            return;
+                        }
+                    }
+                }
+                if (expr.expr.* == .dot_expr) {
                     const dot = expr.expr.dot_expr;
                     if (self.registry.get_type_info(resolve_typeof(dot.expr)) == .coroutine and
                         (std.mem.eql(u8, dot.member.lexeme, "returned") or std.mem.eql(u8, dot.member.lexeme, "is_finished")))
@@ -839,7 +853,14 @@ pub const CodeGenerator = struct {
                         try self.current.chunk().write_u16(field_index.index, expr.line);
                     },
                     .enum_variant => |variant| {
-                        try self.current.chunk().emit_constant(.{ .enum_ = .{ .type_id = variant.type_id, .index = @intCast(variant.index) } }, expr.line);
+                        if (variant.has_payloads) {
+                            try self.current.chunk().write_opcode(.OP_NEW_ENUM, expr.line);
+                            try self.current.chunk().write_u32(variant.type_id, expr.line);
+                            try self.current.chunk().write_u32(@intCast(variant.index), expr.line);
+                            try self.current.chunk().write_u16(0, expr.line);
+                        } else {
+                            try self.current.chunk().emit_constant(.{ .enum_ = .{ .type_id = variant.type_id, .index = @intCast(variant.index) } }, expr.line);
+                        }
                     },
                     .error_variant => |variant| {
                         try self.current.chunk().emit_constant(.{ .error_ = .{ .type_id = variant.type_id, .index = @intCast(variant.index) } }, expr.line);
@@ -884,80 +905,110 @@ pub const CodeGenerator = struct {
                 try self.current.chunk().write_u16(instance_field_count, expr.line);
             },
 
+            .anon_struct_instance => |expr| {
+                const member = self.binding_resolution.member_infos.get(node) orelse return CodeGeneratorError.MissingBinding;
+                const struct_init = member.struct_init;
+                const type_info = self.registry.get_type_info(struct_init.type_id)._struct;
+                for (type_info.fields) |field| {
+                    for (expr.fields) |provided| {
+                        if (std.mem.eql(u8, field.name, provided.name.lexeme)) {
+                            try self.generate_expression(provided.value);
+                            break;
+                        }
+                    }
+                }
+                try self.current.chunk().write_opcode(.OP_STRUCT, expr.line);
+                try self.current.chunk().write_u32(struct_init.type_id, expr.line);
+                try self.current.chunk().write_u16(@intCast(type_info.fields.len), expr.line);
+            },
+
             .match_expr => |expr| {
                 var give_context = GiveContext.init(self.allocator, self.current.current_locals_count, self.current.defer_scope_depth);
                 const previous_give = self.current_give;
                 self.current_give = &give_context;
                 defer self.current_give = previous_give;
                 defer give_context.deinit();
-                // match target expression
                 try self.generate_expression(expr.expr);
+                const hidden_binding = self.binding_resolution.declaration_bindings.get(.{ .node = node }) orelse return CodeGeneratorError.MissingBinding;
+                self.current.current_locals_count += 1;
 
                 var end_jumps: std.ArrayList(usize) = .empty;
                 defer end_jumps.deinit(self.allocator);
-
                 var has_default = false;
+                const matched_info = self.registry.get_type_info(resolve_typeof(expr.expr));
+                const is_enum = matched_info == ._enum;
+                const enum_has_payloads = if (is_enum) matched_info._enum.has_payloads else false;
 
                 for (expr.cases) |case| {
                     if (case.pattern.* == .default_pat) {
                         has_default = true;
-
-                        // Pop target since default always matches
-                        try self.current.chunk().write_opcode(.OP_POP, case.line);
-
                         try self.generate_node(case.stmt);
-
+                        const arm_pop = self.binding_resolution.match_case_pop_counts.get(case) orelse return CodeGeneratorError.MissingBinding;
+                        if (arm_pop > 0) {
+                            try self.current.chunk().write_opcode(.OP_POP_N, case.line);
+                            try self.current.chunk().write_u16(arm_pop, case.line);
+                            self.current.current_locals_count -= arm_pop;
+                        }
+                        try self.current.chunk().write_opcode(.OP_POP_N, case.line);
+                        try self.current.chunk().write_u16(1, case.line);
+                        self.current.current_locals_count -= 1;
                         try self.current.chunk().write_opcode(.OP_NIL, case.line);
-
-                        // Jump to end of match
                         const jump_to_end = try self.emit_jump(.OP_JUMP, case.line);
                         try end_jumps.append(self.allocator, jump_to_end);
+                        self.current.current_locals_count += 1;
                         continue;
                     }
 
-                    // non default arms
-
-                    // duplicate target: [target] -> [target, target]
-                    try self.current.chunk().write_opcode(.OP_DUP, case.line);
-
-                    // Evaluate pattern: [target, target] -> [target, target, pattern]
-                    try self.generate_expression(case.pattern);
-
-                    // Compare equality: [target, target, pattern] -> [target, bool]
+                    try self.current.chunk().write_opcode(.OP_LOAD_LOCAL, case.line);
+                    try self.current.chunk().write_u16(hidden_binding.slot, case.line);
+                    if (is_enum and case.enum_tag != null) {
+                        try self.current.chunk().write_opcode(if (enum_has_payloads) .OP_ENUM_TAG else .OP_ENUM_UNIT_TAG, case.line);
+                        try self.current.chunk().emit_constant(.{ .int = case.enum_tag.? }, case.line);
+                    } else {
+                        try self.generate_expression(case.pattern);
+                    }
                     try self.current.chunk().write_opcode(.OP_EQUAL, case.line);
-
-                    // Jump to next case if not equal
                     const mismatch_jump = try self.emit_jump(.OP_JUMP_IF_FALSE, case.line);
-
-                    // match succeeded
-                    try self.current.chunk().write_opcode(.OP_POP, case.line); // Pop bool
-                    try self.current.chunk().write_opcode(.OP_POP, case.line); // Pop target
-
-                    // case body
+                    try self.current.chunk().write_opcode(.OP_POP, case.line);
+                    if (case.payload_binding) |capture| {
+                        try self.current.chunk().write_opcode(.OP_LOAD_LOCAL, case.line);
+                        try self.current.chunk().write_u16(hidden_binding.slot, case.line);
+                        try self.current.chunk().write_opcode(.OP_ENUM_FIELD, case.line);
+                        try self.current.chunk().write_u16(0, case.line);
+                        const capture_binding = self.binding_resolution.declaration_bindings.get(.{ .capture = capture }) orelse return CodeGeneratorError.MissingBinding;
+                        if (capture_binding.slot != self.current.current_locals_count) return CodeGeneratorError.MissingBinding;
+                        self.current.current_locals_count += 1;
+                    }
                     try self.generate_node(case.stmt);
-
+                    const arm_pop = self.binding_resolution.match_case_pop_counts.get(case) orelse return CodeGeneratorError.MissingBinding;
+                    if (arm_pop > 0) {
+                        try self.current.chunk().write_opcode(.OP_POP_N, case.line);
+                        try self.current.chunk().write_u16(arm_pop, case.line);
+                        self.current.current_locals_count -= arm_pop;
+                    }
+                    try self.current.chunk().write_opcode(.OP_POP_N, case.line);
+                    try self.current.chunk().write_u16(1, case.line);
+                    self.current.current_locals_count -= 1;
                     try self.current.chunk().write_opcode(.OP_NIL, case.line);
-
-                    // Jump to end of match
                     const jump_to_end = try self.emit_jump(.OP_JUMP, case.line);
                     try end_jumps.append(self.allocator, jump_to_end);
-
-                    // mismatch branch
                     try self.patch_jump(mismatch_jump);
-                    try self.current.chunk().write_opcode(.OP_POP, case.line); // Pop 'false' (leaves [target] on stack)
+                    try self.current.chunk().write_opcode(.OP_POP, case.line);
+                    self.current.current_locals_count += 1;
                 }
 
-                // If no default arm matched or was present:
                 if (!has_default) {
-                    try self.current.chunk().write_opcode(.OP_POP, expr.line); // Pop target
-                    try self.current.chunk().write_opcode(.OP_NIL, expr.line); // Result is nil
+                    try self.current.chunk().write_opcode(.OP_POP_N, expr.line);
+                    try self.current.chunk().write_u16(1, expr.line);
+                    self.current.current_locals_count -= 1;
+                    try self.current.chunk().write_opcode(.OP_NIL, expr.line);
                 }
 
-                // Patch all exit jumps to land here
                 for (end_jumps.items) |end_jump| {
                     try self.patch_jump(end_jump);
                 }
                 for (give_context.end_jumps.items) |jump| try self.patch_jump(jump);
+                self.current.current_locals_count = hidden_binding.slot;
             },
 
             .try_expr => |expr| {

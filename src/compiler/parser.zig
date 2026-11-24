@@ -15,6 +15,7 @@ const ScannerError = @import("scanner.zig").ScannerError;
 pub const ParserError = ScannerError || std.mem.Allocator.Error || std.fmt.ParseIntError || std.fmt.ParseFloatError || std.Io.RandomSecureError || WorkspaceError || error{
     UnexpectedToken,
     BogusTypeDefinition,
+    InvalidParserState,
 };
 
 pub const Parser = struct {
@@ -625,34 +626,6 @@ pub const Parser = struct {
         }
     }
 
-    fn parse_new_expression(self: *Parser) ParserError!*AST.ASTNode {
-        try self.consume(.IDENTIFIER, "Expected identifier after 'new'");
-        const struct_name = self.previous;
-
-        try self.consume(.LEFT_BRACE, "Expected '{' to start struct initialization");
-        var fields: std.ArrayList(AST.StructInitField) = .empty;
-
-        if (!self.check(.RIGHT_BRACE)) {
-            while (true) {
-                try self.consume(.IDENTIFIER, "Expected field name. Trailing commas are not allowed.");
-                const field_name = self.previous;
-                try self.consume(.EQUAL, "Expected '=' after field name to initialize it");
-                const value = try self.parse_expression();
-
-                try fields.append(self.allocator, AST.StructInitField{ .name = field_name, .value = value });
-
-                if (!try self.match(.COMMA)) break;
-            }
-        }
-        try self.consume(.RIGHT_BRACE, "Expected '}' to end struct initialization");
-
-        const new_expr = try self.allocator.create(AST.NewExpr);
-        new_expr.* = .{ .struct_name = struct_name, .fields = try fields.toOwnedSlice(self.allocator), .resolved_type = 0, .line = struct_name.line, .column = struct_name.column };
-        const node = try self.allocator.create(AST.ASTNode);
-        node.* = .{ .new_expr = new_expr };
-        return node;
-    }
-
     fn parse_identifier_expression(self: *Parser) ParserError!*AST.ASTNode {
         try self.consume(.IDENTIFIER, "Expected identifier");
         const token = self.previous;
@@ -944,6 +917,8 @@ pub const Parser = struct {
             const node = try self.allocator.create(AST.ASTNode);
             node.* = .{ .tuple_type = tuple_type };
             left = node;
+        } else if (try self.match(.STRUCT)) {
+            left = try self.parse_struct_like_decl(false, .ANON_DECL);
         } else {
             // Identifiers and Generics: Array[Int]
             try self.consume(.IDENTIFIER, "Expected identifier for type expression.");
@@ -1378,9 +1353,10 @@ pub const Parser = struct {
         }
         const expr = try self.parse_expression();
         try self.consume(.EQUAL_ARROW, "Expected '=>' to start match case.");
+        const capture = try self.parse_capture();
         const stmt = try self.parse_statement();
         const case = try self.allocator.create(MatchCase);
-        case.* = .{ .pattern = expr, .stmt = stmt, .line = self.previous.line, .column = self.previous.column };
+        case.* = .{ .pattern = expr, .stmt = stmt, .payload_binding = capture, .line = self.previous.line, .column = self.previous.column };
         return case;
     }
 
@@ -1447,15 +1423,25 @@ pub const Parser = struct {
         return node;
     }
 
+    fn parse_enum_variant(self: *Parser) ParserError!AST.EnumDeclVariant {
+        try self.consume(.IDENTIFIER, "Expected identifier for enum variant");
+        const variant_name = self.previous;
+        var type_annotation: ?*AST.ASTNode = null;
+        if (try self.match(.COLON)) {
+            type_annotation = try self.parse_type_expression();
+        }
+        const enum_decl_variant: AST.EnumDeclVariant = .{ .column = variant_name.column, .line = variant_name.line, .type_annotation = type_annotation, .variant_name = variant_name };
+        return enum_decl_variant;
+    }
+
     fn parse_enum_declaration(self: *Parser, is_pub: bool) ParserError!*AST.ASTNode {
         try self.consume(.IDENTIFIER, "Expected identifier for enum declaration.");
         const token = self.previous;
 
         try self.consume(.LEFT_BRACE, "Expected '{' to start enum declaration body.");
-        var variants: std.ArrayList(Token) = .empty;
+        var variants: std.ArrayList(AST.EnumDeclVariant) = .empty;
         while (!self.check(.RIGHT_BRACE) and !self.check(.EOF)) {
-            try self.consume(.IDENTIFIER, "Expected identifier for enum variant.");
-            const variant = self.previous;
+            const variant = try self.parse_enum_variant();
             try variants.append(self.allocator, variant);
             if (self.check(.RIGHT_BRACE)) {
                 break;
@@ -1471,13 +1457,70 @@ pub const Parser = struct {
         return node;
     }
 
-    fn parse_struct_declaration(self: *Parser, is_pub: bool) ParserError!*AST.ASTNode {
-        try self.consume(.IDENTIFIER, "Expected identifier for struct declaration.");
-        const name = self.previous;
+    fn parse_new_expression(self: *Parser) ParserError!*AST.ASTNode {
+        if (self.check(.LEFT_BRACE)) return try self.parse_struct_like_instance(.ANON_INST);
+        return try self.parse_struct_like_instance(.NAMED_INST);
+    }
+
+    fn parse_struct_like_instance(self: *Parser, st: StructType) ParserError!*AST.ASTNode {
+        if (st == .NAMED_DECL or st == .ANON_DECL) return ParserError.InvalidParserState;
+        var name: ?Token = null;
+        if (st == .NAMED_INST) {
+            try self.consume(.IDENTIFIER, "Expected identifier for struct declaration.");
+            name = self.previous;
+        }
+
+        try self.consume(.LEFT_BRACE, "Expected '{' to start struct initialization");
+        var fields: std.ArrayList(AST.StructInitField) = .empty;
+
+        if (!self.check(.RIGHT_BRACE)) {
+            while (true) {
+                try self.consume(.IDENTIFIER, "Expected field name. Trailing commas are not allowed.");
+                const field_name = self.previous;
+                try self.consume(.EQUAL, "Expected '=' after field name to initialize it");
+                const value = try self.parse_expression();
+
+                try fields.append(self.allocator, AST.StructInitField{ .name = field_name, .value = value });
+
+                if (!try self.match(.COMMA)) break;
+            }
+        }
+        try self.consume(.RIGHT_BRACE, "Expected '}' to end struct initialization");
+        const node: *AST.ASTNode = switch (st) {
+            .NAMED_INST => blk: {
+                const new_expr = try self.allocator.create(AST.NewExpr);
+                const struct_name = name orelse return ParserError.InvalidParserState;
+                new_expr.* = .{ .struct_name = struct_name, .fields = try fields.toOwnedSlice(self.allocator), .resolved_type = 0, .line = struct_name.line, .column = struct_name.column };
+                const node = try self.allocator.create(AST.ASTNode);
+                node.* = .{ .new_expr = new_expr };
+                break :blk node;
+            },
+            .ANON_INST => blk: {
+                const anon_inst_expr = try self.allocator.create(AST.AnonStructInstance);
+                anon_inst_expr.* = .{ .fields = try fields.toOwnedSlice(self.allocator), .line = self.previous.line, .column = self.previous.column };
+                const node = try self.allocator.create(AST.ASTNode);
+                node.* = .{ .anon_struct_instance = anon_inst_expr };
+                break :blk node;
+            },
+            else => return ParserError.InvalidParserState,
+        };
+        return node;
+    }
+
+    pub const StructType = enum { ANON_DECL, ANON_INST, NAMED_DECL, NAMED_INST };
+
+    fn parse_struct_like_decl(self: *Parser, is_pub: bool, st: StructType) ParserError!*AST.ASTNode {
+        if (st == .ANON_INST or st == .NAMED_INST) return ParserError.InvalidParserState;
+        var name: ?Token = null;
+        const start = self.previous;
+        if (st == .NAMED_DECL) {
+            try self.consume(.IDENTIFIER, "Expected identifier for struct declaration.");
+            name = self.previous;
+        }
+
         try self.consume(.LEFT_BRACE, "Expected '{' to start struct declaration body.");
         var fields: std.ArrayList(*AST.TypedNamedStructField) = .empty;
         var methods: std.ArrayList(*AST.StructMethodField) = .empty;
-
         while (!self.check(.RIGHT_BRACE) and !self.check(.EOF)) {
             var is_public = false;
 
@@ -1510,23 +1553,48 @@ pub const Parser = struct {
             try self.consume(.COMMA, "Expected ',' to separate struct fields.");
         }
         try self.consume(.RIGHT_BRACE, "Expected '}' to end struct declaration body.");
-        const struct_decl = try self.allocator.create(AST.StructDecl);
 
-        if (is_pub) {}
+        const ast_node = switch (st) {
+            .NAMED_DECL => blk: {
+                const struct_name = name orelse return ParserError.InvalidParserState;
+                const struct_decl = try self.allocator.create(AST.StructDecl);
+                struct_decl.* = .{
+                    .modifier_pub = is_pub,
+                    .name = struct_name,
+                    .fields = try fields.toOwnedSlice(self.allocator),
+                    .methods = try methods.toOwnedSlice(self.allocator),
+                    .line = struct_name.line,
+                    .column = struct_name.column,
+                };
+                const node = try self.allocator.create(AST.ASTNode);
+                node.* = .{
+                    .struct_decl = struct_decl,
+                };
+                break :blk node;
+            },
+            .ANON_DECL => blk: {
+                const struct_decl = try self.allocator.create(AST.AnonStructDecl);
+                struct_decl.* = .{
+                    .fields = try fields.toOwnedSlice(self.allocator),
+                    .methods = try methods.toOwnedSlice(self.allocator),
+                    .line = start.line,
+                    .column = start.column,
+                };
+                const node = try self.allocator.create(AST.ASTNode);
+                node.* = .{
+                    .anon_struct_decl = struct_decl,
+                };
+                break :blk node;
+            },
+            else => {
+                return ParserError.InvalidParserState;
+            },
+        };
+        return ast_node;
+    }
 
-        struct_decl.* = .{
-            .modifier_pub = is_pub,
-            .name = name,
-            .fields = try fields.toOwnedSlice(self.allocator),
-            .methods = try methods.toOwnedSlice(self.allocator),
-            .line = name.line,
-            .column = name.column,
-        };
-        const node = try self.allocator.create(AST.ASTNode);
-        node.* = .{
-            .struct_decl = struct_decl,
-        };
-        return node;
+    fn parse_struct_declaration(self: *Parser, is_pub: bool) ParserError!*AST.ASTNode {
+        return try self.parse_struct_like_decl(is_pub, .NAMED_DECL);
     }
 
     fn parse_use_declaration(self: *Parser, is_pub: bool) ParserError!*AST.ASTNode {

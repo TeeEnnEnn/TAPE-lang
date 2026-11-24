@@ -68,7 +68,7 @@ pub const MemberInfo = union(enum) {
     field: struct { index: u16, type_id: AST.TypeId },
     method: struct { index: u16, type_id: AST.TypeId, takes_receiver: bool = true },
     tuple_index: struct { index: u16, type_id: AST.TypeId },
-    enum_variant: struct { index: u16, type_id: AST.TypeId },
+    enum_variant: struct { index: u16, type_id: AST.TypeId, payload_type: ?AST.TypeId, has_payloads: bool },
     error_variant: struct { index: u16, type_id: AST.TypeId },
     struct_init: struct { type_id: AST.TypeId, field_indexes: []u16 },
 };
@@ -79,6 +79,7 @@ pub const BindingResolution = struct {
     identifier_bindings: std.AutoHashMap(*AST.ASTNode, BindingInfo),
     function_infos: std.AutoHashMap(*AST.ASTNode, FunctionInfo),
     scope_pop_counts: std.AutoHashMap(*AST.ASTNode, u16),
+    match_case_pop_counts: std.AutoHashMap(*AST.MatchCase, u16),
     member_infos: std.AutoHashMap(*AST.ASTNode, MemberInfo),
     function_constants_count: u16,
     globals_count: u16,
@@ -90,6 +91,7 @@ pub const BindingResolution = struct {
             .identifier_bindings = std.AutoHashMap(*AST.ASTNode, BindingInfo).init(allocator),
             .function_infos = std.AutoHashMap(*AST.ASTNode, FunctionInfo).init(allocator),
             .scope_pop_counts = std.AutoHashMap(*AST.ASTNode, u16).init(allocator),
+            .match_case_pop_counts = std.AutoHashMap(*AST.MatchCase, u16).init(allocator),
             .member_infos = std.AutoHashMap(*AST.ASTNode, MemberInfo).init(allocator),
             .function_constants_count = 0,
             .globals_count = 0,
@@ -114,6 +116,7 @@ pub const BindingResolution = struct {
         self.identifier_bindings.deinit();
         self.function_infos.deinit();
         self.scope_pop_counts.deinit();
+        self.match_case_pop_counts.deinit();
         self.member_infos.deinit();
     }
 };
@@ -273,7 +276,7 @@ pub const BindingResolver = struct {
     fn resolveNode(self: *BindingResolver, node: *AST.ASTNode, direct_program_decl: bool) BindingResolverError!void {
         switch (node.*) {
             .program => try self.resolveProgram(node),
-            .use_decl, .type_decl, .enum_decl, .error_decl, .native_type_decl, .native_fn_decl => {},
+            .use_decl, .type_decl, .enum_decl, .error_decl, .native_type_decl, .native_fn_decl, .anon_struct_decl => {},
             .struct_decl => |decl| try self.resolveStructDecl(node, decl),
             .var_decl => |decl| try self.resolve_var_decl(node, decl, direct_program_decl),
             .fn_decl => |decl| try self.resolveFnDecl(node, decl, direct_program_decl, false),
@@ -348,12 +351,11 @@ pub const BindingResolver = struct {
                 for (expr.values) |value| try self.resolveNode(value, false);
             },
             .new_expr => |expr| try self.resolveNewExpr(node, expr),
+            .anon_struct_instance => |expr| {
+                try self.resolve_anon_struct_instance(expr, node);
+            },
             .match_expr => |expr| {
-                try self.resolveNode(expr.expr, false);
-                for (expr.cases) |case| {
-                    try self.resolveNode(case.pattern, false);
-                    try self.resolveNode(case.stmt, false);
-                }
+                try self.resolve_match_expression(expr, node);
             },
             .anon_fn_expr => |expr| try self.resolveAnonFnExpr(node, expr),
             .anon_co_expr => |expr| try self.resolveAnonCoExpr(node, expr),
@@ -375,6 +377,44 @@ pub const BindingResolver = struct {
             .co_type,
             => {},
         }
+    }
+
+    fn resolve_anon_struct_instance(self: *BindingResolver, expr: *AST.AnonStructInstance, node: *AST.ASTNode) BindingResolverError!void {
+        for (expr.fields) |field| try self.resolveNode(field.value, false);
+        const type_info = self.registry.get_type_info(expr.resolved_type);
+        if (type_info == ._struct) {
+            const indexes = try self.allocator.alloc(u16, expr.fields.len);
+            errdefer self.allocator.free(indexes);
+            for (expr.fields, 0..) |provided, i| {
+                for (type_info._struct.fields, 0..) |field, j| {
+                    if (std.mem.eql(u8, field.name, provided.name.lexeme)) {
+                        indexes[i] = @intCast(j);
+                        break;
+                    }
+                }
+            }
+            try self.result.member_infos.put(node, .{ .struct_init = .{ .type_id = expr.resolved_type, .field_indexes = indexes } });
+        }
+    }
+
+    fn resolve_match_expression(self: *BindingResolver, expr: *AST.MatchExpr, node: *AST.ASTNode) BindingResolverError!void {
+        try self.resolveNode(expr.expr, false);
+        const floor = self.current_function().local_count;
+        try self.registerLocal(.{ .node = node }, "$match", resolved_type_of(expr.expr));
+        for (expr.cases) |case| {
+            const arm_floor = self.current_function().local_count;
+            if (case.payload_binding) |binding| {
+                try self.registerLocal(.{ .capture = binding }, binding.name.lexeme, binding.resolved_type);
+            }
+            try self.resolveNode(case.pattern, false);
+            try self.resolveNode(case.stmt, false);
+            const arm_pop = self.current_function().local_count - arm_floor;
+            try self.result.match_case_pop_counts.put(case, arm_pop);
+            self.current_function().local_count = arm_floor;
+        }
+        const match_pop = self.current_function().local_count - floor;
+        try self.result.scope_pop_counts.put(node, match_pop);
+        self.current_function().local_count = floor;
     }
 
     fn resolveStructDecl(self: *BindingResolver, node: *AST.ASTNode, decl: *AST.StructDecl) BindingResolverError!void {
@@ -640,8 +680,8 @@ pub const BindingResolver = struct {
                     return BindingResolverError.MissingBinding;
                 }
                 for (info.variants, 0..) |variant, index| {
-                    if (std.mem.eql(u8, variant, expr.member.lexeme)) {
-                        try self.result.member_infos.put(node, .{ .enum_variant = .{ .index = @intCast(index), .type_id = obj_type } });
+                    if (std.mem.eql(u8, variant.name, expr.member.lexeme)) {
+                        try self.result.member_infos.put(node, .{ .enum_variant = .{ .index = @intCast(index), .type_id = obj_type, .payload_type = variant.type, .has_payloads = info.has_payloads } });
                         return;
                     }
                 }
@@ -975,6 +1015,7 @@ fn resolved_type_of(node: *AST.ASTNode) AST.TypeId {
         .tuple_expr => |v| v.resolved_type,
         .table_expr => |v| v.resolved_type,
         .new_expr => |v| v.resolved_type,
+        .anon_struct_instance => |v| v.resolved_type,
         .match_expr => |v| v.resolved_type,
         .anon_fn_expr => |v| v.resolved_type,
         .anon_co_expr => |v| v.resolved_type,

@@ -47,6 +47,9 @@ pub const ASTNode = union(enum) {
     /// `yield value`
     yield_expr: *YieldExpr,
 
+    anon_struct_decl: *AnonStructDecl,
+    anon_struct_instance: *AnonStructInstance,
+
     /// `give value`
     give_stmt: *GiveStmt,
     /// `break`
@@ -215,6 +218,50 @@ pub const StructDecl = struct {
     column: usize,
 };
 
+/// An anonymous struct declaration
+///
+/// ```
+/// struct {
+/// 'fields'
+/// 'methods'
+/// }
+/// ```
+pub const AnonStructDecl = struct {
+    fields: []*TypedNamedStructField,
+    methods: []*StructMethodField,
+    line: usize,
+    column: usize,
+};
+
+/// An anonymous struct Instantiation
+///
+/// ```
+/// struct {
+/// 'fields'
+/// 'methods'
+/// }
+/// ```
+pub const AnonStructInstance = struct {
+    fields: []StructInitField,
+    resolved_type: TypeId = 0,
+    line: usize,
+    column: usize,
+};
+
+/// A variant of an enum that may have a payload
+///
+/// ```
+/// variant_one: struct {f1: String, f2: Int},
+/// variant_two: Int,
+/// variant_three,
+/// ```
+pub const EnumDeclVariant = struct {
+    variant_name: Token,
+    line: usize,
+    column: usize,
+    type_annotation: ?*ASTNode,
+};
+
 /// Enum declaration node.
 ///
 /// ```
@@ -225,7 +272,7 @@ pub const StructDecl = struct {
 pub const EnumDecl = struct {
     modifier_pub: bool,
     name: Token,
-    variants: []Token,
+    variants: []EnumDeclVariant,
     line: usize,
     column: usize,
 };
@@ -598,11 +645,14 @@ pub const MatchExpr = struct {
 /// Match case node.
 ///
 /// ```
-/// pattern => stmt,
+/// pattern => [bind (name)] stmt,
 /// ```
 pub const MatchCase = struct {
     pattern: *ASTNode,
     stmt: *ASTNode,
+    payload_binding: ?*CaptureBindingExpr = null,
+    enum_tag: ?u32 = null,
+    payload_type: ?TypeId = null,
     resolved_type: TypeId = 0,
     line: usize,
     column: usize,

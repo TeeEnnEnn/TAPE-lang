@@ -239,9 +239,9 @@ test "Parser can parse enum with variants" {
     const enum_decl = node.enum_decl;
     try std.testing.expectEqualStrings("Color", enum_decl.name.lexeme);
     try std.testing.expectEqual(@as(usize, 3), enum_decl.variants.len);
-    try std.testing.expectEqualStrings("Red", enum_decl.variants[0].lexeme);
-    try std.testing.expectEqualStrings("Green", enum_decl.variants[1].lexeme);
-    try std.testing.expectEqualStrings("Blue", enum_decl.variants[2].lexeme);
+    try std.testing.expectEqualStrings("Red", enum_decl.variants[0].variant_name.lexeme);
+    try std.testing.expectEqualStrings("Green", enum_decl.variants[1].variant_name.lexeme);
+    try std.testing.expectEqualStrings("Blue", enum_decl.variants[2].variant_name.lexeme);
 }
 
 test "Parser can parse error with variants" {

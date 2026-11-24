@@ -63,6 +63,7 @@ pub const ObjectType = enum(u8) {
     ObjectUpvalue,
     ObjectStructInstance,
     ObjectRange,
+    ObjectEnum,
 };
 
 pub const ObjectHeader = struct {
@@ -103,6 +104,13 @@ pub const ObjectTable = struct {
     entries: []TableEntry,
     capacity: usize,
     length: usize,
+};
+
+pub const ObjectEnum = struct {
+    header: ObjectHeader,
+    type_id: AST.TypeId,
+    tag: u32,
+    payloads: []Value,
 };
 
 pub const ObjectTuple = struct {
@@ -319,6 +327,18 @@ pub fn values_equal(a: Value, b: Value) bool {
                     .ObjectString => compare_strings(@ptrCast(a_obj), @ptrCast(b_obj)),
                     else => false,
                 },
+                .ObjectEnum => switch (b_obj.object_type) {
+                    .ObjectEnum => blk: {
+                        const a_enum: *ObjectEnum = @ptrCast(a_obj);
+                        const b_enum: *ObjectEnum = @ptrCast(b_obj);
+                        if (a_enum.type_id != b_enum.type_id or a_enum.tag != b_enum.tag or a_enum.payloads.len != b_enum.payloads.len) break :blk false;
+                        for (a_enum.payloads, b_enum.payloads) |a_payload, b_payload| {
+                            if (!values_equal(a_payload, b_payload)) break :blk false;
+                        }
+                        break :blk true;
+                    },
+                    else => false,
+                },
                 else => a_obj == b_obj,
             },
             else => false,
@@ -361,6 +381,7 @@ pub fn object_as(comptime T: type, obj: *ObjectHeader) *T {
         .ObjectUpvalue => @ptrCast(obj),
         .ObjectStructInstance => @ptrCast(obj),
         .ObjectRange => @ptrCast(obj),
+        .ObjectEnum => @ptrCast(obj),
     };
 }
 
@@ -640,6 +661,15 @@ pub fn new_range_object(isolate: *Isolate, start: i64, end: i64, step: i64) !*Ob
     return range;
 }
 
+/// you must allocate the payloads after this function returns
+pub fn new_payload_object(isolate: *Isolate, type_id: AST.TypeId, tag: u32) !*ObjectEnum {
+    const enum_: *ObjectEnum = try isolate.gc.allocate_object(ObjectEnum, .ObjectEnum);
+    enum_.payloads = &.{};
+    enum_.tag = tag;
+    enum_.type_id = type_id;
+    return enum_;
+}
+
 pub fn mark_value(garbage_collector: *basic_gc, value: Value) !void {
     switch (value) {
         .object => |obj| {
@@ -712,6 +742,12 @@ pub fn blacken_object(garbage_collector: *basic_gc, obj: *ObjectHeader) !void {
             }
         },
         .ObjectRange => {},
+        .ObjectEnum => {
+            const object_enum: *ObjectEnum = @ptrCast(obj);
+            for (object_enum.payloads) |payload| {
+                try mark_value(garbage_collector, payload);
+            }
+        },
     }
 }
 
@@ -794,6 +830,15 @@ pub fn free_object(allocator: std.mem.Allocator, obj: *ObjectHeader) void {
                 std.debug.print("freed: ObjectRange: {*}\n", .{obj});
             }
             allocator.destroy(range);
+        },
+
+        .ObjectEnum => {
+            const enum_: *ObjectEnum = @ptrCast(obj);
+            if (options.log_gc) {
+                std.debug.print("freed: ObjectEnum: {*}\n", .{obj});
+            }
+            if (enum_.payloads.len > 0) allocator.free(enum_.payloads);
+            allocator.destroy(enum_);
         },
     }
 }
