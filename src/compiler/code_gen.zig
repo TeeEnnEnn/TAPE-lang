@@ -13,6 +13,7 @@ const AST = @import("ast.zig");
 const BindingResolver = @import("binding_resolver.zig");
 const Module = @import("workspace.zig").Module;
 const TypeRegistry = @import("type_registry.zig");
+const TypeRegistryImpl = TypeRegistry.TypeRegistry;
 const Natives = @import("../natives/natives.zig").Natives;
 const ConstValue = @import("const_value.zig").ConstValue;
 
@@ -828,15 +829,14 @@ pub const CodeGenerator = struct {
                 try self.generate_expression(expr.index);
 
                 const indexed_type = resolve_typeof(expr.expr);
-                const opcode: Opcode = switch (self.registry.get_type_info(indexed_type)) {
-                    .array => .OP_INDEX_ARRAY,
-                    .table => .OP_INDEX_TABLE,
-                    .primitive => |prim| switch (prim) {
-                        .String => .OP_INDEX_STRING,
-                        else => return CodeGeneratorError.UnsupportedOperandType,
-                    },
-                    else => return CodeGeneratorError.UnsupportedOperandType,
-                };
+                const opcode: Opcode = if (self.registry.array_element(indexed_type) != null)
+                    .OP_INDEX_ARRAY
+                else if (self.registry.table_pair(indexed_type) != null)
+                    .OP_INDEX_TABLE
+                else if (TypeRegistryImpl.is_string(indexed_type))
+                    .OP_INDEX_STRING
+                else
+                    return CodeGeneratorError.UnsupportedOperandType;
                 try self.current.chunk().write_opcode(opcode, expr.line);
             },
             .dot_expr => |expr| {
@@ -1046,11 +1046,13 @@ pub const CodeGenerator = struct {
 
         if (expr.left.* == .index_expr) {
             const index = expr.left.index_expr;
-            const setter: Opcode = switch (self.registry.get_type_info(resolve_typeof(index.expr))) {
-                .array => .OP_SET_INDEX_ARRAY,
-                .table => .OP_SET_INDEX_TABLE,
-                else => return CodeGeneratorError.UnsupportedNode,
-            };
+            const indexed_type = resolve_typeof(index.expr);
+            const setter: Opcode = if (self.registry.array_element(indexed_type) != null)
+                .OP_SET_INDEX_ARRAY
+            else if (self.registry.table_pair(indexed_type) != null)
+                .OP_SET_INDEX_TABLE
+            else
+                return CodeGeneratorError.UnsupportedNode;
 
             try self.generate_expression(index.expr);
             try self.generate_expression(index.index);
@@ -1346,7 +1348,7 @@ pub const CodeGenerator = struct {
             if (std.mem.eql(u8, op, "^")) return .OP_BITWISE_XOR;
         }
 
-        if (left == @backingInt(TypeRegistry.PrimitiveType.String) and right == @backingInt(TypeRegistry.PrimitiveType.String)) {
+        if (TypeRegistryImpl.is_string(left) and TypeRegistryImpl.is_string(right)) {
             if (std.mem.eql(u8, op, "++")) return .OP_STRING_CONCAT;
         }
 

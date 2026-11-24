@@ -1,6 +1,7 @@
 const std = @import("std");
 const AST = @import("ast.zig");
 const TypeRegistry = @import("type_registry.zig");
+const TypeRegistryImpl = TypeRegistry.TypeRegistry;
 const PrimitiveType = TypeRegistry.PrimitiveType;
 const Environment = @import("environment.zig").Environment;
 const EnvironmentError = @import("environment.zig").EnvironmentError;
@@ -188,6 +189,15 @@ pub const TypeChecker = struct {
             }
             return;
         }
+        if (self.registry.array_element(type_id)) |elem| {
+            try self.require_pub_type(elem, line, column, visited);
+            return;
+        }
+        if (self.registry.table_pair(type_id)) |pair| {
+            try self.require_pub_type(pair.key, line, column, visited);
+            try self.require_pub_type(pair.value, line, column, visited);
+            return;
+        }
         switch (type_info) {
             .optional => |o| try self.require_pub_type(o.inner, line, column, visited),
             .error_union => |eu| {
@@ -196,13 +206,8 @@ pub const TypeChecker = struct {
                 }
                 try self.require_pub_type(eu.ok, line, column, visited);
             },
-            .array => |elem| try self.require_pub_type(elem, line, column, visited),
             .tuple => |items| {
                 for (items) |item| try self.require_pub_type(item, line, column, visited);
-            },
-            .table => |t| {
-                try self.require_pub_type(t.key, line, column, visited);
-                try self.require_pub_type(t.value, line, column, visited);
             },
             .function => |f| {
                 for (f.args) |arg| try self.require_pub_type(arg, line, column, visited);
@@ -1001,12 +1006,11 @@ pub const TypeChecker = struct {
                     const left_type = try self.check_expression(expr.left);
                     if (expr.left.* == .index_expr) {
                         const collection_type = try self.check_expression(expr.left.index_expr.expr);
-                        switch (self.registry.get_type_info(collection_type)) {
-                            .array, .table => {},
-                            else => {
-                                try self.fail("Invalid assignment target", "Only array and table elements can be assigned through an index.", expr.line, expr.column);
-                                return TypeCheckerError.InvalidOperation;
-                            },
+                        const is_indexable_collection = self.registry.array_element(collection_type) != null or
+                            self.registry.table_pair(collection_type) != null;
+                        if (!is_indexable_collection) {
+                            try self.fail("Invalid assignment target", "Only array and table elements can be assigned through an index.", expr.line, expr.column);
+                            return TypeCheckerError.InvalidOperation;
                         }
                     }
                     if (!try self.is_compatible(left_type, right_type)) {
@@ -1026,7 +1030,7 @@ pub const TypeChecker = struct {
                         }
 
                         if (std.mem.eql(u8, op, "++=")) {
-                            if (!(left_type == @backingInt(PrimitiveType.String) and right_type == @backingInt(PrimitiveType.String))) {
+                            if (!TypeRegistryImpl.is_string(left_type) or !TypeRegistryImpl.is_string(right_type)) {
                                 // ++= can only be used for strings
                                 try self.fail("Invalid Operation", "`++=` can only be used to concatenate strings.", expr.line, expr.column);
                                 return TypeCheckerError.InvalidOperation;
@@ -1175,7 +1179,7 @@ pub const TypeChecker = struct {
                     expr.resolved_type = @backingInt(PrimitiveType.Bool);
                     return expr.resolved_type;
                 } else if (std.mem.eql(u8, op, "++")) { // string concatenation
-                    if (left_type != @backingInt(PrimitiveType.String) or right_type != @backingInt(PrimitiveType.String)) {
+                    if (!TypeRegistryImpl.is_string(left_type) or !TypeRegistryImpl.is_string(right_type)) {
                         try self.fail("Type Mismatch", "`++` can only concatenate strings.", expr.line, expr.column);
                         return TypeCheckerError.TypeMismatch;
                     }
@@ -1430,44 +1434,36 @@ pub const TypeChecker = struct {
 
                 const expr_info = self.registry.get_type_info(expr_type);
 
-                switch (expr_info) {
-                    .array => |arr_info| {
-                        if (index_type != @backingInt(PrimitiveType.Int)) {
-                            try self.fail("Type Mismatch", "Array index must be an integer.", expr.line, expr.column);
-                            return TypeCheckerError.TypeMismatch;
-                        }
-                        expr.resolved_type = arr_info;
-                        return arr_info;
-                    },
-                    .table => |tbl_info| {
-                        if (index_type != tbl_info.key) {
-                            try self.fail("Type Mismatch", "Table index type does not match the table's key type.", expr.line, expr.column);
-                            return TypeCheckerError.TypeMismatch;
-                        }
-                        expr.resolved_type = tbl_info.value;
-                        return tbl_info.value;
-                    },
-                    .primitive => |prim| {
-                        switch (prim) {
-                            .String => {
-                                if (index_type != @backingInt(PrimitiveType.Int)) {
-                                    try self.fail("Type Mismatch", "String index must be an integer.", expr.line, expr.column);
-                                    return TypeCheckerError.TypeMismatch;
-                                }
-                                expr.resolved_type = @backingInt(PrimitiveType.String);
-                                return @backingInt(PrimitiveType.String);
-                            },
-                            else => {
-                                try self.fail("Type Mismatch", "This primitive type cannot be indexed.", expr.line, expr.column);
-                                return TypeCheckerError.TypeMismatch;
-                            },
-                        }
-                    },
-                    else => {
-                        try self.fail("Type Mismatch", "Type cannot be indexed.", expr.line, expr.column);
+                if (self.registry.array_element(expr_type)) |element_type| {
+                    if (index_type != @backingInt(PrimitiveType.Int)) {
+                        try self.fail("Type Mismatch", "Array index must be an integer.", expr.line, expr.column);
                         return TypeCheckerError.TypeMismatch;
-                    },
+                    }
+                    expr.resolved_type = element_type;
+                    return element_type;
                 }
+                if (self.registry.table_pair(expr_type)) |pair| {
+                    if (index_type != pair.key) {
+                        try self.fail("Type Mismatch", "Table index type does not match the table's key type.", expr.line, expr.column);
+                        return TypeCheckerError.TypeMismatch;
+                    }
+                    expr.resolved_type = pair.value;
+                    return pair.value;
+                }
+                if (TypeRegistryImpl.is_string(expr_type)) {
+                    if (index_type != @backingInt(PrimitiveType.Int)) {
+                        try self.fail("Type Mismatch", "String index must be an integer.", expr.line, expr.column);
+                        return TypeCheckerError.TypeMismatch;
+                    }
+                    expr.resolved_type = @backingInt(PrimitiveType.String);
+                    return @backingInt(PrimitiveType.String);
+                }
+                if (expr_info == .primitive) {
+                    try self.fail("Type Mismatch", "This primitive type cannot be indexed.", expr.line, expr.column);
+                    return TypeCheckerError.TypeMismatch;
+                }
+                try self.fail("Type Mismatch", "Type cannot be indexed.", expr.line, expr.column);
+                return TypeCheckerError.TypeMismatch;
             },
             .yield_expr => |expr| {
                 const provided_type = try self.check_expression(expr.expr);
@@ -2052,10 +2048,11 @@ pub const TypeChecker = struct {
 
     fn isPrimitiveTypeId(self: *TypeChecker, id: AST.TypeId) bool {
         if (id == @backingInt(PrimitiveType.Never)) return false;
+        if (self.registry.array_element(id) != null) return true;
+        if (self.registry.table_pair(id) != null) return true;
         const info = self.registry.get_type_info(id);
         return switch (info) {
-            .primitive => true,
-            .array, .table, .range, .tuple, .function, .coroutine, ._struct, ._type => true,
+            .primitive, .range, .tuple, .function, .coroutine, ._struct, ._type => true,
             else => false,
         };
     }
@@ -2271,18 +2268,22 @@ pub const TypeChecker = struct {
         if (provided_info == .optional) return false;
 
         //  Array[Never] matches Array[T] for any T
-        if (expected_info == .array and provided_info == .array) {
-            if (provided_info.array == @backingInt(PrimitiveType.Never)) {
-                return true;
+        if (self.registry.array_element(expected_type)) |expected_elem| {
+            if (self.registry.array_element(provided_type)) |provided_elem| {
+                if (provided_elem == @backingInt(PrimitiveType.Never)) {
+                    return true;
+                }
+                return expected_elem == provided_elem;
             }
-            return expected_info.array == provided_info.array;
         }
 
         // Table[Never, Never] matches Table[K, V] for any K, V
-        if (expected_info == .table and provided_info == .table) {
-            const key_compat = (provided_info.table.key == @backingInt(PrimitiveType.Never)) or (expected_info.table.key == provided_info.table.key);
-            const val_compat = (provided_info.table.value == @backingInt(PrimitiveType.Never)) or (expected_info.table.value == provided_info.table.value);
-            return key_compat and val_compat;
+        if (self.registry.table_pair(expected_type)) |expected_table| {
+            if (self.registry.table_pair(provided_type)) |provided_table| {
+                const key_compat = (provided_table.key == @backingInt(PrimitiveType.Never)) or (expected_table.key == provided_table.key);
+                const val_compat = (provided_table.value == @backingInt(PrimitiveType.Never)) or (expected_table.value == provided_table.value);
+                return key_compat and val_compat;
+            }
         }
         return false;
     }

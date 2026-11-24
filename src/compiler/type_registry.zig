@@ -648,4 +648,25 @@ pub const TypeRegistry = struct {
         }
         return null;
     }
+
+    /// check if a type is a string
+    pub fn is_string(id: TypeId) bool {
+        return id == @backingInt(PrimitiveType.String);
+    }
+
+    /// get the element type from an array type
+    pub fn array_element(self: *TypeRegistry, id: TypeId) ?TypeId {
+        return switch (self.get_type_info(id)) {
+            .array => |a| a,
+            else => null,
+        };
+    }
+
+    /// get the key and value types from a table type
+    pub fn table_pair(self: *TypeRegistry, id: TypeId) ?struct { key: TypeId, value: TypeId } {
+        return switch (self.get_type_info(id)) {
+            .table => |t| .{ .key = t.key, .value = t.value },
+            else => null,
+        };
+    }
 };
