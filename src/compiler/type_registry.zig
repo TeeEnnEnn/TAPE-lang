@@ -10,21 +10,25 @@ fn optional_type_ids_equal(a: ?TypeId, b: ?TypeId) bool {
 
 pub const StructField = struct {
     name: []const u8,
-    type: TypeId,
+    type_id: TypeId,
     is_pub: bool,
     default_value: ?*AST.ASTNode,
 };
 
+pub const MethodKind = enum { FN, CO, NATIVE };
+
 pub const StructMethod = struct {
     name: []const u8,
-    type: TypeId,
+    type_id: TypeId,
     is_pub: bool,
     method_node: *AST.ASTNode,
+    takes_receiver: bool,
+    kind: MethodKind,
 };
 
 pub const EnumVariant = struct {
     name: []const u8,
-    type: ?TypeId,
+    type_id: ?TypeId,
 };
 
 pub const TypeRegistryError = error{
@@ -150,7 +154,7 @@ pub const TypeRegistry = struct {
                 for (decl.fields) |field| {
                     try fields.append(self.allocator, .{
                         .name = field.name.lexeme,
-                        .type = try self.resolve(field.type_annotation),
+                        .type_id = try self.resolve(field.type_annotation),
                         .is_pub = true,
                         .default_value = field.default_value,
                     });
@@ -475,7 +479,9 @@ pub const TypeRegistry = struct {
         for (self.types.items, 0..) |info, index| {
             switch (info) {
                 ._struct => |existing_struct| {
+                    // do not match if name is different, or source file is different
                     if (!std.mem.eql(u8, existing_struct.name, name) or !std.mem.eql(u8, existing_struct.source_file, source_file)) continue;
+
                     if (existing_struct.fields.len != fields.len or existing_struct.methods.len != methods.len) {
                         if (std.mem.eql(u8, name, "<anonymous>")) continue;
                         self.allocator.free(fields);
@@ -485,13 +491,13 @@ pub const TypeRegistry = struct {
 
                     var match = true;
                     for (existing_struct.fields, 0..) |ef, i| {
-                        if (!std.mem.eql(u8, ef.name, fields[i].name) or ef.type != fields[i].type) {
+                        if (!std.mem.eql(u8, ef.name, fields[i].name) or ef.type_id != fields[i].type_id) {
                             match = false;
                             break;
                         }
                     }
                     for (existing_struct.methods, 0..) |em, i| {
-                        if (!std.mem.eql(u8, em.name, methods[i].name) or em.type != methods[i].type) {
+                        if (!std.mem.eql(u8, em.name, methods[i].name) or em.type_id != methods[i].type_id) {
                             match = false;
                             break;
                         }
@@ -500,6 +506,8 @@ pub const TypeRegistry = struct {
                         self.allocator.free(fields);
                         self.allocator.free(methods);
                         return @as(TypeId, @intCast(index));
+                    } else {
+                        return TypeRegistryError.TypeResolutionConflict;
                     }
                 },
                 else => continue,
@@ -556,7 +564,7 @@ pub const TypeRegistry = struct {
 
                     var match = true;
                     for (existing_enum.variants, 0..) |ev, i| {
-                        if (!std.mem.eql(u8, ev.name, variants[i].name) or !optional_type_ids_equal(ev.type, variants[i].type)) {
+                        if (!std.mem.eql(u8, ev.name, variants[i].name) or !optional_type_ids_equal(ev.type_id, variants[i].type_id)) {
                             match = false;
                             break;
                         }

@@ -310,7 +310,7 @@ pub const TypeChecker = struct {
                 for (decl.fields) |field| {
                     const field_type = try self.registry.resolve(field.type_annotation);
                     // store the default value if there is one
-                    try field_types.append(self.allocator, .{ .name = field.name.lexeme, .type = field_type, .is_pub = field.is_pub, .default_value = field.default_value });
+                    try field_types.append(self.allocator, .{ .name = field.name.lexeme, .type_id = field_type, .is_pub = field.is_pub, .default_value = field.default_value });
                 }
 
                 // Create struct with empty methods first to get its type_id for self
@@ -320,9 +320,21 @@ pub const TypeChecker = struct {
                 defer method_types.deinit(self.allocator);
 
                 for (decl.methods) |method| {
-                    const method_type = try self.check_declaration_type(method.method, struct_id);
+                    const decl_type = try self.check_callable_declaration_type(method.method, struct_id);
+                    const method_kind: TypeRegistry.MethodKind = blk: {
+                        const m_info = self.registry.get_type_info(decl_type.type_id);
+                        switch (m_info) {
+                            .coroutine => break :blk .CO,
+                            .function => break :blk .FN,
+                            .native_function => break :blk .NATIVE,
+                            else => {
+                                try self.fail("Type Mismatch", "Received a method that was not of a callable type.", method.name.column, method.name.line);
+                                return TypeCheckerError.TypeMismatch;
+                            },
+                        }
+                    };
                     // store the node with the method definition
-                    try method_types.append(self.allocator, .{ .name = method.name.lexeme, .type = method_type, .is_pub = method.is_pub, .method_node = method.method });
+                    try method_types.append(self.allocator, .{ .name = method.name.lexeme, .type_id = decl_type.type_id, .is_pub = method.is_pub, .method_node = method.method, .kind = method_kind, .takes_receiver = decl_type.has_self });
                 }
 
                 // Update the struct with actual methods
@@ -356,7 +368,7 @@ pub const TypeChecker = struct {
                 var variants: std.ArrayList(TypeRegistry.EnumVariant) = .empty;
                 for (decl.variants) |variant| {
                     const payload_type = if (variant.type_annotation) |annotation| try self.registry.resolve(annotation) else null;
-                    try variants.append(self.allocator, .{ .name = variant.variant_name.lexeme, .type = payload_type });
+                    try variants.append(self.allocator, .{ .name = variant.variant_name.lexeme, .type_id = payload_type });
                 }
                 try self.registry.set_enum_variants(enum_id, try variants.toOwnedSlice(self.allocator), has_payloads);
                 if (decl.modifier_pub) {
@@ -384,7 +396,7 @@ pub const TypeChecker = struct {
             if (variant.type_annotation != null) break true;
         } else false;
         var placeholders: std.ArrayList(TypeRegistry.EnumVariant) = .empty;
-        for (decl.variants) |variant| try placeholders.append(self.allocator, .{ .name = variant.variant_name.lexeme, .type = null });
+        for (decl.variants) |variant| try placeholders.append(self.allocator, .{ .name = variant.variant_name.lexeme, .type_id = null });
         const enum_id = try self.registry.add_enum_type(decl.name.lexeme, try placeholders.toOwnedSlice(self.allocator), self.module.filepath, has_payloads);
         try self.environment.define_type_binding(decl.name.lexeme, enum_id, .{ .node = node }, true);
     }
@@ -521,7 +533,7 @@ pub const TypeChecker = struct {
                 for (decl.fields, struct_info_for_defaults.fields) |field, sfield| {
                     if (field.default_value) |def| {
                         const def_type = try self.check_expression(def);
-                        if (!try self.is_compatible(sfield.type, def_type)) {
+                        if (!try self.is_compatible(sfield.type_id, def_type)) {
                             try self.fail("Type Mismatch", "Default value type does not match field type.", decl.line, decl.column);
                             return TypeCheckerError.TypeMismatch;
                         }
@@ -545,7 +557,7 @@ pub const TypeChecker = struct {
                 const type_info = self.registry.get_type_info(struct_typeid);
                 try self.environment.define_binding("self", struct_typeid, .{ .node = node }, true);
                 for (decl.methods, type_info._struct.methods) |method_decl, sm| {
-                    try self.environment.define_binding(sm.name, sm.type, .{ .node = method_decl.method }, true);
+                    try self.environment.define_binding(sm.name, sm.type_id, .{ .node = method_decl.method }, true);
                 }
 
                 for (decl.methods) |method| {
@@ -905,7 +917,7 @@ pub const TypeChecker = struct {
         }
     }
 
-    fn check_declaration_type(self: *TypeChecker, node: *AST.ASTNode, self_type: ?AST.TypeId) TypeCheckerError!AST.TypeId {
+    fn check_callable_declaration_type(self: *TypeChecker, node: *AST.ASTNode, self_type: ?AST.TypeId) TypeCheckerError!struct { has_self: bool, type_id: AST.TypeId } {
         switch (node.*) {
             .fn_decl => |decl| {
                 var param_types: std.ArrayList(AST.TypeId) = .empty;
@@ -926,7 +938,7 @@ pub const TypeChecker = struct {
                 }
                 const return_type = try self.registry.resolve(decl.return_type_annotation);
                 const fn_type = try self.registry.add_function_type(try param_types.toOwnedSlice(self.allocator), return_type);
-                return fn_type;
+                return .{ .has_self = has_self, .type_id = fn_type };
             },
             .co_decl => |decl| {
                 var param_types: std.ArrayList(AST.TypeId) = .empty;
@@ -949,7 +961,7 @@ pub const TypeChecker = struct {
                 const yield_type = try self.registry.resolve(decl.yield_type_annotation);
                 const resume_with_type = try self.registry.resolve(decl.resume_with_type_annotation);
                 const co_type = try self.registry.add_coroutine_type(try param_types.toOwnedSlice(self.allocator), yield_type, resume_with_type, return_type);
-                return co_type;
+                return .{ .has_self = has_self, .type_id = co_type };
             },
             else => {
                 return TypeCheckerError.UnknownExpression;
@@ -1282,7 +1294,7 @@ pub const TypeChecker = struct {
                                     try self.fail("Member is private", "Private methods can only be called from a method of their declaring struct.", expr.line, expr.column);
                                     return TypeCheckerError.InvalidMemberAccess;
                                 }
-                                const method_info = self.registry.get_type_info(method.type);
+                                const method_info = self.registry.get_type_info(method.type_id);
                                 const args = switch (method_info) {
                                     .function => |f| f.args,
                                     .coroutine => |c| c.args,
@@ -1290,7 +1302,7 @@ pub const TypeChecker = struct {
                                 };
                                 const return_type = switch (method_info) {
                                     .function => |f| f.ret,
-                                    .coroutine => method.type,
+                                    .coroutine => method.type_id,
                                     else => return TypeCheckerError.NotCallable,
                                 };
 
@@ -1322,7 +1334,7 @@ pub const TypeChecker = struct {
                                     }
                                 }
 
-                                dot.resolved_type = method.type;
+                                dot.resolved_type = method.type_id;
                                 expr.resolved_type = return_type;
                                 return expr.resolved_type;
                             }
@@ -1354,7 +1366,7 @@ pub const TypeChecker = struct {
                             if (!std.mem.eql(u8, dot.member.lexeme, variant.name)) {
                                 continue;
                             }
-                            if (variant.type) |variant_type| {
+                            if (variant.type_id) |variant_type| {
                                 dot.resolved_type = receiver_type;
                                 if (expr.args.len != 1) {
                                     try self.fail("Invalid argument count", "An enum payload variant takes exactly one value.", expr.line, expr.column);
@@ -1522,8 +1534,8 @@ pub const TypeChecker = struct {
                                         else => false,
                                     };
                                     if (!takes_receiver) {
-                                        expr.resolved_type = method.type;
-                                        return method.type;
+                                        expr.resolved_type = method.type_id;
+                                        return method.type_id;
                                     }
                                 }
                             }
@@ -1536,13 +1548,13 @@ pub const TypeChecker = struct {
                                     try self.fail("Member is private", "Private fields can only be accessed from a method of their declaring struct.", expr.line, expr.column);
                                     return TypeCheckerError.InvalidMemberAccess;
                                 }
-                                expr.resolved_type = field.type;
-                                return field.type;
+                                expr.resolved_type = field.type_id;
+                                return field.type_id;
                             }
                         }
                         for (_struct.methods) |method| {
                             if (std.mem.eql(u8, method.name, expr.member.lexeme)) {
-                                const method_type = self.registry.get_type_info(method.type);
+                                const method_type = self.registry.get_type_info(method.type_id);
                                 if (method_type != .function and method_type != .coroutine) {
                                     try self.fail("Invalid Member Access", "Member is not a callable method.", expr.line, expr.column);
                                     return TypeCheckerError.InvalidMemberAccess;
@@ -1551,8 +1563,8 @@ pub const TypeChecker = struct {
                                     try self.fail("Member is private", "Private methods can only be accessed from a method of their declaring struct.", expr.line, expr.column);
                                     return TypeCheckerError.InvalidMemberAccess;
                                 }
-                                expr.resolved_type = method.type;
-                                return method.type;
+                                expr.resolved_type = method.type_id;
+                                return method.type_id;
                             }
                         }
                         try self.fail("Invalid Member Access", "Struct has no member with this name.", expr.line, expr.column);
@@ -1589,7 +1601,7 @@ pub const TypeChecker = struct {
                         }
                         for (existing_enum.variants) |variant| {
                             if (std.mem.eql(u8, variant.name, expr.member.lexeme)) {
-                                if (variant.type) |var_type| {
+                                if (variant.type_id) |var_type| {
                                     _ = var_type;
                                     try self.fail("Payload variant requires a value", "Call this variant with its payload, for example `Enum.Variant(value)`.", expr.line, expr.column);
                                     return TypeCheckerError.InvalidMemberAccess;
@@ -1700,7 +1712,7 @@ pub const TypeChecker = struct {
                     }
                     try fields.append(self.allocator, .{
                         .name = provided.name.lexeme,
-                        .type = try self.check_expression(provided.value),
+                        .type_id = try self.check_expression(provided.value),
                         .is_pub = true,
                         .default_value = null,
                     });
@@ -1766,7 +1778,7 @@ pub const TypeChecker = struct {
                     var matched = false;
                     for (struct_fields) |struct_field| {
                         if (std.mem.eql(u8, struct_field.name, provided_field.name.lexeme)) {
-                            if (!try self.is_compatible(struct_field.type, val_type)) {
+                            if (!try self.is_compatible(struct_field.type_id, val_type)) {
                                 try self.fail("Type Mismatch", "Field value type does not match the struct field type.", expr.line, expr.column);
                                 return TypeCheckerError.TypeMismatch;
                             }
@@ -1825,7 +1837,7 @@ pub const TypeChecker = struct {
                             var found_variant = false;
                             for (enum_info._enum.variants, 0..) |variant, tag| {
                                 if (!std.mem.eql(u8, variant.name, dot.member.lexeme)) continue;
-                                const payload_type = variant.type orelse {
+                                const payload_type = variant.type_id orelse {
                                     try self.fail("Unit variant cannot bind a payload", "This enum variant has no payload to bind.", case.line, case.column);
                                     return TypeCheckerError.TypeMismatch;
                                 };

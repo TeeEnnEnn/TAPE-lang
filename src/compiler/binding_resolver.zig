@@ -626,17 +626,13 @@ pub const BindingResolver = struct {
                 if (receiver_is_type_symbol) {
                     for (info.methods) |method| {
                         if (!std.mem.eql(u8, method.name, expr.member.lexeme)) continue;
-                        const takes_receiver = switch (method.method_node.*) {
-                            .fn_decl => |d| d.params.len > 0 and std.mem.eql(u8, d.params[0].name.lexeme, "self"),
-                            .co_decl => |d| d.params.len > 0 and std.mem.eql(u8, d.params[0].name.lexeme, "self"),
-                            else => false,
-                        };
+                        const takes_receiver = method.takes_receiver;
                         if (takes_receiver) {
                             try self.fail("Instance method requires a value receiver.", "Call this method on a struct instance; only associated functions can be called through the type name.", expr.line, expr.column);
                             return BindingResolverError.MissingBinding;
                         }
                         const binding = self.find_binding(.{ .node = method.method_node }) orelse return BindingResolverError.MissingBinding;
-                        try self.result.member_infos.put(node, .{ .method = .{ .index = binding.slot, .type_id = method.type, .takes_receiver = false } });
+                        try self.result.member_infos.put(node, .{ .method = .{ .index = binding.slot, .type_id = method.type_id, .takes_receiver = false } });
                         return;
                     }
                     try self.fail("Struct has no associated function with this name.", null, expr.line, expr.column);
@@ -647,7 +643,7 @@ pub const BindingResolver = struct {
                 var instance_field_index: u16 = 0;
                 for (info.fields) |field| {
                     if (std.mem.eql(u8, field.name, expr.member.lexeme)) {
-                        try self.result.member_infos.put(node, .{ .field = .{ .index = instance_field_index, .type_id = field.type } });
+                        try self.result.member_infos.put(node, .{ .field = .{ .index = instance_field_index, .type_id = field.type_id } });
                         return;
                     }
                     instance_field_index += 1;
@@ -660,16 +656,12 @@ pub const BindingResolver = struct {
                             try self.fail("Method binding not found.", null, expr.line, expr.column);
                             return BindingResolverError.MissingBinding;
                         };
-                        const takes_receiver = switch (method.method_node.*) {
-                            .fn_decl => |d| d.params.len > 0 and std.mem.eql(u8, d.params[0].name.lexeme, "self"),
-                            .co_decl => |d| d.params.len > 0 and std.mem.eql(u8, d.params[0].name.lexeme, "self"),
-                            else => false,
-                        };
+                        const takes_receiver = method.takes_receiver;
                         if (!takes_receiver) {
                             try self.fail("Associated function requires the struct type.", "Call this function through the struct name, not an instance.", expr.line, expr.column);
                             return BindingResolverError.MissingBinding;
                         }
-                        try self.result.member_infos.put(node, .{ .method = .{ .index = method_binding.slot, .type_id = method.type, .takes_receiver = true } });
+                        try self.result.member_infos.put(node, .{ .method = .{ .index = method_binding.slot, .type_id = method.type_id, .takes_receiver = true } });
                         return;
                     }
                 }
@@ -681,7 +673,7 @@ pub const BindingResolver = struct {
                 }
                 for (info.variants, 0..) |variant, index| {
                     if (std.mem.eql(u8, variant.name, expr.member.lexeme)) {
-                        try self.result.member_infos.put(node, .{ .enum_variant = .{ .index = @intCast(index), .type_id = obj_type, .payload_type = variant.type, .has_payloads = info.has_payloads } });
+                        try self.result.member_infos.put(node, .{ .enum_variant = .{ .index = @intCast(index), .type_id = obj_type, .payload_type = variant.type_id, .has_payloads = info.has_payloads } });
                         return;
                     }
                 }
