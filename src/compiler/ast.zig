@@ -815,7 +815,6 @@ pub const CoType = struct {
 pub const IdentifierType = struct {
     name: Token,
     source_file: []const u8,
-    generic_args: ?[]*ASTNode,
 };
 
 pub const OptionalType = struct {

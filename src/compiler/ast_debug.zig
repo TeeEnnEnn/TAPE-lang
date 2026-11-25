@@ -344,14 +344,6 @@ pub fn print_node(node: *AST.ASTNode, depth: usize, indent_amt: usize) void {
         },
         .identifier_type => |identifier_type| {
             std.debug.print("IdentifierType: {s}", .{identifier_type.name.lexeme});
-            if (identifier_type.generic_args) |args| {
-                std.debug.print("<", .{});
-                for (args, 0..) |arg, i| {
-                    if (i > 0) std.debug.print(", ", .{});
-                    print_node(arg, 0, indent_amt);
-                }
-                std.debug.print(">", .{});
-            }
             std.debug.print("\n", .{});
         },
         .index_expr => |index_expr| {

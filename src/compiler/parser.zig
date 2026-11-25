@@ -924,19 +924,8 @@ pub const Parser = struct {
             try self.consume(.IDENTIFIER, "Expected identifier for type expression.");
             const name = self.previous;
 
-            var generic_args: ?[]*AST.ASTNode = null;
-            if (try self.match(.LEFT_SQUARE)) {
-                var args: std.ArrayList(*AST.ASTNode) = .empty;
-                while (true) {
-                    try args.append(self.allocator, try self.parse_type_expression());
-                    if (!try self.match(.COMMA)) break;
-                }
-                try self.consume(.RIGHT_SQUARE, "Expected ']' to end generic argument list.");
-                generic_args = try args.toOwnedSlice(self.allocator);
-            }
-
             const id_type = try self.allocator.create(AST.IdentifierType);
-            id_type.* = .{ .name = name, .generic_args = generic_args, .source_file = self.module.filepath };
+            id_type.* = .{ .name = name, .source_file = self.module.filepath };
             const node = try self.allocator.create(AST.ASTNode);
             node.* = .{ .identifier_type = id_type };
             left = node;
