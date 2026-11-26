@@ -1022,7 +1022,7 @@ test "Workspace rejects an imported name that collides with a local declaration"
     var workspace = Workspace.init(allocator, io);
     defer workspace.deinit();
 
-    try std.testing.expect(!try workspace.compile_workspace("src/_tests/compiler/fixtures/import_collision/main.tape", .{}));
+    try std.testing.expect(!try workspace.compile_workspace("src/tests/compiler/fixtures/import_collision/main.tape", .{}));
     try std.testing.expect(workspace.diagnostics.has_errors);
     try std.testing.expectEqual(@as(usize, 1), workspace.diagnostics.diagnostics.items.len);
     try std.testing.expectEqualStrings("Duplicate symbol", workspace.diagnostics.diagnostics.items[0].message);

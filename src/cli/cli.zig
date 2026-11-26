@@ -1,7 +1,6 @@
 const std = @import("std");
 const builtin = @import("builtin");
-
-const options = @import("TAPE_lang_build_options");
+const options = @import("TAPE_build_options");
 
 const TapeScanner = @import("../compiler/scanner.zig");
 const TapeParser = @import("../compiler/parser.zig");
@@ -21,12 +20,6 @@ pub const GRAY = "\x1b[37m";
 
 const app_manifest_file_name = "app.tape.json";
 const pkg_manifest_file_name = "pkg.tape.json";
-
-/// Errors that can occur when running TAPE in REPL mode.
-const TapeReplError = error{
-    /// The user has exited the REPL.
-    ReplExit,
-};
 
 /// Errors that can occur when running a TAPE script file.
 const TapeScriptError = error{
@@ -75,12 +68,6 @@ const Command = struct {
 
 /// All possible commands
 const commands: []const Command = &[_]Command{
-    .{
-        .name = "repl",
-        .description = "Runs TAPE in interactive mode",
-        .handler = run_repl,
-        .options = &[_]CommandOption{},
-    },
     .{
         .name = "run",
         .description = "Runs a TAPE script file",
@@ -150,7 +137,7 @@ pub fn read_file(path: []const u8, dir: std.Io.Dir, io: std.Io, allocator: std.m
     return dir.readFileAlloc(io, path, allocator, .unlimited);
 }
 
-pub fn get_current_dir_path(allocator: std.mem.Allocator, io: std.Io) ![]u8 {
+pub fn get_current_dir_path(allocator: std.mem.Allocator, io: std.Io) ![:0]u8 {
     const cwd = std.Io.Dir.cwd();
     const path = try std.Io.Dir.realPathFileAlloc(cwd, io, ".", allocator);
     return path;
@@ -298,16 +285,6 @@ pub fn create_tape_project(io: std.Io, allocator: std.mem.Allocator, name: []con
     const script_content = "// This is the entrypoint script for your TAPE project.";
     _ = try std.Io.Dir.createFile(cwd, io, script_path, .{});
     try std.Io.Dir.writeFile(cwd, io, .{ .data = script_content, .sub_path = script_path, .flags = .{} });
-}
-
-pub fn run_repl(io: std.Io, parsed_args: []const []const u8, allocator: std.mem.Allocator) u8 {
-    _ = parsed_args;
-    const stdout = std.Io.File.stdout();
-    _ = allocator;
-    stdout.writeStreamingAll(io, "This is the TAPE REPL. Type 'exit' to quit.") catch {
-        return 1;
-    };
-    return 0;
 }
 
 const CompileCommandArgs = struct {
@@ -503,19 +480,14 @@ pub fn get_help(io: std.Io, parsed_args: []const []const u8, allocator: std.mem.
 
 /// Runs the TAPE CLI with the given arguments.
 pub fn cli_main(args: []const []const u8, allocator: std.mem.Allocator, io: std.Io) u8 {
-    if (args.len == 1) {
-        return run_repl(io, &.{}, allocator);
-    }
-
     const command = args[1];
     const command_args = args[2..];
     if (std.mem.eql(u8, command, "run")) return run_file(io, command_args, allocator);
     if (std.mem.eql(u8, command, "check")) return run_check(io, command_args, allocator);
     if (std.mem.eql(u8, command, "init")) return init_project(io, command_args, allocator);
-    if (std.mem.eql(u8, command, "repl")) return run_repl(io, command_args, allocator);
     if (std.mem.eql(u8, command, "version") or std.mem.eql(u8, command, "-v")) return get_version(io, command_args, allocator);
     if (std.mem.eql(u8, command, "help") or std.mem.eql(u8, command, "-h") or std.mem.eql(u8, command, "--help")) return get_help(io, command_args, allocator);
 
-    emit_cli_error("Invalid command. Use `TAPE_lang help` for usage.");
+    emit_cli_error("Invalid command. Use `TAPE help` for usage.");
     return 1;
 }

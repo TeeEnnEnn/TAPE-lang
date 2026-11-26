@@ -14,7 +14,7 @@ Ensure you have zig installed on your system, then run:
 zig build
 ```
 
-this will build the `TAPE_lang` executable
+this will build the `TAPE` executable
 
 For running zig tests:
 ```sh
@@ -28,3 +28,7 @@ For running TAPE's example scripts and tests:
 
 Check `examples/` for a examples of all the language features in use
 You'll notice that the syntax resembles Zig quite a bit.
+
+
+---
+This project is still a work in progress.

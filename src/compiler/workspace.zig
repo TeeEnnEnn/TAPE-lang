@@ -174,10 +174,7 @@ pub const Workspace = struct {
     }
 
     pub fn deinit(self: *Workspace) void {
-        if (self.vm) |vm| {
-            vm.deinit();
-            self.allocator.destroy(vm);
-        }
+        if (self.vm) |vm| vm.deinit();
 
         var modules_it = self.modules.valueIterator();
         while (modules_it.next()) |mod| {
@@ -195,6 +192,12 @@ pub const Workspace = struct {
     /// Diagnostics are collected here and emitted by the CLI exactly once.
     pub fn compile_workspace(self: *Workspace, entrypoint: []const u8, compile_options: CompileOptions) !bool {
         self.debug = compile_options.debug;
+        // Parsing uses one arena per module because parser workers run concurrently.
+        // The remaining compiler passes run sequentially, so share a
+        // short-lived arena
+        var compilation_arena = std.heap.ArenaAllocator.init(self.allocator);
+        defer compilation_arena.deinit();
+        const compilation_allocator = compilation_arena.allocator();
         var group = std.Io.Group.init;
 
         const entrypoint_absolute = try self.allocator.dupe(u8, entrypoint);
@@ -256,16 +259,16 @@ pub const Workspace = struct {
         // type check
 
         // all modules share the same type registry
-        var type_registry = try TypeRegistry.init(self.allocator);
+        var type_registry = try TypeRegistry.init(compilation_allocator);
         defer type_registry.deinit();
 
         // type checking
         for (sorted_modules) |module| {
             if (compile_options.debug.pipeline) std.debug.print("Type checking {s}\n", .{module.filepath});
             // each module has its own environment and type checker
-            var global_environment = Environment.init(self.allocator, null);
+            var global_environment = Environment.init(compilation_allocator, null);
             defer global_environment.deinit();
-            var type_checker = TypeChecker.init(self.allocator, &type_registry, &global_environment, &self.diagnostics, module, self);
+            var type_checker = TypeChecker.init(compilation_allocator, &type_registry, &global_environment, &self.diagnostics, module, self);
             _ = type_checker.check(module.ast) catch |err| {
                 if (!self.diagnostics.has_errors) {
                     // The type checker failed without reporting a diagnostic.
@@ -289,7 +292,10 @@ pub const Workspace = struct {
         // resolve bindings
         if (compile_options.debug.pipeline) std.debug.print("Resolving bindings...\n", .{});
         for (sorted_modules) |module| {
-            const new_resolution = BindingResolver.resolve(module.allocator, &type_registry, &self.diagnostics, module, self, module.ast) catch |err| {
+            // Binding data stays attached to the module until Workspace.deinit,
+            // so allocate it from the module's arena rather than the temporary
+            // compilation arena.
+            const new_resolution = BindingResolver.resolve(module.arena.allocator(), &type_registry, &self.diagnostics, module, self, module.ast) catch |err| {
                 if (!self.diagnostics.has_errors) {
                     try self.diagnostics.add_diagnostic(.{
                         .column = 0,
@@ -324,7 +330,10 @@ pub const Workspace = struct {
 
         // emit Bytecode
         for (sorted_modules) |module| {
-            var code_gen = try CodeGenerator.init(self.allocator, first_isolate, &module.binding_resolution, &type_registry, module.ast, &self.diagnostics, module);
+            var code_gen_arena = std.heap.ArenaAllocator.init(self.allocator);
+            defer code_gen_arena.deinit();
+            var code_gen = try CodeGenerator.init(code_gen_arena.allocator(), first_isolate, &module.binding_resolution, &type_registry, module.ast, &self.diagnostics, module);
+            defer code_gen.deinit();
 
             const function = code_gen.generate();
             if (function) |f| {
