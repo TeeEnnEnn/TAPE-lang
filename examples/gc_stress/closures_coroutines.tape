@@ -20,7 +20,7 @@ co worker(n: Int) -> (Int, Nil, Int) {
 }
 
 var i = 0;
-while (i < 15000) {
+while (i < 150000) {
 	// Fresh capturing closure every iteration.
 	var f = make_adder(i);
 	var got = f(i);

@@ -10,6 +10,7 @@ const Opcode = Chunk.Opcode;
 const VM = @import("vm.zig").VM;
 const RuntimePanic = @import("vm.zig").RuntimePanic;
 const object_as = @import("entities.zig").object_as;
+const options = @import("TAPE_build_options");
 
 pub const ExecutionResult = union(enum) {
     Ok: TapeValue,
@@ -20,7 +21,8 @@ pub const ExecutionResult = union(enum) {
 pub const Isolate = struct {
     vm: *VM,
     gc: *BasicGarbageCollector.BasicGarbageCollector,
-    base_allocator: std.mem.Allocator,
+    backing_allocator: std.heap.SafeAllocator,
+    allocator: std.mem.Allocator,
 
     string_intern: std.StringHashMap(*Entities.ObjectString),
     isolate_closure: *Entities.ObjectClosure,
@@ -36,23 +38,29 @@ pub const Isolate = struct {
     current: *Entities.ExecutionState,
 
     pub fn init(vm: *VM, base_allocator: std.mem.Allocator, globals_count: usize, function_constants_count: usize) !*Isolate {
+        // The isolate owns the SafeAllocator value, so the allocator interface
+        // can safely retain a pointer to it for the isolate's entire lifetime.
+        // Allocate the Isolate shell from the VM allocator to break the
+        // bootstrap cycle; all of its owned state uses the safe allocator.
         const isolate = try base_allocator.create(Isolate);
+        isolate.backing_allocator = std.heap.SafeAllocator.init(base_allocator, .{});
+        const allocator = isolate.backing_allocator.allocator();
         isolate.vm = vm;
-        isolate.base_allocator = base_allocator;
+        isolate.allocator = allocator;
         isolate.isolate_closure = undefined;
-        isolate.string_intern = std.StringHashMap(*Entities.ObjectString).init(base_allocator);
+        isolate.string_intern = std.StringHashMap(*Entities.ObjectString).init(allocator);
 
-        isolate.gc = try BasicGarbageCollector.BasicGarbageCollector.init(base_allocator, isolate, mark_roots, clean_string_intern);
+        isolate.gc = try BasicGarbageCollector.BasicGarbageCollector.init(allocator, isolate, mark_roots, clean_string_intern);
 
         isolate.execution_state = try Entities.ExecutionState.init(isolate.gc.managed_allocator.allocator(), vm.config.frame_capacity, vm.config.stack_size);
 
-        isolate.globals = @ptrCast(@alignCast(try base_allocator.alloc(TapeValue, globals_count)));
+        isolate.globals = @ptrCast(@alignCast(try allocator.alloc(TapeValue, globals_count)));
         isolate.globals_count = globals_count;
         // initialize globals to nil
         for (0..globals_count) |index| {
             isolate.globals[index] = .nil;
         }
-        isolate.function_constants = @ptrCast(@alignCast(try base_allocator.alloc(TapeValue, function_constants_count)));
+        isolate.function_constants = @ptrCast(@alignCast(try allocator.alloc(TapeValue, function_constants_count)));
         isolate.function_constants_count = function_constants_count;
         // initialize function constants to nil
         for (0..function_constants_count) |index| {
@@ -65,12 +73,16 @@ pub const Isolate = struct {
     }
 
     pub fn deinit(self: *Isolate) void {
+        const isolate_ptr = @intFromPtr(self);
         self.string_intern.deinit();
         self.execution_state.deinit(self.gc.managed_allocator.allocator());
-        self.base_allocator.free(self.globals[0..self.globals_count]);
-        self.base_allocator.free(self.function_constants[0..self.function_constants_count]);
+        self.allocator.free(self.globals[0..self.globals_count]);
+        self.allocator.free(self.function_constants[0..self.function_constants_count]);
         self.gc.deinit();
-        self.base_allocator.destroy(self);
+        const leak_count = self.backing_allocator.deinit();
+        if (options.report_leaks and leak_count > 0)
+            std.debug.print("Isolate {d} had {d} leaks!\n", .{ isolate_ptr, leak_count });
+        self.vm.base_allocator.destroy(self);
     }
 
     fn mark_roots(ptr: *anyopaque, gc: *BasicGarbageCollector.BasicGarbageCollector) void {
@@ -111,12 +123,12 @@ pub const Isolate = struct {
         _ = gc;
         const isolate: *Isolate = @ptrCast(@alignCast(ptr));
         var keys_to_remove = std.ArrayList([]const u8).empty;
-        defer keys_to_remove.deinit(isolate.base_allocator);
+        defer keys_to_remove.deinit(isolate.allocator);
 
         var it = isolate.string_intern.iterator();
         while (it.next()) |entry| {
             if (!entry.value_ptr.*.header.marked) {
-                keys_to_remove.append(isolate.base_allocator, entry.key_ptr.*) catch {};
+                keys_to_remove.append(isolate.allocator, entry.key_ptr.*) catch {};
             }
         }
 
@@ -627,11 +639,11 @@ pub const Isolate = struct {
                     const string_a: *Entities.ObjectString = object_as(Entities.ObjectString, a.object);
 
                     const new_length = string_b.byte_length + string_a.byte_length;
-                    const new_chars = try self.base_allocator.alloc(u8, new_length);
+                    const new_chars = try self.allocator.alloc(u8, new_length);
                     @memcpy(new_chars[0..string_a.byte_length], string_a.chars);
                     @memcpy(new_chars[string_a.byte_length..], string_b.chars);
 
-                    const new_string = Entities.take_string(self, self.base_allocator, new_chars) catch {
+                    const new_string = Entities.take_string(self, self.allocator, new_chars) catch {
                         return RuntimePanic.OutOfMemory;
                     };
                     _ = try self.pop_value();
@@ -940,8 +952,8 @@ pub const Isolate = struct {
                     const closure_object: *Entities.ObjectClosure = object_as(Entities.ObjectClosure, callee.object);
 
                     // Copy args off the caller's stack - these will be copied to the coroutines stack.
-                    var args = try std.ArrayList(TapeValue).initCapacity(self.base_allocator, arg_count);
-                    defer args.deinit(self.base_allocator);
+                    var args = try std.ArrayList(TapeValue).initCapacity(self.allocator, arg_count);
+                    defer args.deinit(self.allocator);
                     for (0..arg_count) |i| {
                         args.appendAssumeCapacity(try self.peek_value(arg_count - 1 - i));
                     }

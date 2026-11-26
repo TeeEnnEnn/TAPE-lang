@@ -50,6 +50,8 @@ pub const VM = struct {
         return vm;
     }
 
+    /// deinits the VM
+    /// destroys the pointer to the VM, so calling this function twice is not safe
     pub fn deinit(self: *VM) void {
         for (self.isolates.items) |isolate| {
             isolate.deinit();
@@ -60,6 +62,7 @@ pub const VM = struct {
 
     pub fn new_isolate(self: *VM, global_count: u16, function_constants_count: u16) !*Isolate {
         const isolate = try Isolate.init(self, self.base_allocator, global_count, function_constants_count);
+        errdefer isolate.deinit();
         try self.isolates.append(self.base_allocator, isolate);
         return isolate;
     }

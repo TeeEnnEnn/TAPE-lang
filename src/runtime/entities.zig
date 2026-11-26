@@ -8,7 +8,7 @@ const AST = @import("../compiler/ast.zig");
 const BasicGarbageCollector = @import("../memory/basic_garbage_collector.zig");
 const basic_gc = BasicGarbageCollector.BasicGarbageCollector;
 const mark_object = basic_gc.mark_object;
-const options = @import("TAPE_lang_build_options");
+const options = @import("TAPE_build_options");
 
 pub const CallFrame = struct {
     closure: *ObjectClosure,

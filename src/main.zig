@@ -1,12 +1,13 @@
 const std = @import("std");
 const Io = std.Io;
 
-const TAPE_lang = @import("TAPE_lang");
-const cli = TAPE_lang.cli;
+const CLI = @import("cli/cli.zig");
 
 pub fn main(init: std.process.Init) u8 {
-    const args = std.process.Args.toSlice(init.minimal.args, init.arena.allocator()) catch {
+    const program_arena = init.arena.allocator();
+    const gpa = init.gpa;
+    const args = std.process.Args.toSlice(init.minimal.args, program_arena) catch {
         return 1;
     };
-    return cli.cli_main(args, init.arena.allocator(), init.io);
+    return CLI.cli_main(args, gpa, init.io);
 }

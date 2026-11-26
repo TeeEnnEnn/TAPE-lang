@@ -53,7 +53,6 @@ pub const LoopContext = struct {
             .enclosing = enclosing,
         };
     }
-
     pub fn deinit(self: *LoopContext) void {
         self.break_jumps.deinit(self.allocator);
         self.continue_jumps.deinit(self.allocator);
@@ -78,6 +77,10 @@ pub const FunctionCompiler = struct {
             .current_locals_count = initial_locals,
         };
         return compiler;
+    }
+
+    pub fn deinit(self: *FunctionCompiler) void {
+        self.allocator.destroy(self);
     }
 
     pub fn chunk(self: *FunctionCompiler) *Chunk {
@@ -140,6 +143,16 @@ pub const CodeGenerator = struct {
             .diagnostics = diagnostics,
             .module = module,
         };
+    }
+
+    pub fn deinit(self: *CodeGenerator) void {
+        self.current.deinit();
+        if (self.current_give) |give| {
+            give.deinit();
+        }
+        if (self.current_loop) |loop| {
+            loop.deinit();
+        }
     }
 
     pub fn generate(self: *CodeGenerator) ?*Entities.ObjectFunction {
@@ -532,6 +545,7 @@ pub const CodeGenerator = struct {
         const function_object = try Entities.new_function_object(self.isolate, self.module.filepath);
         // Start nested function with its own parameter count:
         const new_function = try FunctionCompiler.init(self.allocator, function_object, self.current, binding.param_count);
+        defer new_function.deinit();
         const enclosing = self.current;
         const enclosing_give = self.current_give;
         self.current = new_function;
@@ -1407,6 +1421,7 @@ pub const CodeGenerator = struct {
 
         const function_object = try Entities.new_function_object(self.isolate, self.module.filepath);
         const new_function = try FunctionCompiler.init(self.allocator, function_object, self.current, binding.param_count);
+        defer new_function.deinit();
         const enclosing = self.current;
         const enclosing_give = self.current_give;
         self.current = new_function;

@@ -1,7 +1,7 @@
 const std = @import("std");
 const Entities = @import("../runtime/entities.zig");
 const ManagedAllocator = @import("managed_allocator.zig");
-const options = @import("TAPE_lang_build_options");
+const options = @import("TAPE_build_options");
 
 pub const RootMarker = *const fn (isolate_ptr: *anyopaque, gc: *BasicGarbageCollector) void;
 pub const CleanStringIntern = *const fn (isolate_ptr: *anyopaque, gc: *BasicGarbageCollector) void;
