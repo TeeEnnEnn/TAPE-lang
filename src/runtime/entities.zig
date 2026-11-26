@@ -63,6 +63,7 @@ pub const ObjectType = enum(u8) {
     ObjectUpvalue,
     ObjectStructInstance,
     ObjectRange,
+    ObjectEnum,
 };
 
 pub const ObjectHeader = struct {
@@ -105,6 +106,13 @@ pub const ObjectTable = struct {
     length: usize,
 };
 
+pub const ObjectEnum = struct {
+    header: ObjectHeader,
+    type_id: AST.TypeId,
+    tag: u32,
+    payloads: []Value,
+};
+
 pub const ObjectTuple = struct {
     header: ObjectHeader,
     elements: []Value,
@@ -136,10 +144,20 @@ pub const ObjectUpvalue = struct {
     closed: bool = false,
 };
 
-pub const CoroutineState = enum {
+pub const CoroutineState = union(enum) {
     SUSPENDED,
     RUNNING,
-    FINISHED,
+    FINISHED: Value,
+};
+
+pub const DeferredEntry = struct { target_ip: usize, is_errdefer: bool };
+pub const DeferredScope = struct { entry_start: usize, frame_index: usize };
+pub const DeferredRun = struct {
+    entry_start: usize,
+    continuation_ip: usize,
+    frame_index: usize,
+    run_error_defers: bool,
+    saved_value: ?Value,
 };
 
 pub const ExecutionState = struct {
@@ -150,6 +168,9 @@ pub const ExecutionState = struct {
     frame_count: usize,
     frame_capacity: usize,
     open_upvalues: ?*ObjectUpvalue,
+    deferred_entries: std.ArrayList(DeferredEntry),
+    deferred_scopes: std.ArrayList(DeferredScope),
+    deferred_runs: std.ArrayList(DeferredRun),
 
     pub fn init(allocator: std.mem.Allocator, frame_capacity: usize, stack_size: usize) !ExecutionState {
         const frames: [*]CallFrame = @ptrCast(@alignCast(try allocator.alloc(CallFrame, frame_capacity)));
@@ -164,12 +185,18 @@ pub const ExecutionState = struct {
             .stack_size = stack_size,
             .frame_capacity = frame_capacity,
             .open_upvalues = null,
+            .deferred_entries = .empty,
+            .deferred_scopes = .empty,
+            .deferred_runs = .empty,
         };
     }
 
     pub fn deinit(self: *ExecutionState, allocator: std.mem.Allocator) void {
         allocator.free(self.frames[0..self.frame_capacity]);
         allocator.free(self.stack[0..self.stack_size]);
+        self.deferred_entries.deinit(allocator);
+        self.deferred_scopes.deinit(allocator);
+        self.deferred_runs.deinit(allocator);
         self.open_upvalues = null;
     }
 
@@ -189,6 +216,9 @@ pub const ExecutionState = struct {
         // mark the stack
         for (self.stack[0..self.stack_top_index]) |value| {
             try mark_value(garbage_collector, value);
+        }
+        for (self.deferred_runs.items) |run| {
+            if (run.saved_value) |value| try mark_value(garbage_collector, value);
         }
     }
 };
@@ -297,6 +327,18 @@ pub fn values_equal(a: Value, b: Value) bool {
                     .ObjectString => compare_strings(@ptrCast(a_obj), @ptrCast(b_obj)),
                     else => false,
                 },
+                .ObjectEnum => switch (b_obj.object_type) {
+                    .ObjectEnum => blk: {
+                        const a_enum: *ObjectEnum = @ptrCast(a_obj);
+                        const b_enum: *ObjectEnum = @ptrCast(b_obj);
+                        if (a_enum.type_id != b_enum.type_id or a_enum.tag != b_enum.tag or a_enum.payloads.len != b_enum.payloads.len) break :blk false;
+                        for (a_enum.payloads, b_enum.payloads) |a_payload, b_payload| {
+                            if (!values_equal(a_payload, b_payload)) break :blk false;
+                        }
+                        break :blk true;
+                    },
+                    else => false,
+                },
                 else => a_obj == b_obj,
             },
             else => false,
@@ -339,6 +381,7 @@ pub fn object_as(comptime T: type, obj: *ObjectHeader) *T {
         .ObjectUpvalue => @ptrCast(obj),
         .ObjectStructInstance => @ptrCast(obj),
         .ObjectRange => @ptrCast(obj),
+        .ObjectEnum => @ptrCast(obj),
     };
 }
 
@@ -618,6 +661,15 @@ pub fn new_range_object(isolate: *Isolate, start: i64, end: i64, step: i64) !*Ob
     return range;
 }
 
+/// you must allocate the payloads after this function returns
+pub fn new_payload_object(isolate: *Isolate, type_id: AST.TypeId, tag: u32) !*ObjectEnum {
+    const enum_: *ObjectEnum = try isolate.gc.allocate_object(ObjectEnum, .ObjectEnum);
+    enum_.payloads = &.{};
+    enum_.tag = tag;
+    enum_.type_id = type_id;
+    return enum_;
+}
+
 pub fn mark_value(garbage_collector: *basic_gc, value: Value) !void {
     switch (value) {
         .object => |obj| {
@@ -649,6 +701,10 @@ pub fn blacken_object(garbage_collector: *basic_gc, obj: *ObjectHeader) !void {
             const coroutine: *ObjectCoroutine = @ptrCast(obj);
             try mark_object(garbage_collector, @ptrCast(coroutine.closure));
             try coroutine.execution_state.mark_execution_state(garbage_collector);
+            switch (coroutine.state) {
+                .FINISHED => |ret_val| try mark_value(garbage_collector, ret_val),
+                .SUSPENDED, .RUNNING => {},
+            }
         },
         .ObjectString => {},
         .ObjectTuple => {
@@ -686,6 +742,12 @@ pub fn blacken_object(garbage_collector: *basic_gc, obj: *ObjectHeader) !void {
             }
         },
         .ObjectRange => {},
+        .ObjectEnum => {
+            const object_enum: *ObjectEnum = @ptrCast(obj);
+            for (object_enum.payloads) |payload| {
+                try mark_value(garbage_collector, payload);
+            }
+        },
     }
 }
 
@@ -768,6 +830,15 @@ pub fn free_object(allocator: std.mem.Allocator, obj: *ObjectHeader) void {
                 std.debug.print("freed: ObjectRange: {*}\n", .{obj});
             }
             allocator.destroy(range);
+        },
+
+        .ObjectEnum => {
+            const enum_: *ObjectEnum = @ptrCast(obj);
+            if (options.log_gc) {
+                std.debug.print("freed: ObjectEnum: {*}\n", .{obj});
+            }
+            if (enum_.payloads.len > 0) allocator.free(enum_.payloads);
+            allocator.destroy(enum_);
         },
     }
 }

@@ -74,8 +74,22 @@ test "Code Generator - emits collection index assignment opcodes" {
 test "Code Generator - emits coroutine creation and resume opcodes" {
     // the coroutine body compiles into its own chunk (OP_YIELD lives there);
     // the top-level chunk carries OP_COROUTINE and OP_RESUME
-    try expectOpcode("co f() -> (Int, Nil, Nil) { yield 1; } var c = f(); resume c;", .OP_COROUTINE);
-    try expectOpcode("co f() -> (Int, Nil, Nil) { yield 1; } var c = f(); resume c;", .OP_RESUME);
-    try expectOpcode("co f() -> (Int, String, String) { var r = yield 1; return r; } var c = f(); var x = resume c with \"hi\";", .OP_RESUME);
-    try expectOpcode("co f() -> (Int, Int, Nil) { var r = yield 1; return nil; } var c = f(); var x = resume c with 5;", .OP_RESUME);
+    try expectOpcode("co f() -> (Int, Nil, Int) { yield 1; return 1; } var c = f(); resume c;", .OP_COROUTINE);
+    try expectOpcode("co f() -> (Int, Nil, Int) { yield 1; return 1; } var c = f(); resume c;", .OP_RESUME);
+    try expectOpcode("co f() -> (String, String, String) { var r = yield \"yo\"; return r; } var c = f(); var x = resume c with \"hi\";", .OP_RESUME);
+    try expectOpcode("co f() -> (Int, Int, Int) { var r = yield 1; return r; } var c = f(); var x = resume c with 5;", .OP_RESUME);
+}
+
+test "Code Generator - emits optional unwrap" {
+    try expectOpcode("var m: ?Int = 1; var x = m.?;", .OP_OPTIONAL_UNWRAP);
+    // The unwrap must also resolve its type when it is a binary operand.
+    try expectOpcode("fn f() -> ?Int { return 1; } var x = 1 + f().?;", .OP_OPTIONAL_UNWRAP);
+}
+
+test "Code Generator - emits nil checks for captures" {
+    // A plain `if` branches on falsiness; a capture branches on nil.
+    try expectOpcode("var m: ?Int = 1; if (m) bind (v) { v; }", .OP_JUMP_IF_NIL);
+    try expectOpcode("var m: ?Int = 1; while (m) bind (v) { break; }", .OP_JUMP_IF_NIL);
+    // The capture local is cleaned up with OP_POP_N on the fall-through path.
+    try expectOpcode("var m: ?Int = 1; if (m) bind (v) { v; }", .OP_POP_N);
 }

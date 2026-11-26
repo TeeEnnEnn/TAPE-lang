@@ -44,4 +44,5 @@ test {
     // runtime
     _ = @import("_tests/runtime/test_chunk.zig");
     _ = @import("_tests/runtime/test_entities.zig");
+    _ = @import("_tests/runtime/test_optional_unwrap.zig");
 }

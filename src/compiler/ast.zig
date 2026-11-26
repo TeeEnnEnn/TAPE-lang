@@ -8,7 +8,8 @@ pub const TypeId = u32;
 /// Used to emit context aware bytecode
 pub const DeclRef = union(enum) {
     node: *ASTNode,
-
+    // used because `match` can have multiple captures
+    capture: *CaptureBindingExpr,
     // not AST nodes themselves but "sub-elements" of other AST nodes
     param: struct { func: *ASTNode, index: u32 },
     import: struct { use_decl: *ASTNode, index: u32 },
@@ -34,12 +35,20 @@ pub const ASTNode = union(enum) {
     /// Use declaration
     use_decl: *UseDecl,
 
+    /// Native type declaration
+    native_type_decl: *NativeTypeDecl,
+    /// Native function declaration
+    native_fn_decl: *NativeFnDecl,
+
     /// Block of code (collection of statements in +1 scope)
     block_stmt: *BlockStmt,
     /// `return value`
     return_stmt: *ReturnStmt,
     /// `yield value`
     yield_expr: *YieldExpr,
+
+    anon_struct_decl: *AnonStructDecl,
+    anon_struct_instance: *AnonStructInstance,
 
     /// `give value`
     give_stmt: *GiveStmt,
@@ -52,6 +61,7 @@ pub const ASTNode = union(enum) {
     if_stmt: *IfStmt,
     expr_stmt: *ExprStmt,
     panic_stmt: *PanicStmt,
+    defer_stmt: *DeferStmt,
 
     // Expressions
     assign_expr: *AssignExpr, // =, +=, -=, *=, /=, %=, <<=, >>=, &=, |=, ^=
@@ -67,6 +77,7 @@ pub const ASTNode = union(enum) {
     call_expr: *CallExpr, // ()
     index_expr: *IndexExpr, // []
     dot_expr: *DotExpr, // .
+    optional_unwrap_expr: *OptionalUnwrapExpr, //.?
 
     // unary
     try_expr: *TryExpr, // try
@@ -111,7 +122,8 @@ pub const ASTNode = union(enum) {
     identifier_type: *IdentifierType,
     fn_type: *FnType,
     co_type: *CoType,
-    union_type: *UnionType,
+    optional_type: *OptionalType,
+    error_union_type: *ErrorUnionType,
 };
 
 // Node Types
@@ -206,6 +218,50 @@ pub const StructDecl = struct {
     column: usize,
 };
 
+/// An anonymous struct declaration
+///
+/// ```
+/// struct {
+/// 'fields'
+/// 'methods'
+/// }
+/// ```
+pub const AnonStructDecl = struct {
+    fields: []*TypedNamedStructField,
+    methods: []*StructMethodField,
+    line: usize,
+    column: usize,
+};
+
+/// An anonymous struct Instantiation
+///
+/// ```
+/// struct {
+/// 'fields'
+/// 'methods'
+/// }
+/// ```
+pub const AnonStructInstance = struct {
+    fields: []StructInitField,
+    resolved_type: TypeId = 0,
+    line: usize,
+    column: usize,
+};
+
+/// A variant of an enum that may have a payload
+///
+/// ```
+/// variant_one: struct {f1: String, f2: Int},
+/// variant_two: Int,
+/// variant_three,
+/// ```
+pub const EnumDeclVariant = struct {
+    variant_name: Token,
+    line: usize,
+    column: usize,
+    type_annotation: ?*ASTNode,
+};
+
 /// Enum declaration node.
 ///
 /// ```
@@ -216,7 +272,7 @@ pub const StructDecl = struct {
 pub const EnumDecl = struct {
     modifier_pub: bool,
     name: Token,
-    variants: []Token,
+    variants: []EnumDeclVariant,
     line: usize,
     column: usize,
 };
@@ -243,6 +299,8 @@ pub const ErrorDecl = struct {
 /// ```
 pub const BlockStmt = struct {
     stmts: []*ASTNode,
+    is_expr: bool = false,
+    resolved_type: TypeId = 0,
     line: usize,
     column: usize,
 };
@@ -334,6 +392,7 @@ pub const ContinueStmt = struct {
 pub const WhileStmt = struct {
     condition: *ASTNode,
     body: *ASTNode,
+    capture: ?*CaptureBindingExpr,
     line: usize,
     column: usize,
 };
@@ -349,17 +408,22 @@ pub const ForStmt = struct {
     body: *ASTNode,
     line: usize,
     column: usize,
+    // TODO: add captures for iterating over coroutines. Maybe
 };
 
 /// If statement node.
 ///
 /// ```
-/// if ('expr') 'then_branch' ('else_branch')
+/// if ('expr')  'then_branch' ('else_branch')
+/// if ('optional_expr') bind ('bound_name') 'then_branch' 'else_branch'
 /// ```
 pub const IfStmt = struct {
     condition: *ASTNode,
     then_branch: *ASTNode,
     else_branch: ?*ASTNode,
+    capture: ?*CaptureBindingExpr,
+    is_expr: bool = false,
+    resolved_type: TypeId = 0,
     line: usize,
     column: usize,
 };
@@ -371,6 +435,14 @@ pub const IfStmt = struct {
 /// ```
 pub const PanicStmt = struct {
     expr: *ASTNode,
+    line: usize,
+    column: usize,
+};
+
+/// `defer` and `errdefer` actions run when their lexical block exits.
+pub const DeferStmt = struct {
+    body: *ASTNode,
+    is_errdefer: bool,
     line: usize,
     column: usize,
 };
@@ -491,6 +563,13 @@ pub const DotExpr = struct {
     column: usize,
 };
 
+pub const OptionalUnwrapExpr = struct {
+    expr: *ASTNode,
+    resolved_type: TypeId = 0,
+    line: usize,
+    column: usize,
+};
+
 /// Group expression node.
 ///
 /// ```
@@ -566,11 +645,14 @@ pub const MatchExpr = struct {
 /// Match case node.
 ///
 /// ```
-/// pattern => stmt,
+/// pattern => [bind (name)] stmt,
 /// ```
 pub const MatchCase = struct {
     pattern: *ASTNode,
     stmt: *ASTNode,
+    payload_binding: ?*CaptureBindingExpr = null,
+    enum_tag: ?u32 = null,
+    payload_type: ?TypeId = null,
     resolved_type: TypeId = 0,
     line: usize,
     column: usize,
@@ -623,6 +705,14 @@ pub const StructMethodField = struct {
     name: Token,
     method: *ASTNode,
     is_pub: bool, // is accessible from outside the struct
+};
+
+pub const CaptureBindingExpr = struct {
+    name: Token,
+    /// non optional type that the name is bound with
+    resolved_type: TypeId = 0,
+    line: usize,
+    column: usize,
 };
 
 pub const ImportItem = struct {
@@ -725,14 +815,42 @@ pub const CoType = struct {
 pub const IdentifierType = struct {
     name: Token,
     source_file: []const u8,
-    generic_args: ?[]*ASTNode,
 };
 
-pub const UnionType = struct {
-    left: *ASTNode,
-    right: *ASTNode,
+pub const OptionalType = struct {
+    inner: *ASTNode,
+};
+
+pub const ErrorUnionType = struct {
+    /// null means the error set is inferred (`!T`), i.e. any error.
+    err: ?*ASTNode,
+    ok: *ASTNode,
 };
 
 // match patterns
 
 pub const DefaultPat = struct {};
+
+// native types
+
+/// Does not have a body
+/// The functionality exists outside of TAPE
+/// `native fn open(fname: String) -> File`
+pub const NativeFnDecl = struct {
+    modifier_pub: bool,
+    name: Token,
+    params: []*TypedNamedField,
+    return_type_annotation: *ASTNode,
+    line: usize,
+    column: usize,
+};
+
+/// Does not have a type annotation
+/// The type is opaque
+/// `native type FileHandle;`
+pub const NativeTypeDecl = struct {
+    modifier_pub: bool,
+    name: Token,
+    line: usize,
+    column: usize,
+};

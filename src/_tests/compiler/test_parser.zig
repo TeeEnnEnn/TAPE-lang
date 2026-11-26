@@ -239,9 +239,9 @@ test "Parser can parse enum with variants" {
     const enum_decl = node.enum_decl;
     try std.testing.expectEqualStrings("Color", enum_decl.name.lexeme);
     try std.testing.expectEqual(@as(usize, 3), enum_decl.variants.len);
-    try std.testing.expectEqualStrings("Red", enum_decl.variants[0].lexeme);
-    try std.testing.expectEqualStrings("Green", enum_decl.variants[1].lexeme);
-    try std.testing.expectEqualStrings("Blue", enum_decl.variants[2].lexeme);
+    try std.testing.expectEqualStrings("Red", enum_decl.variants[0].variant_name.lexeme);
+    try std.testing.expectEqualStrings("Green", enum_decl.variants[1].variant_name.lexeme);
+    try std.testing.expectEqualStrings("Blue", enum_decl.variants[2].variant_name.lexeme);
 }
 
 test "Parser can parse error with variants" {
@@ -399,6 +399,140 @@ test "Parser allows fn bodies and locals inside non-entrypoint modules" {
     var p = try Parser.init(allocator, &workspace, mod, io, &group);
     const program = try p.parse();
     try std.testing.expectEqual(@as(usize, 1), program.program.declarations.len);
+}
+
+test "Parser parses optional type annotations" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const allocator = arena.allocator();
+
+    const node = try parseFirstDecl(allocator, "var x: ?Int = nil;");
+    try std.testing.expect(node.* == .var_decl);
+    const annot = node.var_decl.type_annotation.?;
+    try std.testing.expect(annot.* == .optional_type);
+    try std.testing.expect(annot.optional_type.inner.* == .int_type);
+
+    // optionals of structural types parse too
+    const node2 = try parseFirstDecl(allocator, "var xs: ?Array[Int] = nil;");
+    const annot2 = node2.var_decl.type_annotation.?;
+    try std.testing.expect(annot2.* == .optional_type);
+    try std.testing.expect(annot2.optional_type.inner.* == .array_type);
+
+    // function signatures
+    const fn_node = try parseFirstDecl(allocator, "fn f(x: ?Int) -> ?String { return nil; }");
+    try std.testing.expect(fn_node.fn_decl.params[0].type_annotation.* == .optional_type);
+    try std.testing.expect(fn_node.fn_decl.return_type_annotation.* == .optional_type);
+}
+
+test "Parser parses optional unwrap expressions" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const allocator = arena.allocator();
+
+    // `.?` is a postfix, just like `.field` and `[index]`.
+    const node = try parseFirstDecl(allocator, "var x = maybe.?;");
+    const unwrap = node.var_decl.initializer;
+    try std.testing.expect(unwrap.* == .optional_unwrap_expr);
+    try std.testing.expect(unwrap.optional_unwrap_expr.expr.* == .identifier_expr);
+    try std.testing.expectEqualStrings("maybe", unwrap.optional_unwrap_expr.expr.identifier_expr.name.lexeme);
+    // The node points at the operator, not the token after it.
+    try std.testing.expectEqual(@as(usize, 1), unwrap.optional_unwrap_expr.line);
+    try std.testing.expectEqual(@as(usize, 14), unwrap.optional_unwrap_expr.column);
+
+    // Unwrapping a call result.
+    const call_node = try parseFirstDecl(allocator, "var x = f().?;");
+    const call_unwrap = call_node.var_decl.initializer;
+    try std.testing.expect(call_unwrap.* == .optional_unwrap_expr);
+    try std.testing.expect(call_unwrap.optional_unwrap_expr.expr.* == .call_expr);
+
+    // Chaining: `maybe.?.field` is a field access on the unwrapped value.
+    const chain = try parseFirstDecl(allocator, "var x = maybe.?.field;");
+    try std.testing.expect(chain.var_decl.initializer.* == .dot_expr);
+    try std.testing.expect(chain.var_decl.initializer.dot_expr.expr.* == .optional_unwrap_expr);
+}
+
+test "Parser parses error union types" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const allocator = arena.allocator();
+
+    // `E!T` keeps a named error set in the error position.
+    const node = try parseFirstDecl(allocator, "var x: E!Int = 1;");
+    const annot = node.var_decl.type_annotation.?;
+    try std.testing.expect(annot.* == .error_union_type);
+    try std.testing.expect(annot.error_union_type.err.?.* == .identifier_type);
+    try std.testing.expectEqualStrings("E", annot.error_union_type.err.?.identifier_type.name.lexeme);
+    try std.testing.expect(annot.error_union_type.ok.* == .int_type);
+
+    // `!T` leaves the error set inferred.
+    const any_node = try parseFirstDecl(allocator, "var x: !Int = 1;");
+    const any_annot = any_node.var_decl.type_annotation.?;
+    try std.testing.expect(any_annot.* == .error_union_type);
+    try std.testing.expect(any_annot.error_union_type.err == null);
+
+    // `!` binds looser than `?`: `E!?Int` is `E! (?Int)`.
+    const nested = try parseFirstDecl(allocator, "var x: E!?Int = nil;");
+    const nested_annot = nested.var_decl.type_annotation.?;
+    try std.testing.expect(nested_annot.* == .error_union_type);
+    try std.testing.expect(nested_annot.error_union_type.ok.* == .optional_type);
+    try std.testing.expect(nested_annot.error_union_type.ok.optional_type.inner.* == .int_type);
+
+    // `?` binds tighter than `!`, so `?E!Int` is `?(E!Int)`.
+    const opt = try parseFirstDecl(allocator, "var x: ?E!Int = nil;");
+    const opt_annot = opt.var_decl.type_annotation.?;
+    try std.testing.expect(opt_annot.* == .optional_type);
+    try std.testing.expect(opt_annot.optional_type.inner.* == .error_union_type);
+
+    // Error unions nest in structural types.
+    const array_node = try parseFirstDecl(allocator, "var x: Array[E!Int] = [1];");
+    const array_annot = array_node.var_decl.type_annotation.?;
+    try std.testing.expect(array_annot.* == .array_type);
+    try std.testing.expect(array_annot.array_type.element_type.* == .error_union_type);
+}
+
+test "Parser rejects ?Nil and nested optionals" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const allocator = arena.allocator();
+
+    try std.testing.expectError(ParserError.BogusTypeDefinition, parseFirstDecl(allocator, "var x: ?Nil = nil;"));
+    try std.testing.expectError(ParserError.BogusTypeDefinition, parseFirstDecl(allocator, "var x: ??Int = nil;"));
+}
+
+test "Parser parses if and while captures" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const allocator = arena.allocator();
+
+    const if_node = try parseFirstDecl(allocator, "if (maybe) bind (real) { real; }");
+    try std.testing.expect(if_node.* == .if_stmt);
+    try std.testing.expectEqualStrings("real", if_node.if_stmt.capture.?.name.lexeme);
+    try std.testing.expect(if_node.if_stmt.else_branch == null);
+
+    // a plain `if` has no capture
+    const plain = try parseFirstDecl(allocator, "if (flag) { flag; }");
+    try std.testing.expect(plain.if_stmt.capture == null);
+
+    // captures work on `while` too, after the closing ')'
+    const while_node = try parseFirstDecl(allocator, "while (maybe) bind (real) { real; }");
+    try std.testing.expect(while_node.* == .while_stmt);
+    try std.testing.expectEqualStrings("real", while_node.while_stmt.capture.?.name.lexeme);
+
+    // else-if chains can each capture
+    const chain = try parseFirstDecl(allocator, "if (a) bind (x) { x; } else if (b) bind (y) { y; } else { nil; }");
+    try std.testing.expect(chain.if_stmt.capture != null);
+    try std.testing.expect(chain.if_stmt.else_branch.?.* == .if_stmt);
+    try std.testing.expect(chain.if_stmt.else_branch.?.if_stmt.capture != null);
+}
+
+test "Parser rejects malformed captures" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const allocator = arena.allocator();
+
+    try std.testing.expectError(ParserError.UnexpectedToken, parseFirstDecl(allocator, "if (x) bind v { v; }"));
+    try std.testing.expectError(ParserError.UnexpectedToken, parseFirstDecl(allocator, "if (x) bind () { nil; }"));
+    try std.testing.expectError(ParserError.UnexpectedToken, parseFirstDecl(allocator, "while (x) bind { nil; }"));
 }
 
 test "Parser accepts pub use for re-exports" {

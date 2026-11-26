@@ -85,6 +85,7 @@ pub const Opcode = enum(u8) {
     OP_JUMP_IF_ERROR,
     OP_LOOP,
     OP_CALL,
+    OP_CALL_NATIVE,
 
     OP_ARRAY,
     OP_TABLE,
@@ -122,6 +123,21 @@ pub const Opcode = enum(u8) {
     OP_FOR_PREP,
     /// Moves to the next iteration of a for loop
     OP_FOR_NEXT,
+    /// Checks the top of the stack for nil. If nil is found: panic
+    OP_OPTIONAL_UNWRAP,
+    OP_DEFER_SCOPE,
+    OP_DEFER_PUSH,
+    OP_DEFER_RUN,
+    OP_DEFER_END,
+
+    /// creates a runtime enum object
+    OP_NEW_ENUM,
+    /// reads a tag from a payload enum
+    OP_ENUM_TAG,
+    /// reads a tag from a inline (non payload enum)
+    OP_ENUM_UNIT_TAG,
+    /// reads a payload value from thestruct
+    OP_ENUM_FIELD,
 };
 
 /// A chunk of bytecode

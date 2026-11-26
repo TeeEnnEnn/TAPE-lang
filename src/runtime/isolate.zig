@@ -1,4 +1,5 @@
 const std = @import("std");
+const Natives = @import("../natives/natives.zig").Natives;
 const Entities = @import("entities.zig");
 const Chunk = @import("chunk.zig");
 const BasicGarbageCollector = @import("../memory/basic_garbage_collector.zig");
@@ -148,6 +149,21 @@ pub const Isolate = struct {
             return error.StackUnderflow;
         }
         return self.current.stack[self.current.stack_top_index - 1 - offset];
+    }
+
+    fn continue_deferred_run(self: *Isolate, frame: *Entities.CallFrame) RuntimePanic!void {
+        if (self.current.deferred_runs.items.len == 0) return RuntimePanic.CorruptedState;
+        const run_index = self.current.deferred_runs.items.len - 1;
+        const run = self.current.deferred_runs.items[run_index];
+        while (self.current.deferred_entries.items.len > run.entry_start) {
+            const entry = self.current.deferred_entries.pop() orelse return RuntimePanic.CorruptedState;
+            if (entry.is_errdefer and !run.run_error_defers) continue;
+            frame.ip = entry.target_ip;
+            return;
+        }
+        const finished_run = self.current.deferred_runs.pop() orelse return RuntimePanic.CorruptedState;
+        if (finished_run.saved_value) |value| try self.push_value(value);
+        frame.ip = run.continuation_ip;
     }
 
     /// Returns an upvalue pointing at the given stack slot, reusing an existing open
@@ -640,6 +656,48 @@ pub const Isolate = struct {
                     self.current.stack_top_index -= pop_count;
                 },
 
+                .OP_DEFER_SCOPE => {
+                    self.current.deferred_scopes.append(self.gc.managed_allocator.allocator(), .{
+                        .entry_start = self.current.deferred_entries.items.len,
+                        .frame_index = self.current.frame_count - 1,
+                    }) catch return RuntimePanic.OutOfMemory;
+                },
+
+                .OP_DEFER_PUSH => {
+                    const target_ip = frame.read_u32();
+                    const is_errdefer = frame.read_u8() != 0;
+                    self.current.deferred_entries.append(self.gc.managed_allocator.allocator(), .{
+                        .target_ip = target_ip,
+                        .is_errdefer = is_errdefer,
+                    }) catch return RuntimePanic.OutOfMemory;
+                },
+
+                .OP_DEFER_RUN => {
+                    const mode = frame.read_u8();
+                    if (self.current.deferred_scopes.items.len == 0) return RuntimePanic.CorruptedState;
+                    const scope = self.current.deferred_scopes.pop() orelse return RuntimePanic.CorruptedState;
+                    if (scope.frame_index != self.current.frame_count - 1) return RuntimePanic.CorruptedState;
+                    const run_error_defers = switch (mode) {
+                        0 => false,
+                        1 => true,
+                        2 => if (self.current.stack_top_index > 0) self.current.stack[self.current.stack_top_index - 1] == .error_ else false,
+                        3 => false,
+                        else => return RuntimePanic.CorruptedState,
+                    };
+                    const saved_value = if (mode != 0) try self.peek_value(0) else null;
+                    self.current.deferred_runs.append(self.gc.managed_allocator.allocator(), .{
+                        .entry_start = scope.entry_start,
+                        .continuation_ip = frame.ip,
+                        .frame_index = scope.frame_index,
+                        .run_error_defers = run_error_defers,
+                        .saved_value = saved_value,
+                    }) catch return RuntimePanic.OutOfMemory;
+                    if (mode != 0) _ = try self.pop_value();
+                    try self.continue_deferred_run(frame);
+                },
+
+                .OP_DEFER_END => try self.continue_deferred_run(frame),
+
                 .OP_GIVE_POP => {
                     const pop_count = frame.read_u16();
                     const give_value = try self.pop_value();
@@ -822,6 +880,16 @@ pub const Isolate = struct {
                     try self.push_value(value);
                 },
 
+                .OP_CALL_NATIVE => {
+                    const arg_count = frame.read_u16();
+                    const slot = frame.read_u16();
+                    const native_fn = Natives.get(slot);
+                    const result = try native_fn(self, self.current.stack[self.current.stack_top_index - arg_count .. self.current.stack_top_index]);
+                    // unwinding stack slots
+                    self.current.stack_top_index -= arg_count;
+                    try self.push_value(result);
+                },
+
                 .OP_CALL => {
                     const arg_count = frame.read_u16();
                     const callee = try self.peek_value(arg_count);
@@ -899,7 +967,10 @@ pub const Isolate = struct {
                     const coroutine_value = try self.peek_value(0); // keep the coroutine on the stack
                     const coroutine_object: *Entities.ObjectCoroutine = object_as(Entities.ObjectCoroutine, coroutine_value.object);
 
-                    if (coroutine_object.state == .FINISHED) return RuntimePanic.FinishedCoroutineResumption;
+                    switch (coroutine_object.state) {
+                        .FINISHED => return RuntimePanic.FinishedCoroutineResumption,
+                        .SUSPENDED, .RUNNING => {},
+                    }
                     if (coroutine_object.state == .RUNNING) return RuntimePanic.CoroutineAlreadyRunning;
 
                     const prev_execution_state = self.current;
@@ -920,8 +991,8 @@ pub const Isolate = struct {
 
                     switch (try result) {
                         .Ok => |value| {
-                            coroutine_object.state = .FINISHED;
-                            try self.push_value(value);
+                            coroutine_object.state = .{ .FINISHED = value };
+                            try self.push_value(.nil);
                         },
                         .Yielded => |value| {
                             coroutine_object.state = .SUSPENDED;
@@ -1050,6 +1121,44 @@ pub const Isolate = struct {
                     if (should_continue) {
                         frame.ip -= loop_offset;
                     }
+                },
+                .OP_OPTIONAL_UNWRAP => {
+                    const top = try self.peek_value(0);
+                    if (top == .nil) return RuntimePanic.FailedOptionalUnwrap;
+                },
+                .OP_NEW_ENUM => {
+                    const type_id = frame.read_u32();
+                    const tag = frame.read_u32();
+                    const payload_count = frame.read_u16();
+                    const enum_object = try self.gc.allocate_object(Entities.ObjectEnum, .ObjectEnum);
+                    enum_object.type_id = type_id;
+                    enum_object.tag = tag;
+                    enum_object.payloads = &.{};
+                    try self.push_value(.{ .object = &enum_object.header });
+                    if (payload_count > 0) {
+                        const payload_len: usize = @intCast(payload_count);
+                        const payloads = try self.gc.managed_allocator.allocator().alloc(TapeValue, payload_len);
+                        for (0..payload_len) |i| payloads[payload_len - i - 1] = try self.peek_value(i + 1);
+                        enum_object.payloads = payloads;
+                    }
+                    _ = try self.pop_value();
+                    for (0..payload_count) |_| _ = try self.pop_value();
+                    try self.push_value(.{ .object = &enum_object.header });
+                },
+                .OP_ENUM_TAG => {
+                    const enum_value = try self.pop_value();
+                    const enum_object = object_as(Entities.ObjectEnum, enum_value.object);
+                    try self.push_value(.{ .int = @intCast(enum_object.tag) });
+                },
+                .OP_ENUM_UNIT_TAG => {
+                    const enum_value = try self.pop_value();
+                    try self.push_value(.{ .int = @intCast(enum_value.enum_.index) });
+                },
+                .OP_ENUM_FIELD => {
+                    const index = frame.read_u16();
+                    const enum_value = try self.pop_value();
+                    const enum_object = object_as(Entities.ObjectEnum, enum_value.object);
+                    try self.push_value(enum_object.payloads[index]);
                 },
             }
         }

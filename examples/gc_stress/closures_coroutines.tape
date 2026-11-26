@@ -30,14 +30,14 @@ while (i < 15000) {
 	// Fresh coroutine: drive it through two yields and a return,
 	// then drop it so it becomes GC garbage.
 	var c = worker(i);
-	var a = resume c;
+	var a = (resume c).?;
 	if (a != i) { panic "gc co yield 1"; }
-	var b = resume c;
+	var b = (resume c).?;
 	var want_b = i + 1;
 	if (b != want_b) { panic "gc co yield 2"; }
 	var d = resume c;
 	var want_d = i + 2;
-	if (d != want_d) { panic "gc co return"; }
+	if (d != nil or c.returned().? != want_d) { panic "gc co return"; }
 
 	i += 1;
 }

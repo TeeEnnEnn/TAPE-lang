@@ -73,7 +73,7 @@ var err_code = match (e) {
 };
 if (err_code != 1) { panic "exhaustive error no default failed"; }
 
-// 7. Error with default and union handling
+// 7. Error with default
 var err_with_default = match (e) {
     MyErr.Oops => give 100;,
     default => give 0;
@@ -119,16 +119,7 @@ var def_middle = match (code) {
 // code is 2, but default is before 2, so default matches (first catch-all wins)
 if (def_middle != 888) { panic "default middle failed"; }
 
-// 10. Union Int|MyErr requires default, Int literal alone not exhaustive
-var union_val: Int | MyErr = 1;
-var union_match = match (union_val) {
-    1 => give 10;,
-    MyErr.Oops => give 20;,
-    default => give 0;
-};
-if (union_match != 10) { panic "union match failed"; }
-
-// 11. Deep give detection (give inside if/block)
+// 10. Deep give detection (give inside if/block)
 var deep_give = match (code) {
     1 => {
         if (true) {
@@ -146,7 +137,7 @@ var deep_give = match (code) {
 };
 if (deep_give != 200) { panic "deep give failed"; }
 
-// 12. Nested match with give isolation (inner String, outer Int) - tests OP_GIVE_POP
+// 11. Nested match with give isolation (inner String, outer Int) - tests OP_GIVE_POP
 var nested = match (c) {
     Color.Red => give 1;,
     default => {
@@ -162,7 +153,7 @@ var nested = match (c) {
 };
 if (nested != 42) { panic "nested give isolation failed"; }
 
-// 13. Match as expression (in call, binary, return)
+// 12. Match as expression (in call, binary, return)
 fn id_fn(x: Int) -> Int {
     return match (x) {
         1 => give 10;,
@@ -186,14 +177,14 @@ var call_arg = takes_int(match (code) {
 });
 if (call_arg != 8) { panic "match as arg failed"; }
 
-// 14. Primitive match requires default, fallback via default
+// 13. Primitive match requires default, fallback via default
 var nil_fallback = match (99) {
     1 => give 1;,
     default => give 99;
 };
 if (nil_fallback != 99) { panic "fallback failed"; }
 
-// 14b. Statement-only match with no give returns Nil (still needs default for primitive)
+// 13b. Statement-only match with no give returns Nil (still needs default for primitive)
 var stmt_nil = 0;
 match (99) {
     1 => stmt_nil = 1;,
@@ -201,7 +192,7 @@ match (99) {
 };
 if (stmt_nil != 2) { panic "stmt fallback failed"; }
 
-// 15. Empty match on Never is exhaustive
+// 14. Empty match on Never is exhaustive
 fn never_match(x: Never) -> Int {
     match (x) {};
     return 42;
@@ -213,7 +204,7 @@ var empty_enum_check = match (c) {
 };
 if (empty_enum_check != 2) { panic "empty check failed"; }
 
-// 16. Match with panic arms satisfies completeness
+// 15. Match with panic arms satisfies completeness
 fn with_panic(c: Color) -> Int {
     match (c) {
         Color.Red => panic "red panic";,
@@ -224,7 +215,7 @@ fn with_panic(c: Color) -> Int {
 }
 if (with_panic(Color.Green) != 2) { panic "panic arm failed"; }
 
-// 17. Match inside coroutine with yield
+// 16. Match inside coroutine with yield
 co match_in_co(x: Int) -> (Int, Nil, Int) {
     var v = match (x) {
         1 => give 10;,
@@ -234,5 +225,5 @@ co match_in_co(x: Int) -> (Int, Nil, Int) {
     return v + 1;
 }
 var co_h = match_in_co(1);
-if (resume co_h != 10) { panic "match in co yield failed"; }
-if (resume co_h != 11) { panic "match in co return failed"; }
+if ((resume co_h).? != 10) { panic "match in co yield failed"; }
+if (resume co_h != nil or co_h.returned().? != 11) { panic "match in co return failed"; }

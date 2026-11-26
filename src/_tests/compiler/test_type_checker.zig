@@ -501,8 +501,11 @@ test "Type Checker - pub const import via use_decl hoist looks up from exports m
     var workspace = Workspace.init(allocator, io);
     defer workspace.deinit();
 
-    // Create and process the "lib" module with a pub var
-    const lib_mod = try Module.init("lib", "pub const x: Int = 42;", allocator, false);
+    // Create and process the "lib" module with a pub var.
+    // The workspace owns these strings and frees them in `deinit`.
+    const lib_path = try allocator.dupe(u8, "lib");
+    const lib_source = try allocator.dupe(u8, "pub const x: Int = 42;");
+    const lib_mod = try Module.init(lib_path, lib_source, allocator, false);
     var group = std.Io.Group.init;
     var parser = try Parser.init(allocator, &workspace, lib_mod, io, &group);
     lib_mod.ast = try parser.parse();
@@ -686,11 +689,12 @@ test "Type Checker - resume on non-coroutine" {
     try std.testing.expectError(TypeCheckerError.InvalidOperation, checkSource(allocator, "var x = 5; var y = resume x;"));
 }
 
-test "Type Checker - resume result is union of yield and return" {
+test "Type Checker - resume returns optional yield type independently of return type" {
     var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
     defer arena.deinit();
     const allocator = arena.allocator();
 
+    // Yield and return types are independent; resume distinguishes completion with nil.
     var result = try checkSource(allocator,
         \\co gen() -> (Int, Nil, String) { yield 1; return "done"; }
         \\var c = gen();
@@ -700,10 +704,8 @@ test "Type Checker - resume result is union of yield and return" {
     defer result.registry.deinit();
 
     const v_type = try result.env.lookup("v");
-    const info = result.registry.get_type_info(v_type);
-    try std.testing.expect(info == ._union);
-    try std.testing.expectEqual(@backingInt(PrimitiveType.Int), info._union.left);
-    try std.testing.expectEqual(@backingInt(PrimitiveType.String), info._union.right);
+    try std.testing.expect(result.registry.get_type_info(v_type) == .optional);
+    try std.testing.expectEqual(@backingInt(PrimitiveType.Int), result.registry.get_type_info(v_type).optional.inner);
 }
 
 test "Type Checker - coroutine member access" {
@@ -712,17 +714,21 @@ test "Type Checker - coroutine member access" {
     const allocator = arena.allocator();
 
     var result = try checkSource(allocator,
-        \\co f() -> (Int, Nil, Nil) { yield 1; }
+        \\co f() -> (Int, Nil, Int) { yield 1; return 2; }
         \\var c = f();
         \\var a: Bool = c.suspended;
         \\var b: Bool = c.finished;
         \\var d: Bool = c.running;
+        \\var e: ?Int = c.returned();
+        \\var finished_query: Bool = c.is_finished();
     );
     defer result.env.deinit();
     defer result.registry.deinit();
     try std.testing.expectEqual(@backingInt(PrimitiveType.Bool), try result.env.lookup("a"));
     try std.testing.expectEqual(@backingInt(PrimitiveType.Bool), try result.env.lookup("b"));
     try std.testing.expectEqual(@backingInt(PrimitiveType.Bool), try result.env.lookup("d"));
+    try std.testing.expect(result.registry.get_type_info(try result.env.lookup("e")) == .optional);
+    try std.testing.expectEqual(@backingInt(PrimitiveType.Bool), try result.env.lookup("finished_query"));
 
     // unknown member
     try std.testing.expectError(TypeCheckerError.InvalidMemberAccess, checkSource(allocator, "co f() -> (Int, Nil, Nil) { yield 1; } var c = f(); var x = c.nope;"));
@@ -744,9 +750,10 @@ test "Type Checker - nested coroutines" {
     const allocator = arena.allocator();
 
     // coroutine calling another coroutine
-    _ = try checkSource(allocator, "co inner() -> (Int, Nil, Nil) { yield 1; } co outer() -> (Int, Nil, Nil) { yield 1; var c = inner(); resume c; }");
+    // (nested coroutines must agree on yield/return types to be resumed)
+    _ = try checkSource(allocator, "co inner() -> (Int, Nil, Int) { yield 1; return 1; } co outer() -> (Int, Nil, Nil) { yield 1; var c = inner(); resume c; }");
     // coroutine declared inside a block within a coroutine
-    _ = try checkSource(allocator, "co outer() -> (Int, Nil, Nil) { yield 1; { co inner() -> (Int, Nil, Nil) { yield 2; } var c = inner(); resume c; } }");
+    _ = try checkSource(allocator, "co outer() -> (Int, Nil, Nil) { yield 1; { co inner() -> (Int, Nil, Int) { yield 2; return 2; } var c = inner(); resume c; } }");
 }
 
 test "Type Checker - coroutine type carries yield, resume_with, return" {
@@ -784,13 +791,13 @@ test "Type Checker - resume with value type checks" {
     const allocator = arena.allocator();
 
     // valid: passing a String to a coroutine whose resume_with is String
-    _ = try checkSource(allocator, "co f() -> (Int, String, String) { var r = yield 1; return r; } var c = f(); var x = resume c with \"hi\";");
+    _ = try checkSource(allocator, "co f() -> (String, String, String) { var r = yield \"yo\"; return r; } var c = f(); var x = resume c with \"hi\";");
     // mismatch: passing an Int when resume_with is String
     try std.testing.expectError(TypeCheckerError.TypeMismatch, checkSource(allocator, "co f() -> (Int, String, String) { var r = yield 1; return r; } var c = f(); var x = resume c with 5;"));
     // omitting the value passes nil, which must match resume_with
     try std.testing.expectError(TypeCheckerError.TypeMismatch, checkSource(allocator, "co f() -> (Int, String, Nil) { var r = yield 1; return nil; } var c = f(); var x = resume c;"));
     // nil resume_with accepts both omission and explicit nil
-    _ = try checkSource(allocator, "co f() -> (Int, Nil, Nil) { var r = yield 1; return nil; } var c = f(); var x = resume c;");
+    _ = try checkSource(allocator, "co f() -> (Int, Nil, Int) { var r = yield 1; return 1; } var c = f(); var x = resume c;");
 }
 
 test "Type Checker - yield produces nil" {
@@ -1019,4 +1026,274 @@ test "Workspace rejects an imported name that collides with a local declaration"
     try std.testing.expect(workspace.diagnostics.has_errors);
     try std.testing.expectEqual(@as(usize, 1), workspace.diagnostics.diagnostics.items.len);
     try std.testing.expectEqualStrings("Duplicate symbol", workspace.diagnostics.diagnostics.items[0].message);
+}
+
+// --- Optionals (?T) ---
+
+test "Type Checker - optional widening" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const allocator = arena.allocator();
+
+    // nil and T widen into ?T
+    _ = try checkSource(allocator, "var x: ?Int = nil;");
+    _ = try checkSource(allocator, "var x: ?Int = 5;");
+    _ = try checkSource(allocator, "var x: ?Int = 5; x = 6;");
+    _ = try checkSource(allocator, "var x: ?Int = 5; x = nil;");
+    // ?T -> ?T
+    _ = try checkSource(allocator, "var x: ?Int = 5; var y: ?Int = x; y = x;");
+    // inner types beyond primitives
+    _ = try checkSource(allocator, "var s: ?String = nil; s = \"hi\";");
+    _ = try checkSource(allocator, "var a: ?Array[Int] = nil; a = [1, 2];");
+    _ = try checkSource(allocator, "var b: ?Bool = nil; b = true;");
+    _ = try checkSource(allocator, "struct P { pub x: Int } var p: ?P = nil; p = new P { x = 1 };");
+}
+
+test "Type Checker - optionals do not implicitly narrow" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const allocator = arena.allocator();
+
+    try std.testing.expectError(TypeCheckerError.TypeMismatch, checkSource(allocator, "var x: ?Int = 5; var y: Int = x;"));
+    try std.testing.expectError(TypeCheckerError.TypeMismatch, checkSource(allocator, "var x: ?Int = 5; var y: Int = 0; y = x;"));
+    try std.testing.expectError(TypeCheckerError.TypeMismatch, checkSource(allocator, "var x: ?Int = \"nope\";"));
+    try std.testing.expectError(TypeCheckerError.TypeMismatch, checkSource(allocator, "var x: ?Int = 5; x = \"nope\";"));
+    try std.testing.expectError(TypeCheckerError.TypeMismatch, checkSource(allocator, "var x: ?Int = 5; var y: ?String = x;"));
+}
+
+test "Type Checker - optionals in function signatures" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const allocator = arena.allocator();
+
+    _ = try checkSource(allocator, "fn f(x: ?Int) -> ?Int { return x; } var a = f(nil); var b = f(5);");
+    _ = try checkSource(allocator, "fn f() -> ?Int { return nil; } fn g() -> ?Int { return 5; }");
+    try std.testing.expectError(TypeCheckerError.TypeMismatch, checkSource(allocator, "fn f(x: ?Int) -> ?Int { return x; } var a = f(\"s\");"));
+    try std.testing.expectError(TypeCheckerError.TypeMismatch, checkSource(allocator, "fn f() -> ?Int { return \"s\"; }"));
+}
+
+test "Type Checker - orelse on optionals" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const allocator = arena.allocator();
+
+    // ?T orelse T -> T
+    var result = try checkSource(allocator, "var x: ?Int = nil; var y: Int = x orelse 0;");
+    defer result.env.deinit();
+    defer result.registry.deinit();
+    try std.testing.expectEqual(@backingInt(PrimitiveType.Int), try result.env.lookup("y"));
+
+    // chaining: ?T orelse ?T -> ?T
+    var result2 = try checkSource(allocator, "var x: ?Int = nil; var z: ?Int = nil; var y: ?Int = x orelse z;");
+    defer result2.env.deinit();
+    defer result2.registry.deinit();
+    try std.testing.expectEqual(try result2.env.lookup("z"), try result2.env.lookup("y"));
+
+    // non-primitive inner type
+    _ = try checkSource(allocator, "var x: ?String = nil; var y: String = x orelse \"a\";");
+
+    // LHS must be an optional
+    try std.testing.expectError(TypeCheckerError.InvalidOperation, checkSource(allocator, "var x: Int = 1; var y = x orelse 0;"));
+    // fallback must match the inner type
+    try std.testing.expectError(TypeCheckerError.TypeMismatch, checkSource(allocator, "var x: ?Int = nil; var y: Int = x orelse \"s\";"));
+}
+
+test "Type Checker - optional unwrap yields the inner type" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const allocator = arena.allocator();
+
+    // `?T.?` is a plain `T`
+    var result = try checkSource(allocator, "var m: ?Int = 5; var y = m.?;");
+    defer result.env.deinit();
+    defer result.registry.deinit();
+    try std.testing.expectEqual(@backingInt(PrimitiveType.Int), try result.env.lookup("y"));
+
+    _ = try checkSource(allocator, "var s: ?String = nil; var y: String = s.?;");
+    _ = try checkSource(allocator, "var b: ?Bool = nil; var y: Bool = b.?;");
+    _ = try checkSource(allocator, "var a: ?Array[Int] = nil; var y: Int = a.?[0];");
+    _ = try checkSource(allocator, "struct P { pub x: Int } var p: ?P = nil; var y: Int = p.?.x;");
+    _ = try checkSource(allocator, "fn f() -> ?Int { return nil; } var y: Int = f().?;");
+
+    // The operand must really be an optional.
+    try std.testing.expectError(TypeCheckerError.TypeMismatch, checkSource(allocator, "var x: Int = 1; var y = x.?;"));
+    try std.testing.expectError(TypeCheckerError.TypeMismatch, checkSource(allocator, "var y = \"s\".?;"));
+}
+
+test "Type Checker - optional equality" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const allocator = arena.allocator();
+
+    _ = try checkSource(allocator, "var x: ?Int = nil; var a = x == nil; var b = x != nil;");
+    _ = try checkSource(allocator, "var x: ?Int = nil; var y: ?Int = 1; var a = x == y; var b = x != y;");
+    _ = try checkSource(allocator, "var x: ?Int = nil; var a = x == 5; var b = 5 != x;");
+
+    // different inner types are not comparable
+    try std.testing.expectError(TypeCheckerError.TypeMismatch, checkSource(allocator, "var x: ?Int = nil; var a = x == \"s\";"));
+    // ordering comparisons stay strict: no implicit unwrapping
+    try std.testing.expectError(TypeCheckerError.TypeMismatch, checkSource(allocator, "var x: ?Int = nil; var a = x < 5;"));
+}
+
+test "Type Checker - optional aliases and nested-optional bans" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const allocator = arena.allocator();
+
+    // an alias of an optional resolves to the same optional type
+    _ = try checkSource(allocator, "type MaybeInt = ?Int; var x: MaybeInt = nil; var y: ?Int = x; var z: MaybeInt = 5;");
+
+    // aliases cannot smuggle in ??T or ?Nil
+    try std.testing.expectError(error.NestedOptional, checkSource(allocator, "type MaybeInt = ?Int; var x: ?MaybeInt = nil;"));
+    try std.testing.expectError(error.OptionalOfNil, checkSource(allocator, "type NoVal = Nil; var x: ?NoVal = nil;"));
+}
+
+test "Type Checker - error unions accept success values and errors" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const allocator = arena.allocator();
+
+    // T -> E!T
+    _ = try checkSource(allocator, "error E { A } var x: E!Int = 5;");
+    // E -> E!T
+    _ = try checkSource(allocator, "error E { A } var x: E!Int = E.A;");
+    // `!T` accepts any error set and any success value
+    _ = try checkSource(allocator, "error E { A } var x: !Int = E.A; var y: !Int = 5;");
+    // Error unions widen into `!T` but keep their success type.
+    _ = try checkSource(allocator, "error E { A } fn f() -> E!Int { return E.A; } var x: E!Int = f(); var y: !Int = x;");
+    // Optional success types.
+    _ = try checkSource(allocator, "error E { A } var x: E!?Int = nil; var y: E!?Int = 5;");
+    // A union whose success arm is `Never` only ever yields errors, so it can
+    // flow into a union with a different success type.
+    _ = try checkSource(allocator, "error E { A } fn f() -> E!Never { return E.A; } var x: E!Int = f();");
+    // Assignment follows the same rules.
+    _ = try checkSource(allocator, "error E { A } var x: !Int = E.A; x = 5;");
+}
+
+test "Type Checker - error unions reject mismatches" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const allocator = arena.allocator();
+
+    // An error value is not a plain value.
+    try std.testing.expectError(TypeCheckerError.TypeMismatch, checkSource(allocator, "error E { A } var x: Int = E.A;"));
+    // The success side still has to match.
+    try std.testing.expectError(TypeCheckerError.TypeMismatch, checkSource(allocator, "error E { A } var x: E!Int = \"s\";"));
+    // A different error set is not assignable.
+    try std.testing.expectError(TypeCheckerError.TypeMismatch, checkSource(allocator, "error E { A } error F { B } var x: E!Int = F.B;"));
+    // `!T` means "any error", so it cannot narrow to a specific set.
+    try std.testing.expectError(TypeCheckerError.TypeMismatch, checkSource(allocator, "error E { A } fn f() -> !Int { return 1; } var x: E!Int = f();"));
+    // An error union is not implicitly unwrapped into its success type.
+    try std.testing.expectError(TypeCheckerError.TypeMismatch, checkSource(allocator, "error E { A } fn f() -> E!Int { return 1; } var x: Int = f();"));
+    // nil only fits an optional success type.
+    try std.testing.expectError(TypeCheckerError.TypeMismatch, checkSource(allocator, "error E { A } var x: E!Int = nil;"));
+}
+
+test "Type Checker - try unwraps error unions and propagates matching errors" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const allocator = arena.allocator();
+
+    _ = try checkSource(allocator, "error E { A } fn f() -> E!Int { return E.A; } fn g() -> E!Int { var x = try f(); return x; }");
+    // A concrete error set widens into `!T`.
+    _ = try checkSource(allocator, "error E { A } fn f() -> E!Int { return E.A; } fn g() -> !Int { var x = try f(); return x; }");
+    // `try` yields the success payload, not the error union.
+    _ = try checkSource(allocator, "error E { A } fn f() -> E!Int { return E.A; } fn g() -> E!Int { var x: Int = try f(); return x; }");
+}
+
+test "Type Checker - try errors" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const allocator = arena.allocator();
+
+    // `try` must be inside a function or coroutine.
+    try std.testing.expectError(TypeCheckerError.TryOutsideFunction, checkSource(allocator, "error E { A } fn f() -> E!Int { return E.A; } var x = try f();"));
+    // The enclosing function must return an error union.
+    try std.testing.expectError(TypeCheckerError.TypeMismatch, checkSource(allocator, "error E { A } fn f() -> E!Int { return E.A; } fn g() -> Int { var x = try f(); return x; }"));
+    // The operand must be an error union.
+    try std.testing.expectError(TypeCheckerError.TypeMismatch, checkSource(allocator, "error E { A } fn g() -> E!Int { var x = try 1; return E.A; }"));
+    // The operand's error set must match the enclosing function's error set.
+    try std.testing.expectError(TypeCheckerError.TypeMismatch, checkSource(allocator, "error E { A } error F { B } fn f() -> E!Int { return E.A; } fn g() -> F!Int { var x = try f(); return x; }"));
+    // `!T` cannot narrow into a specific error set.
+    try std.testing.expectError(TypeCheckerError.TypeMismatch, checkSource(allocator, "error E { A } fn f() -> !Int { return 1; } fn g() -> E!Int { var x = try f(); return x; }"));
+}
+
+test "Type Checker - catch uses the success type as its result" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const allocator = arena.allocator();
+
+    var result = try checkSource(allocator, "error E { A } fn f() -> E!Int { return E.A; } var x = f() catch 0;");
+    defer result.env.deinit();
+    defer result.registry.deinit();
+    try std.testing.expectEqual(@backingInt(PrimitiveType.Int), try result.env.lookup("x"));
+
+    // The fallback may be any value compatible with the success type.
+    _ = try checkSource(allocator, "error E { A } fn f() -> E!?Int { return nil; } var x: ?Int = f() catch nil;");
+    _ = try checkSource(allocator, "error E { A } fn f() -> E!Int { return E.A; } var x: Int = f() catch 1 + 2;");
+
+    // A `Never` success type can only fail, so the fallback determines the type.
+    var never_result = try checkSource(allocator, "error E { A } fn f() -> E!Never { return E.A; } var x = f() catch \"fallback\";");
+    defer never_result.env.deinit();
+    defer never_result.registry.deinit();
+    try std.testing.expectEqual(@backingInt(PrimitiveType.String), try never_result.env.lookup("x"));
+}
+
+test "Type Checker - catch errors" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const allocator = arena.allocator();
+
+    // The left side must be an error union.
+    try std.testing.expectError(TypeCheckerError.TypeMismatch, checkSource(allocator, "var x = 1 catch 0;"));
+    // The fallback must match the success type.
+    try std.testing.expectError(TypeCheckerError.TypeMismatch, checkSource(allocator, "error E { A } fn f() -> E!Int { return E.A; } var x = f() catch \"s\";"));
+    // An error value is not a valid fallback for a plain success type.
+    try std.testing.expectError(TypeCheckerError.TypeMismatch, checkSource(allocator, "error E { A } fn f() -> E!Int { return E.A; } var x = f() catch E.A;"));
+}
+
+// --- captures (`bind`) ---
+
+test "Type Checker - if/while captures bind the inner type" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const allocator = arena.allocator();
+
+    // the bound name has the optional's inner type
+    _ = try checkSource(allocator, "var m: ?Int = 1; if (m) bind (v) { var x: Int = v; }");
+    _ = try checkSource(allocator, "var m: ?String = nil; if (m) bind (v) { var x: String = v; }");
+    _ = try checkSource(allocator, "var m: ?Int = 1; while (m) bind (v) { var x: Int = v; break; }");
+
+    // aggregates can be mutated through the capture
+    _ = try checkSource(allocator, "var m: ?Array[Int] = nil; if (m) bind (a) { a[0] = 1; }");
+    _ = try checkSource(allocator, "struct P { pub x: Int } var m: ?P = nil; if (m) bind (p) { p.x = 1; }");
+
+    // else-if chains
+    _ = try checkSource(allocator, "var a: ?Int = nil; var b: ?Int = 1; if (a) bind (x) { x; } else if (b) bind (y) { y; } else { nil; }");
+}
+
+test "Type Checker - capture errors" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const allocator = arena.allocator();
+
+    // the capture is immutable
+    try std.testing.expectError(TypeCheckerError.ConstantReassignmentAttempt, checkSource(allocator, "var m: ?Int = 1; if (m) bind (v) { v = 2; }"));
+
+    // the bound type is not arbitrary
+    try std.testing.expectError(TypeCheckerError.TypeMismatch, checkSource(allocator, "var m: ?Int = 1; if (m) bind (v) { var x: String = v; }"));
+
+    // `bind` requires an optional condition
+    try std.testing.expectError(TypeCheckerError.TypeMismatch, checkSource(allocator, "var b = true; if (b) bind (v) { v; }"));
+    try std.testing.expectError(TypeCheckerError.TypeMismatch, checkSource(allocator, "while (true) bind (v) { break; }"));
+
+    // an optional is not a boolean condition on its own
+    try std.testing.expectError(TypeCheckerError.NonBooleanCondition, checkSource(allocator, "var m: ?Int = 1; if (m) { m; }"));
+
+    // the binding is scoped to the body: not after the `if`, not in `else`
+    try std.testing.expectError(TypeCheckerError.UndefinedSymbol, checkSource(allocator, "var m: ?Int = 1; if (m) bind (v) { v; } v;"));
+    try std.testing.expectError(TypeCheckerError.UndefinedSymbol, checkSource(allocator, "var m: ?Int = 1; if (m) bind (v) { v; } else { v; }"));
+
+    // ...nor after the `while`
+    try std.testing.expectError(TypeCheckerError.UndefinedSymbol, checkSource(allocator, "var m: ?Int = 1; while (m) bind (v) { break; } v;"));
 }

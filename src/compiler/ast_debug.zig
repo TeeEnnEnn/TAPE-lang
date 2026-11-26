@@ -43,12 +43,29 @@ pub fn print_node(node: *AST.ASTNode, depth: usize, indent_amt: usize) void {
             print_node(fn_decl.return_type_annotation, depth + 1, indent_amt);
             print_node(fn_decl.body, depth + 1, indent_amt);
         },
+        .native_fn_decl => |native_fn_decl| {
+            std.debug.print("NativeFnDecl: {s}", .{native_fn_decl.name.lexeme});
+            write_location(native_fn_decl.line, native_fn_decl.column);
+            if (native_fn_decl.modifier_pub) std.debug.print(" pub", .{});
+            std.debug.print("\n", .{});
+            for (native_fn_decl.params) |param| {
+                indent(depth + 1, indent_amt);
+                std.debug.print("Param: {s}\n", .{param.name.lexeme});
+                print_node(param.type_annotation, depth + 2, indent_amt);
+            }
+            print_node(native_fn_decl.return_type_annotation, depth + 1, indent_amt);
+        },
         .type_decl => |type_decl| {
             std.debug.print("TypeDecl: {s}", .{type_decl.name.lexeme});
             write_location(type_decl.line, type_decl.column);
             if (type_decl.modifier_pub) std.debug.print(" pub", .{});
             std.debug.print("\n", .{});
             print_node(type_decl.type_annotation, depth + 1, indent_amt);
+        },
+        .native_type_decl => |native_type_decl| {
+            std.debug.print("TypeDecl: {s}", .{native_type_decl.name.lexeme});
+            write_location(native_type_decl.line, native_type_decl.column);
+            if (native_type_decl.modifier_pub) std.debug.print(" pub", .{});
         },
         .struct_decl => |struct_decl| {
             std.debug.print("StructDecl: {s}", .{struct_decl.name.lexeme});
@@ -76,6 +93,26 @@ pub fn print_node(node: *AST.ASTNode, depth: usize, indent_amt: usize) void {
                 print_node(method.method, depth + 2, indent_amt);
             }
         },
+        .anon_struct_decl => |struct_decl| {
+            std.debug.print("AnonStructType", .{});
+            write_location(struct_decl.line, struct_decl.column);
+            std.debug.print("\n", .{});
+            for (struct_decl.fields) |field| {
+                indent(depth + 1, indent_amt);
+                std.debug.print("Field: {s}\n", .{field.name.lexeme});
+                print_node(field.type_annotation, depth + 2, indent_amt);
+            }
+        },
+        .anon_struct_instance => |instance| {
+            std.debug.print("AnonStructInstance", .{});
+            write_location(instance.line, instance.column);
+            std.debug.print("\n", .{});
+            for (instance.fields) |field| {
+                indent(depth + 1, indent_amt);
+                std.debug.print("Field: {s}\n", .{field.name.lexeme});
+                print_node(field.value, depth + 2, indent_amt);
+            }
+        },
         .enum_decl => |enum_decl| {
             std.debug.print("EnumDecl: {s}", .{enum_decl.name.lexeme});
             write_location(enum_decl.line, enum_decl.column);
@@ -83,7 +120,8 @@ pub fn print_node(node: *AST.ASTNode, depth: usize, indent_amt: usize) void {
             std.debug.print("\n", .{});
             for (enum_decl.variants) |variant| {
                 indent(depth + 1, indent_amt);
-                std.debug.print("Variant: {s}\n", .{variant.lexeme});
+                std.debug.print("Variant: {s}\n", .{variant.variant_name.lexeme});
+                if (variant.type_annotation) |payload_type| print_node(payload_type, depth + 2, indent_amt);
             }
         },
         .error_decl => |error_decl| {
@@ -159,6 +197,20 @@ pub fn print_node(node: *AST.ASTNode, depth: usize, indent_amt: usize) void {
             for (array_expr.elements) |element| {
                 print_node(element, depth + 1, indent_amt);
             }
+        },
+        .optional_type => |optional_type| {
+            std.debug.print("OptionalType:\n", .{});
+            print_node(optional_type.inner, depth + 1, indent_amt);
+        },
+        .error_union_type => |error_union_type| {
+            std.debug.print("ErrorUnionType:\n", .{});
+            if (error_union_type.err) |err| {
+                print_node(err, depth + 1, indent_amt);
+            } else {
+                indent(depth + 1, indent_amt);
+                std.debug.print("InferredErrorSet\n", .{});
+            }
+            print_node(error_union_type.ok, depth + 1, indent_amt);
         },
         .array_type => |array_type| {
             std.debug.print("ArrayType:\n", .{});
@@ -237,6 +289,12 @@ pub fn print_node(node: *AST.ASTNode, depth: usize, indent_amt: usize) void {
             std.debug.print("\n", .{});
             print_node(dot_expr.expr, depth + 1, indent_amt);
         },
+        .optional_unwrap_expr => |optional_unwrap| {
+            std.debug.print("OptionalUnwrapExpr:", .{});
+            write_location(optional_unwrap.line, optional_unwrap.column);
+            std.debug.print("\n", .{});
+            print_node(optional_unwrap.expr, depth + 1, indent_amt);
+        },
         .expr_stmt => |expr_stmt| {
             std.debug.print("ExprStmt:", .{});
             write_location(expr_stmt.line, expr_stmt.column);
@@ -249,7 +307,7 @@ pub fn print_node(node: *AST.ASTNode, depth: usize, indent_amt: usize) void {
             std.debug.print("\n", .{});
         },
         .float_type => {
-            std.debug.print("FloatType:\n", .{});
+            std.debug.print("FloatType\n", .{});
         },
         .fn_type => |fn_type| {
             std.debug.print("FnType:\n", .{});
@@ -286,14 +344,6 @@ pub fn print_node(node: *AST.ASTNode, depth: usize, indent_amt: usize) void {
         },
         .identifier_type => |identifier_type| {
             std.debug.print("IdentifierType: {s}", .{identifier_type.name.lexeme});
-            if (identifier_type.generic_args) |args| {
-                std.debug.print("<", .{});
-                for (args, 0..) |arg, i| {
-                    if (i > 0) std.debug.print(", ", .{});
-                    print_node(arg, 0, indent_amt);
-                }
-                std.debug.print(">", .{});
-            }
             std.debug.print("\n", .{});
         },
         .index_expr => |index_expr| {
@@ -308,6 +358,12 @@ pub fn print_node(node: *AST.ASTNode, depth: usize, indent_amt: usize) void {
             write_location(if_stmt.line, if_stmt.column);
             std.debug.print("\n", .{});
             print_node(if_stmt.condition, depth + 1, indent_amt);
+            if (if_stmt.capture) |c| {
+                indent(depth + 1, indent_amt);
+                std.debug.print("Capture: {s}", .{c.name.lexeme});
+                write_location(c.line, c.column);
+                std.debug.print("\n", .{});
+            }
             print_node(if_stmt.then_branch, depth + 1, indent_amt);
             if (if_stmt.else_branch) |else_branch| {
                 print_node(else_branch, depth + 1, indent_amt);
@@ -319,7 +375,7 @@ pub fn print_node(node: *AST.ASTNode, depth: usize, indent_amt: usize) void {
             std.debug.print("\n", .{});
         },
         .int_type => {
-            std.debug.print("IntType:\n", .{});
+            std.debug.print("IntType\n", .{});
         },
         .match_expr => |match_expr| {
             std.debug.print("MatchExpr:", .{});
@@ -330,11 +386,15 @@ pub fn print_node(node: *AST.ASTNode, depth: usize, indent_amt: usize) void {
                 indent(depth + 1, indent_amt);
                 std.debug.print("Case:\n", .{});
                 print_node(case.pattern, depth + 2, indent_amt);
+                if (case.payload_binding) |binding| {
+                    indent(depth + 2, indent_amt);
+                    std.debug.print("Bind: {s}\n", .{binding.name.lexeme});
+                }
                 print_node(case.stmt, depth + 2, indent_amt);
             }
         },
         .never_type => {
-            std.debug.print("NeverType:\n", .{});
+            std.debug.print("NeverType\n", .{});
         },
         .new_expr => |new_expr| {
             std.debug.print("NewExpr: {s}", .{new_expr.struct_name.lexeme});
@@ -350,13 +410,19 @@ pub fn print_node(node: *AST.ASTNode, depth: usize, indent_amt: usize) void {
             std.debug.print("NilLit:\n", .{});
         },
         .nil_type => {
-            std.debug.print("NilType:\n", .{});
+            std.debug.print("NilType\n", .{});
         },
         .panic_stmt => |panic_stmt| {
             std.debug.print("PanicStmt:", .{});
             write_location(panic_stmt.line, panic_stmt.column);
             std.debug.print("\n", .{});
             print_node(panic_stmt.expr, depth + 1, indent_amt);
+        },
+        .defer_stmt => |defer_stmt| {
+            std.debug.print("{s}:", .{if (defer_stmt.is_errdefer) "ErrDeferStmt" else "DeferStmt"});
+            write_location(defer_stmt.line, defer_stmt.column);
+            std.debug.print("\n", .{});
+            print_node(defer_stmt.body, depth + 1, indent_amt);
         },
         .range_type => |range_type| {
             std.debug.print("RangeType:\n", .{});
@@ -386,7 +452,7 @@ pub fn print_node(node: *AST.ASTNode, depth: usize, indent_amt: usize) void {
             std.debug.print("\n", .{});
         },
         .string_type => {
-            std.debug.print("StringType:\n", .{});
+            std.debug.print("StringType\n", .{});
         },
         .table_expr => |table_expr| {
             std.debug.print("TableExpr:", .{});
@@ -434,16 +500,17 @@ pub fn print_node(node: *AST.ASTNode, depth: usize, indent_amt: usize) void {
             std.debug.print("\n", .{});
             print_node(unary_expr.expr, depth + 1, indent_amt);
         },
-        .union_type => |union_type| {
-            std.debug.print("UnionType:\n", .{});
-            print_node(union_type.left, depth + 1, indent_amt);
-            print_node(union_type.right, depth + 1, indent_amt);
-        },
         .while_stmt => |while_stmt| {
             std.debug.print("WhileStmt:", .{});
             write_location(while_stmt.line, while_stmt.column);
             std.debug.print("\n", .{});
             print_node(while_stmt.condition, depth + 1, indent_amt);
+            if (while_stmt.capture) |c| {
+                indent(depth + 1, indent_amt);
+                std.debug.print("Capture: {s}", .{c.name.lexeme});
+                write_location(c.line, c.column);
+                std.debug.print("\n", .{});
+            }
             print_node(while_stmt.body, depth + 1, indent_amt);
         },
         .yield_expr => |yield_expr| {

@@ -33,7 +33,7 @@ error_decl      ::= 'error' IDENTIFIER '{' enum_variants? '}'
 
 /* --- Types --- */
 type_expr       ::= IDENTIFIER ('[' type_expr (',' type_expr)* ']')?  /* Generics e.g. Array[Int] */
-                  | type_expr '|' type_expr                           /* Unions e.g. Float | Nil */
+                  | '?' type_expr                                     /* Optional e.g. ?Int (no nested ??T) */
                   | 'Nil' | 'Bool' | 'Int' | 'Float' | 'String'
                   | 'Never'
                   | 'Array' '[' type_expr ']'
@@ -63,9 +63,13 @@ statement       ::= expression ';'
                   | 'panic' expression ';'
                   | 'break' ';'
                   | 'continue' ';'
-                  | 'while' '(' expression ')' block
+                  | 'while' '(' expression ')' capture? block
                   | 'for' '(' 'var' IDENTIFIER 'in' expression ')' block
-                  | 'if' expression block ('else' (block | 'if' expression block))*
+                  | 'if' '(' expression ')' capture? block ('else' (block | 'if' '(' expression ')' capture? block))*
+
+/* Optional capture for `if`/`while`: the condition must be `?T` and the name
+   is bound to the inner `T` inside the body. */
+capture         ::= 'bind' '(' IDENTIFIER ')'
 
 block           ::= '{' declaration* '}'
 
@@ -95,6 +99,7 @@ postfix         ::= primary (
                       '(' arguments? ')'            /* Call */
                     | '[' expression ']'            /* Index */
                     | '.' IDENTIFIER                /* Field, instance method, or type-associated function */
+                    | '.?'                         /* Optional unwrap */
                   )*
 
 primary         ::= IDENTIFIER

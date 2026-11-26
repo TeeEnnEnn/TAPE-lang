@@ -69,7 +69,7 @@ test "TypeRegistry - Table Types" {
     try std.testing.expectEqual(table_id, table_id2);
 }
 
-test "TypeRegistry - Union Types" {
+test "TypeRegistry - Optional Types" {
     var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
     defer arena.deinit();
     const allocator = arena.allocator();
@@ -77,9 +77,68 @@ test "TypeRegistry - Union Types" {
     var registry = try TypeRegistry.init(allocator);
     defer registry.deinit();
 
-    const union_id = try resolveType(allocator, &registry, "Int | Nil");
-    const union_id2 = try resolveType(allocator, &registry, "Int | Nil");
-    try std.testing.expectEqual(union_id, union_id2);
+    const opt_int = try resolveType(allocator, &registry, "?Int");
+    const opt_int2 = try resolveType(allocator, &registry, "?Int");
+    // Deduplication: the same inner type resolves to the same TypeId
+    try std.testing.expectEqual(opt_int, opt_int2);
+    try std.testing.expect(opt_int != @backingInt(PrimitiveType.Int));
+
+    // `?Nil` and nested optionals are also rejected at the registry level so
+    // aliases cannot smuggle them past the parser.
+    try std.testing.expectError(error.OptionalOfNil, registry.add_optional_type(@backingInt(PrimitiveType.Nil)));
+    try std.testing.expectError(error.NestedOptional, registry.add_optional_type(opt_int));
+}
+
+test "Type Registry - Unwrap optional" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const allocator = arena.allocator();
+
+    var registry = try TypeRegistry.init(allocator);
+    defer registry.deinit();
+
+    const opt_int = try resolveType(allocator, &registry, "?Int");
+    const opt_string = try resolveType(allocator, &registry, "?String");
+
+    try std.testing.expectEqual(@backingInt(PrimitiveType.Int), registry.unwrap_optional(opt_int).?);
+    try std.testing.expectEqual(@backingInt(PrimitiveType.String), registry.unwrap_optional(opt_string).?);
+
+    // Non-optional types have nothing to unwrap.
+    try std.testing.expect(registry.unwrap_optional(@backingInt(PrimitiveType.Int)) == null);
+    try std.testing.expect(registry.unwrap_optional(@backingInt(PrimitiveType.Nil)) == null);
+}
+
+test "TypeRegistry - Error Union Types" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const allocator = arena.allocator();
+
+    var registry = try TypeRegistry.init(allocator);
+    defer registry.deinit();
+
+    var variants = [_][]const u8{ "A", "B" };
+    const err_id = try registry.add_error_type("E", &variants, "test");
+
+    const eu = try resolveType(allocator, &registry, "E!Int");
+    const eu2 = try resolveType(allocator, &registry, "E!Int");
+    // Deduplication: structural equality, not just spelling, keys the type.
+    try std.testing.expectEqual(eu, eu2);
+    const info = registry.get_type_info(eu);
+    try std.testing.expect(info == .error_union);
+    try std.testing.expectEqual(err_id, info.error_union.err.?);
+    try std.testing.expectEqual(@backingInt(PrimitiveType.Int), info.error_union.ok);
+
+    // `!T` has an inferred error set.
+    const any_eu = try resolveType(allocator, &registry, "!String");
+    const any_info = registry.get_type_info(any_eu);
+    try std.testing.expect(any_info == .error_union);
+    try std.testing.expect(any_info.error_union.err == null);
+    try std.testing.expectEqual(@backingInt(PrimitiveType.String), any_info.error_union.ok);
+
+    // The error position must be an error set.
+    try std.testing.expectError(error.NonErrorUnionError, registry.add_error_union_type(@backingInt(PrimitiveType.Int), @backingInt(PrimitiveType.Int)));
+    // Error unions cannot be nested in the success position.
+    try std.testing.expectError(error.NestedErrorUnion, registry.add_error_union_type(err_id, eu));
 }
 
 test "TypeRegistry - Function Types" {

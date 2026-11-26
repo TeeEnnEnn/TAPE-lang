@@ -8,6 +8,7 @@ const Module = @import("workspace.zig").Module;
 const Workspace = @import("workspace.zig").Workspace;
 const WorkspaceGlobals = @import("workspace.zig").WorkspaceGlobals;
 const ConstValue = @import("const_value.zig").ConstValue;
+const Natives = @import("../natives/natives.zig").Natives;
 
 pub const BindingResolverError = error{
     MissingDeclRef,
@@ -35,6 +36,8 @@ pub const BindingKind = enum {
     constant,
     /// a compiled function
     function_constant,
+    /// native function implemented in zig. Slot is its index in the native table
+    native,
 };
 
 pub const BindingInfo = struct {
@@ -63,9 +66,9 @@ pub const FunctionInfo = struct {
 
 pub const MemberInfo = union(enum) {
     field: struct { index: u16, type_id: AST.TypeId },
-    method: struct { index: u16, type_id: AST.TypeId, takes_receiver: bool = true },
+    method: struct { index: u16, type_id: AST.TypeId, takes_receiver: bool = true, is_native: bool = false },
     tuple_index: struct { index: u16, type_id: AST.TypeId },
-    enum_variant: struct { index: u16, type_id: AST.TypeId },
+    enum_variant: struct { index: u16, type_id: AST.TypeId, payload_type: ?AST.TypeId, has_payloads: bool },
     error_variant: struct { index: u16, type_id: AST.TypeId },
     struct_init: struct { type_id: AST.TypeId, field_indexes: []u16 },
 };
@@ -76,6 +79,7 @@ pub const BindingResolution = struct {
     identifier_bindings: std.AutoHashMap(*AST.ASTNode, BindingInfo),
     function_infos: std.AutoHashMap(*AST.ASTNode, FunctionInfo),
     scope_pop_counts: std.AutoHashMap(*AST.ASTNode, u16),
+    match_case_pop_counts: std.AutoHashMap(*AST.MatchCase, u16),
     member_infos: std.AutoHashMap(*AST.ASTNode, MemberInfo),
     function_constants_count: u16,
     globals_count: u16,
@@ -87,6 +91,7 @@ pub const BindingResolution = struct {
             .identifier_bindings = std.AutoHashMap(*AST.ASTNode, BindingInfo).init(allocator),
             .function_infos = std.AutoHashMap(*AST.ASTNode, FunctionInfo).init(allocator),
             .scope_pop_counts = std.AutoHashMap(*AST.ASTNode, u16).init(allocator),
+            .match_case_pop_counts = std.AutoHashMap(*AST.MatchCase, u16).init(allocator),
             .member_infos = std.AutoHashMap(*AST.ASTNode, MemberInfo).init(allocator),
             .function_constants_count = 0,
             .globals_count = 0,
@@ -111,6 +116,7 @@ pub const BindingResolution = struct {
         self.identifier_bindings.deinit();
         self.function_infos.deinit();
         self.scope_pop_counts.deinit();
+        self.match_case_pop_counts.deinit();
         self.member_infos.deinit();
     }
 };
@@ -122,8 +128,9 @@ const FunctionContext = struct {
     max_local_count: u16,
     upvalues: std.ArrayList(UpvalueInfo),
     upvalue_slots: std.AutoHashMap(AST.DeclRef, u16),
+    enclosing_defer_scope: ?*std.ArrayList(*AST.DeferStmt),
 
-    fn init(allocator: std.mem.Allocator, function_node: *AST.ASTNode, param_count: u16) FunctionContext {
+    fn init(allocator: std.mem.Allocator, function_node: *AST.ASTNode, param_count: u16, defer_scope: ?*std.ArrayList(*AST.DeferStmt)) FunctionContext {
         return .{
             .function_node = function_node,
             .param_count = param_count,
@@ -131,6 +138,7 @@ const FunctionContext = struct {
             .max_local_count = param_count,
             .upvalues = .empty,
             .upvalue_slots = std.AutoHashMap(AST.DeclRef, u16).init(allocator),
+            .enclosing_defer_scope = defer_scope,
         };
     }
 
@@ -149,6 +157,7 @@ pub const BindingResolver = struct {
     result: BindingResolution,
     functions: std.ArrayList(FunctionContext),
     local_owners: std.AutoHashMap(AST.DeclRef, *AST.ASTNode),
+    current_defer_scope: ?*std.ArrayList(*AST.DeferStmt) = null,
 
     pub fn init(
         allocator: std.mem.Allocator,
@@ -166,6 +175,7 @@ pub const BindingResolver = struct {
             .result = BindingResolution.init(allocator),
             .functions = .empty,
             .local_owners = std.AutoHashMap(AST.DeclRef, *AST.ASTNode).init(allocator),
+            .current_defer_scope = null,
         };
     }
 
@@ -232,17 +242,27 @@ pub const BindingResolver = struct {
                     }
                 },
                 .fn_decl => |decl| try self.register_function_node(decl_node, decl.name.lexeme, try self.functionTypeId(decl_node, null)),
+                .native_fn_decl => |decl| try self.register_native_function_node(decl_node, decl),
                 .co_decl => |decl| try self.register_function_node(decl_node, decl.name.lexeme, try self.coroutineTypeId(decl_node, null)),
                 .struct_decl => |decl| {
                     // structs are pre hoisted
                     // This allows structs to reference other structs
 
                     const struct_type_id = try self.named_typeid(decl.name.lexeme, decl_node);
-                    try self.registerComptimeNode(decl_node, decl.name.lexeme, struct_type_id);
+                    try self.register_comptime_node(decl_node, decl.name.lexeme, struct_type_id);
 
                     // pre hoist methods (allocating function slots)
                     for (decl.methods) |method| {
                         const ref: AST.DeclRef = .{ .node = method.method };
+                        if (method.method.* == .native_fn_decl) {
+                            const native_decl = method.method.native_fn_decl;
+                            const native_slot = Natives.find(native_decl.name.lexeme) orelse {
+                                try self.fail("No native implementation found.", "If this error is unexpected. Please reach out to a maintainer.", native_decl.line, native_decl.column);
+                                return BindingResolverError.MissingBinding;
+                            };
+                            try self.putDeclBinding(ref, .{ .decl = ref, .kind = .native, .slot = native_slot, .type_id = try self.native_function_type_id(native_decl, struct_type_id), .name = method.name.lexeme, .module_path = self.module.filepath });
+                            continue;
+                        }
                         try self.putDeclBinding(ref, .{
                             .decl = ref,
                             .kind = .function_constant,
@@ -253,9 +273,10 @@ pub const BindingResolver = struct {
                         });
                     }
                 },
-                .type_decl => |decl| try self.registerComptimeNode(decl_node, decl.name.lexeme, try self.named_typeid(decl.name.lexeme, decl_node)),
-                .enum_decl => |decl| try self.registerComptimeNode(decl_node, decl.name.lexeme, try self.named_typeid(decl.name.lexeme, decl_node)),
-                .error_decl => |decl| try self.registerComptimeNode(decl_node, decl.name.lexeme, try self.named_typeid(decl.name.lexeme, decl_node)),
+                .type_decl => |decl| try self.register_comptime_node(decl_node, decl.name.lexeme, try self.named_typeid(decl.name.lexeme, decl_node)),
+                .native_type_decl => |decl| try self.register_comptime_node(decl_node, decl.name.lexeme, try self.named_typeid(decl.name.lexeme, decl_node)),
+                .enum_decl => |decl| try self.register_comptime_node(decl_node, decl.name.lexeme, try self.named_typeid(decl.name.lexeme, decl_node)),
+                .error_decl => |decl| try self.register_comptime_node(decl_node, decl.name.lexeme, try self.named_typeid(decl.name.lexeme, decl_node)),
                 else => {},
             }
         }
@@ -264,7 +285,7 @@ pub const BindingResolver = struct {
     fn resolveNode(self: *BindingResolver, node: *AST.ASTNode, direct_program_decl: bool) BindingResolverError!void {
         switch (node.*) {
             .program => try self.resolveProgram(node),
-            .use_decl, .type_decl, .enum_decl, .error_decl => {},
+            .use_decl, .type_decl, .enum_decl, .error_decl, .native_type_decl, .native_fn_decl, .anon_struct_decl => {},
             .struct_decl => |decl| try self.resolveStructDecl(node, decl),
             .var_decl => |decl| try self.resolve_var_decl(node, decl, direct_program_decl),
             .fn_decl => |decl| try self.resolveFnDecl(node, decl, direct_program_decl, false),
@@ -276,15 +297,30 @@ pub const BindingResolver = struct {
             .break_stmt, .continue_stmt => {},
             .while_stmt => |stmt| {
                 try self.resolveNode(stmt.condition, false);
-                try self.resolveNode(stmt.body, false);
+                if (stmt.capture) |cap| {
+                    try self.resolveCaptureScope(node, cap, stmt.body);
+                } else {
+                    try self.resolveNode(stmt.body, false);
+                }
             },
             .for_stmt => |stmt| try self.resolveForStmt(node, stmt),
             .if_stmt => |stmt| {
                 try self.resolveNode(stmt.condition, false);
-                try self.resolveNode(stmt.then_branch, false);
+                if (stmt.capture) |cap| {
+                    try self.resolveCaptureScope(node, cap, stmt.then_branch);
+                } else {
+                    try self.resolveNode(stmt.then_branch, false);
+                }
                 if (stmt.else_branch) |branch| try self.resolveNode(branch, false);
             },
             .panic_stmt => |stmt| try self.resolveNode(stmt.expr, false),
+            .defer_stmt => |stmt| {
+                if (self.current_defer_scope) |scope| {
+                    try scope.append(self.allocator, stmt);
+                } else {
+                    try self.resolveNode(stmt.body, false);
+                }
+            },
             .expr_stmt => |stmt| try self.resolveNode(stmt.expr, false),
             .assign_expr => |expr| {
                 try self.resolveNode(expr.left, false);
@@ -309,6 +345,9 @@ pub const BindingResolver = struct {
                 try self.resolveNode(expr.expr, false);
                 try self.resolve_dot_expression(node, expr);
             },
+            .optional_unwrap_expr => |expr| {
+                try self.resolveNode(expr.expr, false);
+            },
             .try_expr => |expr| try self.resolveNode(expr.expr, false),
             .resume_expr => |expr| {
                 try self.resolveNode(expr.expr, false);
@@ -321,18 +360,70 @@ pub const BindingResolver = struct {
                 for (expr.values) |value| try self.resolveNode(value, false);
             },
             .new_expr => |expr| try self.resolveNewExpr(node, expr),
+            .anon_struct_instance => |expr| {
+                try self.resolve_anon_struct_instance(expr, node);
+            },
             .match_expr => |expr| {
-                try self.resolveNode(expr.expr, false);
-                for (expr.cases) |case| {
-                    try self.resolveNode(case.pattern, false);
-                    try self.resolveNode(case.stmt, false);
-                }
+                try self.resolve_match_expression(expr, node);
             },
             .anon_fn_expr => |expr| try self.resolveAnonFnExpr(node, expr),
             .anon_co_expr => |expr| try self.resolveAnonCoExpr(node, expr),
             .int_lit, .float_lit, .str_lit, .bool_lit, .nil_lit, .default_pat => {},
-            .nil_type, .int_type, .float_type, .string_type, .bool_type, .array_type, .table_type, .range_type, .never_type, .tuple_type, .identifier_type, .fn_type, .co_type, .union_type => {},
+            .nil_type,
+            .int_type,
+            .float_type,
+            .string_type,
+            .bool_type,
+            .optional_type,
+            .error_union_type,
+            .array_type,
+            .table_type,
+            .range_type,
+            .never_type,
+            .tuple_type,
+            .identifier_type,
+            .fn_type,
+            .co_type,
+            => {},
         }
+    }
+
+    fn resolve_anon_struct_instance(self: *BindingResolver, expr: *AST.AnonStructInstance, node: *AST.ASTNode) BindingResolverError!void {
+        for (expr.fields) |field| try self.resolveNode(field.value, false);
+        const type_info = self.registry.get_type_info(expr.resolved_type);
+        if (type_info == ._struct) {
+            const indexes = try self.allocator.alloc(u16, expr.fields.len);
+            errdefer self.allocator.free(indexes);
+            for (expr.fields, 0..) |provided, i| {
+                for (type_info._struct.fields, 0..) |field, j| {
+                    if (std.mem.eql(u8, field.name, provided.name.lexeme)) {
+                        indexes[i] = @intCast(j);
+                        break;
+                    }
+                }
+            }
+            try self.result.member_infos.put(node, .{ .struct_init = .{ .type_id = expr.resolved_type, .field_indexes = indexes } });
+        }
+    }
+
+    fn resolve_match_expression(self: *BindingResolver, expr: *AST.MatchExpr, node: *AST.ASTNode) BindingResolverError!void {
+        try self.resolveNode(expr.expr, false);
+        const floor = self.current_function().local_count;
+        try self.registerLocal(.{ .node = node }, "$match", resolved_type_of(expr.expr));
+        for (expr.cases) |case| {
+            const arm_floor = self.current_function().local_count;
+            if (case.payload_binding) |binding| {
+                try self.registerLocal(.{ .capture = binding }, binding.name.lexeme, binding.resolved_type);
+            }
+            try self.resolveNode(case.pattern, false);
+            try self.resolveNode(case.stmt, false);
+            const arm_pop = self.current_function().local_count - arm_floor;
+            try self.result.match_case_pop_counts.put(case, arm_pop);
+            self.current_function().local_count = arm_floor;
+        }
+        const match_pop = self.current_function().local_count - floor;
+        try self.result.scope_pop_counts.put(node, match_pop);
+        self.current_function().local_count = floor;
     }
 
     fn resolveStructDecl(self: *BindingResolver, node: *AST.ASTNode, decl: *AST.StructDecl) BindingResolverError!void {
@@ -435,7 +526,37 @@ pub const BindingResolver = struct {
 
     fn resolveBlock(self: *BindingResolver, node: *AST.ASTNode) !void {
         const floor = self.current_function().local_count;
+        var pending_defers: std.ArrayList(*AST.DeferStmt) = .empty;
+        defer pending_defers.deinit(self.allocator);
+        const previous_defer_scope = self.current_defer_scope;
+        self.current_defer_scope = &pending_defers;
+        defer self.current_defer_scope = previous_defer_scope;
         for (node.block_stmt.stmts) |stmt| try self.resolveNode(stmt, false);
+        for (pending_defers.items) |defer_stmt| try self.resolveNode(defer_stmt.body, false);
+        const current = self.current_function();
+        const pop_count = current.local_count - floor;
+        try self.result.scope_pop_counts.put(node, pop_count);
+        current.local_count = floor;
+    }
+
+    /// Resolves the body of an `if`/`while` that has a `bind` capture.
+    ///
+    /// The capture occupies the stack slot the condition value was evaluated
+    /// into, and the body's locals live above it. The slot must therefore be
+    /// registered *before* resolving the body, and the capture stays in scope
+    /// only for the body.
+    fn resolveCaptureScope(self: *BindingResolver, node: *AST.ASTNode, cap: *AST.CaptureBindingExpr, body: *AST.ASTNode) !void {
+        const floor = self.current_function().local_count;
+        var pending_defers: std.ArrayList(*AST.DeferStmt) = .empty;
+        defer pending_defers.deinit(self.allocator);
+        const previous_defer_scope = self.current_defer_scope;
+        self.current_defer_scope = &pending_defers;
+        defer self.current_defer_scope = previous_defer_scope;
+
+        try self.registerLocal(.{ .capture = cap }, cap.name.lexeme, cap.resolved_type);
+        try self.resolveNode(body, false);
+        for (pending_defers.items) |defer_stmt| try self.resolveNode(defer_stmt.body, false);
+
         const current = self.current_function();
         const pop_count = current.local_count - floor;
         try self.result.scope_pop_counts.put(node, pop_count);
@@ -502,83 +623,57 @@ pub const BindingResolver = struct {
             };
             receiver_is_type_symbol = recv_binding.kind == .comptime_type;
         }
-        switch (self.registry.get_type_info(obj_type)) {
-            .tuple => |items| {
-                const index = std.fmt.parseInt(u16, expr.member.lexeme, 10) catch return;
-                if (index < items.len) {
-                    try self.result.member_infos.put(node, .{ .tuple_index = .{ .index = index, .type_id = items[index] } });
-                    return;
-                }
+        const member = self.registry.resolve_member(obj_type, expr.member.lexeme) orelse return;
+        switch (member) {
+            .tuple_element => |element| {
+                try self.result.member_infos.put(node, .{ .tuple_index = .{ .index = element.index, .type_id = element.type_id } });
             },
-            ._struct => |info| {
+            .struct_field => |resolved| {
                 if (receiver_is_type_symbol) {
-                    for (info.methods) |method| {
-                        if (!std.mem.eql(u8, method.name, expr.member.lexeme)) continue;
-                        const takes_receiver = switch (method.method_node.*) { .fn_decl => |d| d.params.len > 0 and std.mem.eql(u8, d.params[0].name.lexeme, "self"), .co_decl => |d| d.params.len > 0 and std.mem.eql(u8, d.params[0].name.lexeme, "self"), else => false };
-                        if (takes_receiver) {
-                            try self.fail("Instance method requires a value receiver.", "Call this method on a struct instance; only associated functions can be called through the type name.", expr.line, expr.column);
-                            return BindingResolverError.MissingBinding;
-                        }
-                        const binding = self.find_binding(.{ .node = method.method_node }) orelse return BindingResolverError.MissingBinding;
-                        try self.result.member_infos.put(node, .{ .method = .{ .index = binding.slot, .type_id = method.type, .takes_receiver = false } });
-                        return;
-                    }
                     try self.fail("Struct has no associated function with this name.", null, expr.line, expr.column);
                     return BindingResolverError.MissingBinding;
                 }
-                // instance fields are stored on the struct instance
-                // so the instance_field_index is the index into that array of values at runtime
-                var instance_field_index: u16 = 0;
-                for (info.fields) |field| {
-                    if (std.mem.eql(u8, field.name, expr.member.lexeme)) {
-                        try self.result.member_infos.put(node, .{ .field = .{ .index = instance_field_index, .type_id = field.type } });
-                        return;
-                    }
-                    instance_field_index += 1;
-                }
-
-                // methods are stored in the function constants array
-                for (info.methods) |method| {
-                    if (std.mem.eql(u8, method.name, expr.member.lexeme)) {
-                        const method_binding = self.find_binding(.{ .node = method.method_node }) orelse {
-                            try self.fail("Method binding not found.", null, expr.line, expr.column);
-                            return BindingResolverError.MissingBinding;
-                        };
-                        const takes_receiver = switch (method.method_node.*) { .fn_decl => |d| d.params.len > 0 and std.mem.eql(u8, d.params[0].name.lexeme, "self"), .co_decl => |d| d.params.len > 0 and std.mem.eql(u8, d.params[0].name.lexeme, "self"), else => false };
-                        if (!takes_receiver) {
-                            try self.fail("Associated function requires the struct type.", "Call this function through the struct name, not an instance.", expr.line, expr.column);
-                            return BindingResolverError.MissingBinding;
-                        }
-                        try self.result.member_infos.put(node, .{ .method = .{ .index = method_binding.slot, .type_id = method.type, .takes_receiver = true } });
-                        return;
-                    }
-                }
+                // Instance fields are stored on the struct instance, so the index
+                // is the index into that array of values at runtime.
+                try self.result.member_infos.put(node, .{ .field = .{ .index = resolved.index, .type_id = resolved.field.type_id } });
             },
-            ._enum => |info| {
+            .struct_method => |resolved| {
+                const method = resolved.method;
+                if (receiver_is_type_symbol) {
+                    if (method.takes_receiver) {
+                        try self.fail("Instance method requires a value receiver.", "Call this method on a struct instance; only associated functions can be called through the type name.", expr.line, expr.column);
+                        return BindingResolverError.MissingBinding;
+                    }
+                    const binding = self.find_binding(.{ .node = method.method_node }) orelse return BindingResolverError.MissingBinding;
+                    try self.result.member_infos.put(node, .{ .method = .{ .index = binding.slot, .type_id = method.type_id, .takes_receiver = false, .is_native = method.kind == .NATIVE } });
+                    return;
+                }
+                // methods are stored in the function constants array
+                if (!method.takes_receiver) {
+                    try self.fail("Associated function requires the struct type.", "Call this function through the struct name, not an instance.", expr.line, expr.column);
+                    return BindingResolverError.MissingBinding;
+                }
+                const method_binding = self.find_binding(.{ .node = method.method_node }) orelse {
+                    try self.fail("Method binding not found.", null, expr.line, expr.column);
+                    return BindingResolverError.MissingBinding;
+                };
+                try self.result.member_infos.put(node, .{ .method = .{ .index = method_binding.slot, .type_id = method.type_id, .takes_receiver = true, .is_native = method.kind == .NATIVE } });
+            },
+            .enum_variant => |resolved| {
                 if (!receiver_is_type_symbol) {
                     try self.fail("Variant access requires the type name.", "Enum variants are constants; write `EnumType.<variant>`, not `value.<variant>`.", expr.line, expr.column);
                     return BindingResolverError.MissingBinding;
                 }
-                for (info.variants, 0..) |variant, index| {
-                    if (std.mem.eql(u8, variant, expr.member.lexeme)) {
-                        try self.result.member_infos.put(node, .{ .enum_variant = .{ .index = @intCast(index), .type_id = obj_type } });
-                        return;
-                    }
-                }
+                try self.result.member_infos.put(node, .{ .enum_variant = .{ .index = resolved.index, .type_id = obj_type, .payload_type = resolved.variant.type_id, .has_payloads = resolved.has_payloads } });
             },
-            ._error => |info| {
+            .error_variant => |resolved| {
                 if (!receiver_is_type_symbol) {
                     try self.fail("Variant access requires the type name.", "Error variants are constants; write `ErrorType.<variant>`, not `value.<variant>`.", expr.line, expr.column);
                     return BindingResolverError.MissingBinding;
                 }
-                for (info.variants, 0..) |variant, index| {
-                    if (std.mem.eql(u8, variant, expr.member.lexeme)) {
-                        try self.result.member_infos.put(node, .{ .error_variant = .{ .index = @intCast(index), .type_id = obj_type } });
-                        return;
-                    }
-                }
+                try self.result.member_infos.put(node, .{ .error_variant = .{ .index = resolved.index, .type_id = obj_type } });
             },
-            else => {},
+            .coroutine_method, .coroutine_state => {},
         }
     }
 
@@ -654,18 +749,6 @@ pub const BindingResolver = struct {
         });
     }
 
-    fn registerGlobalNode(self: *BindingResolver, node: *AST.ASTNode, name: []const u8, type_id: AST.TypeId) !void {
-        const ref: AST.DeclRef = .{ .node = node };
-        try self.putDeclBinding(ref, .{
-            .kind = .global,
-            .slot = try self.next_global(),
-            .type_id = type_id,
-            .decl = ref,
-            .name = name,
-            .module_path = self.module.filepath,
-        });
-    }
-
     fn register_function_node(self: *BindingResolver, node: *AST.ASTNode, name: []const u8, type_id: AST.TypeId) !void {
         const ref: AST.DeclRef = .{ .node = node };
         try self.putDeclBinding(ref, .{
@@ -678,7 +761,24 @@ pub const BindingResolver = struct {
         });
     }
 
-    fn registerComptimeNode(self: *BindingResolver, node: *AST.ASTNode, name: []const u8, type_id: AST.TypeId) !void {
+    fn register_native_function_node(self: *BindingResolver, node: *AST.ASTNode, decl: *AST.NativeFnDecl) !void {
+        const index = Natives.find(decl.name.lexeme) orelse {
+            try self.fail("No native implementation found.", "If this error is unexpected. Please reach out to a maintainer.", decl.line, decl.column);
+            return BindingResolverError.MissingBinding;
+        };
+
+        const ref: AST.DeclRef = .{ .node = node };
+        try self.putDeclBinding(ref, .{
+            .kind = .native,
+            .slot = index,
+            .type_id = try self.native_function_type_id(decl, null),
+            .decl = ref,
+            .name = decl.name.lexeme,
+            .module_path = self.module.filepath,
+        });
+    }
+
+    fn register_comptime_node(self: *BindingResolver, node: *AST.ASTNode, name: []const u8, type_id: AST.TypeId) !void {
         const ref: AST.DeclRef = .{ .node = node };
         try self.putDeclBinding(ref, .{
             .kind = .comptime_type,
@@ -697,11 +797,13 @@ pub const BindingResolver = struct {
     }
 
     fn begin_function(self: *BindingResolver, node: *AST.ASTNode, param_count: u16) !void {
-        try self.functions.append(self.allocator, FunctionContext.init(self.allocator, node, param_count));
+        try self.functions.append(self.allocator, FunctionContext.init(self.allocator, node, param_count, self.current_defer_scope));
+        self.current_defer_scope = null;
     }
 
     fn end_function(self: *BindingResolver) !void {
         var function_context = self.functions.pop().?;
+        self.current_defer_scope = function_context.enclosing_defer_scope;
         const upvalues = try function_context.upvalues.toOwnedSlice(self.allocator);
         errdefer self.allocator.free(upvalues);
         function_context.upvalue_slots.deinit();
@@ -771,8 +873,24 @@ pub const BindingResolver = struct {
         return switch (node.*) {
             .fn_decl => self.functionTypeId(node, self_type),
             .co_decl => self.coroutineTypeId(node, self_type),
+            .native_fn_decl => self.native_function_type_id(node.native_fn_decl, self_type),
             else => BindingResolverError.MissingBinding,
         };
+    }
+
+    fn native_function_type_id(self: *BindingResolver, decl: *const AST.NativeFnDecl, self_type: ?AST.TypeId) !AST.TypeId {
+        var param_types: std.ArrayList(AST.TypeId) = .empty;
+        defer param_types.deinit(self.allocator);
+        const has_self = self_type != null and decl.params.len > 0 and std.mem.eql(u8, decl.params[0].name.lexeme, "self");
+        if (has_self) try param_types.append(self.allocator, self_type.?);
+        for (decl.params, 0..) |param, index| {
+            if (std.mem.eql(u8, param.name.lexeme, "self")) {
+                if (!has_self or index != 0 or param.type_annotation.* != .nil_type) return BindingResolverError.MissingBinding;
+                continue;
+            }
+            try param_types.append(self.allocator, try self.registry.resolve(param.type_annotation));
+        }
+        return self.registry.add_function_type(try param_types.toOwnedSlice(self.allocator), try self.registry.resolve(decl.return_type_annotation));
     }
 
     /// Add a function's type id to the registry
@@ -862,6 +980,8 @@ pub const BindingResolver = struct {
 
 fn resolved_type_of(node: *AST.ASTNode) AST.TypeId {
     return switch (node.*) {
+        .block_stmt => |v| v.resolved_type,
+        .if_stmt => |v| v.resolved_type,
         .assign_expr => |v| v.resolved_type,
         .identifier_expr => |v| v.resolved_type,
         .unary_expr => |v| v.resolved_type,
@@ -870,12 +990,14 @@ fn resolved_type_of(node: *AST.ASTNode) AST.TypeId {
         .index_expr => |v| v.resolved_type,
         .array_expr => |v| v.resolved_type,
         .dot_expr => |v| v.resolved_type,
+        .optional_unwrap_expr => |v| v.resolved_type,
         .try_expr => |v| v.resolved_type,
         .resume_expr => |v| v.resolved_type,
         .group_expr => |v| v.resolved_type,
         .tuple_expr => |v| v.resolved_type,
         .table_expr => |v| v.resolved_type,
         .new_expr => |v| v.resolved_type,
+        .anon_struct_instance => |v| v.resolved_type,
         .match_expr => |v| v.resolved_type,
         .anon_fn_expr => |v| v.resolved_type,
         .anon_co_expr => |v| v.resolved_type,
@@ -919,6 +1041,7 @@ fn node_position(node: *AST.ASTNode) NodePosition {
         .index_expr => |v| .{ .line = v.line, .column = v.column },
         .array_expr => |v| .{ .line = v.line, .column = v.column },
         .dot_expr => |v| .{ .line = v.line, .column = v.column },
+        .optional_unwrap_expr => |v| .{ .line = v.line, .column = v.column },
         .try_expr => |v| .{ .line = v.line, .column = v.column },
         .resume_expr => |v| .{ .line = v.line, .column = v.column },
         .group_expr => |v| .{ .line = v.line, .column = v.column },

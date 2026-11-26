@@ -1,6 +1,5 @@
 //! Code generation for the TAPE compiler.
 //! Because the contents of the chunk are vulnerable to garbage collection, all allocations should be guarded with stack push/pops
-//! NOTE: This file is mostly AI Generated. I will remove this comment when I am comfortable to take ownership of this file's contents
 
 const std = @import("std");
 
@@ -14,6 +13,8 @@ const AST = @import("ast.zig");
 const BindingResolver = @import("binding_resolver.zig");
 const Module = @import("workspace.zig").Module;
 const TypeRegistry = @import("type_registry.zig");
+const TypeRegistryImpl = TypeRegistry.TypeRegistry;
+const Natives = @import("../natives/natives.zig").Natives;
 const ConstValue = @import("const_value.zig").ConstValue;
 
 const INTERNAL_ERROR_MESSAGE = "This is an internal error. Please write a bug report.";
@@ -35,17 +36,19 @@ pub const LoopContext = struct {
     continue_jumps: std.ArrayList(usize),
     /// Local variable count at the loop's outer boundary - for cleanup
     scope_local_floor: u16,
+    defer_scope_floor: u16,
     /// where to jump for `continue` statement (null => forward jump to be patched, used by `for` loops)
     continue_target: ?u32,
     /// parent loop
     enclosing: ?*LoopContext,
 
-    pub fn init(allocator: std.mem.Allocator, scope_floor: u16, continue_target: ?u32, enclosing: ?*LoopContext) LoopContext {
+    pub fn init(allocator: std.mem.Allocator, scope_floor: u16, defer_floor: u16, continue_target: ?u32, enclosing: ?*LoopContext) LoopContext {
         return .{
             .allocator = allocator,
             .break_jumps = .empty,
             .continue_jumps = .empty,
             .scope_local_floor = scope_floor,
+            .defer_scope_floor = defer_floor,
             .continue_target = continue_target,
             .enclosing = enclosing,
         };
@@ -64,6 +67,7 @@ pub const FunctionCompiler = struct {
     /// The enclosing function
     enclosing: ?*FunctionCompiler,
     current_locals_count: u16 = 0,
+    defer_scope_depth: u16 = 0,
 
     pub fn init(allocator: std.mem.Allocator, function: *Entities.ObjectFunction, enclosing: ?*FunctionCompiler, initial_locals: u16) !*FunctionCompiler {
         const compiler = try allocator.create(FunctionCompiler);
@@ -78,6 +82,21 @@ pub const FunctionCompiler = struct {
 
     pub fn chunk(self: *FunctionCompiler) *Chunk {
         return &self.function.chunk;
+    }
+};
+
+pub const GiveContext = struct {
+    allocator: std.mem.Allocator,
+    end_jumps: std.ArrayList(usize),
+    local_floor: u16,
+    defer_scope_floor: u16,
+
+    fn init(allocator: std.mem.Allocator, local_floor: u16, defer_scope_floor: u16) GiveContext {
+        return .{ .allocator = allocator, .end_jumps = .empty, .local_floor = local_floor, .defer_scope_floor = defer_scope_floor };
+    }
+
+    fn deinit(self: *GiveContext) void {
+        self.end_jumps.deinit(self.allocator);
     }
 };
 
@@ -100,6 +119,7 @@ pub const CodeGenerator = struct {
     module: *Module,
     ///The stack of currently executing loop
     current_loop: ?*LoopContext = null,
+    current_give: ?*GiveContext = null,
 
     pub fn init(
         allocator: std.mem.Allocator,
@@ -145,6 +165,8 @@ pub const CodeGenerator = struct {
     /// Only covers expression nodes
     pub fn resolve_typeof(node: *AST.ASTNode) AST.TypeId {
         return switch (node.*) {
+            .block_stmt => |n| n.resolved_type,
+            .if_stmt => |n| n.resolved_type,
             .int_lit => |n| n.resolved_type,
             .float_lit => |n| n.resolved_type,
             .str_lit => |n| n.resolved_type,
@@ -157,12 +179,14 @@ pub const CodeGenerator = struct {
             .call_expr => |n| n.resolved_type,
             .index_expr => |n| n.resolved_type,
             .dot_expr => |n| n.resolved_type,
+            .optional_unwrap_expr => |n| n.resolved_type,
             .group_expr => |n| n.resolved_type,
             .tuple_expr => |n| n.resolved_type,
             .table_expr => |n| n.resolved_type,
             .array_expr => |n| n.resolved_type,
             .new_expr => |n| n.resolved_type,
             .match_expr => |n| n.resolved_type,
+            .anon_struct_instance => |n| n.resolved_type,
             .anon_fn_expr => |n| n.resolved_type,
             .anon_co_expr => |n| n.resolved_type,
             .try_expr => |n| n.resolved_type,
@@ -187,6 +211,9 @@ pub const CodeGenerator = struct {
             .fn_decl => |decl| {
                 try self.generate_callable_decl(node, @ptrCast(decl), AST.FnDecl);
             },
+            .native_fn_decl => {
+                // nothing to do - fully comptime
+            },
             .co_decl => |decl| {
                 try self.generate_callable_decl(node, @ptrCast(decl), AST.CoDecl);
             },
@@ -203,15 +230,35 @@ pub const CodeGenerator = struct {
             .error_decl => {
                 // nothing to do - fully comptime
             },
+            .type_decl => {
+                // nothing to do - fully comptime
+            },
+            .native_type_decl => {
+                // nothing to do - fully comptime
+            },
             .expr_stmt => |stmt| {
                 try self.generate_expression(stmt.expr);
                 try self.current.chunk().write_opcode(.OP_POP, stmt.line);
             },
 
             .block_stmt => |stmt| {
+                var give_context: GiveContext = undefined;
+                const previous_give = self.current_give;
+                if (stmt.is_expr) {
+                    give_context = GiveContext.init(self.allocator, self.current.current_locals_count, self.current.defer_scope_depth);
+                    self.current_give = &give_context;
+                }
+                defer self.current_give = previous_give;
+                defer if (stmt.is_expr) give_context.deinit();
+
+                try self.current.chunk().write_opcode(.OP_DEFER_SCOPE, stmt.line);
+                self.current.defer_scope_depth += 1;
                 for (stmt.stmts) |blk_stmt| {
                     try self.generate_node(blk_stmt);
                 }
+
+                try self.emit_defer_run(0, stmt.line);
+                self.current.defer_scope_depth -= 1;
 
                 const pop_count = self.binding_resolution.scope_pop_counts.get(node) orelse {
                     self.fail("Block scope has no pop count in binding resolution.", null, stmt.line, stmt.column);
@@ -219,55 +266,106 @@ pub const CodeGenerator = struct {
                 };
 
                 if (pop_count > 0) {
-                    if (stmt_has_give(node)) {
-                        try self.current.chunk().write_opcode(.OP_GIVE_POP, stmt.line);
-                        try self.current.chunk().write_u16(pop_count, stmt.line);
-                    } else {
-                        try self.current.chunk().write_opcode(.OP_POP_N, stmt.line);
-                        try self.current.chunk().write_u16(pop_count, stmt.line);
-                    }
+                    try self.current.chunk().write_opcode(.OP_POP_N, stmt.line);
+                    try self.current.chunk().write_u16(pop_count, stmt.line);
                     self.current.current_locals_count -= pop_count;
                 }
+                if (stmt.is_expr) for (give_context.end_jumps.items) |jump| try self.patch_jump(jump);
             },
 
             .if_stmt => |stmt| {
-                try self.generate_expression(stmt.condition);
-                const then_jump = try self.emit_jump(.OP_JUMP_IF_FALSE, stmt.line);
-                try self.current.chunk().write_opcode(.OP_POP, stmt.line);
-                try self.generate_node(stmt.then_branch);
-                if (stmt.else_branch) |else_branch| {
-                    const else_jump = try self.emit_jump(.OP_JUMP, stmt.line);
-                    try self.patch_jump(then_jump);
-                    try self.current.chunk().write_opcode(.OP_POP, stmt.line);
-                    try self.generate_node(else_branch);
-                    try self.patch_jump(else_jump);
-                    return;
+                var give_context: GiveContext = undefined;
+                const previous_give = self.current_give;
+                if (stmt.is_expr) {
+                    give_context = GiveContext.init(self.allocator, self.current.current_locals_count, self.current.defer_scope_depth);
+                    self.current_give = &give_context;
                 }
-                const end_jump = try self.emit_jump(.OP_JUMP, stmt.line);
-                try self.patch_jump(then_jump);
-                try self.current.chunk().write_opcode(.OP_POP, stmt.line);
-                try self.patch_jump(end_jump);
+                defer self.current_give = previous_give;
+                defer if (stmt.is_expr) give_context.deinit();
+
+                try self.generate_expression(stmt.condition);
+
+                if (stmt.capture) |_| {
+                    const nil_jump = try self.emit_jump(.OP_JUMP_IF_NIL, stmt.line);
+                    const pop_count = self.binding_resolution.scope_pop_counts.get(node) orelse {
+                        self.fail("Capture scope has no pop count in binding resolution.", null, stmt.line, stmt.column);
+                        return CodeGeneratorError.MissingBinding;
+                    };
+
+                    // The condition value is already sitting in the capture's stack slot.
+                    self.current.current_locals_count += 1;
+                    try self.current.chunk().write_opcode(.OP_DEFER_SCOPE, stmt.line);
+                    self.current.defer_scope_depth += 1;
+                    try self.generate_node(stmt.then_branch);
+                    try self.emit_defer_run(0, stmt.line);
+                    self.current.defer_scope_depth -= 1;
+                    self.current.current_locals_count -= 1;
+                    try self.emit_local_cleanup(stmt.then_branch, pop_count, stmt.line);
+
+                    const end_jump = try self.emit_jump(.OP_JUMP, stmt.line);
+
+                    try self.patch_jump(nil_jump);
+                    try self.current.chunk().write_opcode(.OP_POP, stmt.line); // drop nil
+
+                    if (stmt.else_branch) |else_branch| try self.generate_node(else_branch);
+                    try self.patch_jump(end_jump);
+                } else {
+                    const then_jump = try self.emit_jump(.OP_JUMP_IF_FALSE, stmt.line);
+                    try self.current.chunk().write_opcode(.OP_POP, stmt.line);
+                    try self.generate_node(stmt.then_branch);
+                    if (stmt.else_branch) |else_branch| {
+                        const else_jump = try self.emit_jump(.OP_JUMP, stmt.line);
+                        try self.patch_jump(then_jump);
+                        try self.current.chunk().write_opcode(.OP_POP, stmt.line);
+                        try self.generate_node(else_branch);
+                        try self.patch_jump(else_jump);
+                    } else {
+                        const end_jump = try self.emit_jump(.OP_JUMP, stmt.line);
+                        try self.patch_jump(then_jump);
+                        try self.current.chunk().write_opcode(.OP_POP, stmt.line);
+                        try self.patch_jump(end_jump);
+                    }
+                }
+                if (stmt.is_expr) for (give_context.end_jumps.items) |jump| try self.patch_jump(jump);
             },
 
             .while_stmt => |stmt| {
                 const loop_start = self.current.chunk().code.items.len;
 
-                var loop_context = LoopContext.init(self.allocator, self.current.current_locals_count, @intCast(loop_start), self.current_loop);
+                var loop_context = LoopContext.init(self.allocator, self.current.current_locals_count, self.current.defer_scope_depth, @intCast(loop_start), self.current_loop);
                 defer loop_context.deinit();
-
                 const prev_loop = self.current_loop;
                 self.current_loop = &loop_context;
                 defer self.current_loop = prev_loop;
-
                 try self.generate_expression(stmt.condition);
-                const exit_jump = try self.emit_jump(.OP_JUMP_IF_FALSE, stmt.line);
-                try self.current.chunk().write_opcode(.OP_POP, stmt.line);
+                if (stmt.capture) |_| {
+                    const exit_jump = try self.emit_jump(.OP_JUMP_IF_NIL, stmt.line);
+                    const pop_count = self.binding_resolution.scope_pop_counts.get(node) orelse {
+                        self.fail("Capture scope has no pop count in binding resolution.", null, stmt.line, stmt.column);
+                        return CodeGeneratorError.MissingBinding;
+                    };
 
-                try self.generate_node(stmt.body);
-                try self.emit_loop(@intCast(loop_start), stmt.line);
-                try self.patch_jump(exit_jump);
-                try self.current.chunk().write_opcode(.OP_POP, stmt.line);
+                    self.current.current_locals_count += 1; // for the captured value
+                    try self.current.chunk().write_opcode(.OP_DEFER_SCOPE, stmt.line);
+                    self.current.defer_scope_depth += 1;
+                    try self.generate_node(stmt.body);
+                    try self.emit_defer_run(0, stmt.line);
+                    self.current.defer_scope_depth -= 1;
+                    self.current.current_locals_count -= 1;
+                    try self.emit_local_cleanup(stmt.body, pop_count, stmt.line);
 
+                    try self.emit_loop(@intCast(loop_start), stmt.line);
+                    try self.patch_jump(exit_jump);
+                    try self.current.chunk().write_opcode(.OP_POP, stmt.line); // drop nil
+                } else {
+                    const exit_jump = try self.emit_jump(.OP_JUMP_IF_FALSE, stmt.line);
+                    try self.current.chunk().write_opcode(.OP_POP, stmt.line);
+
+                    try self.generate_node(stmt.body);
+                    try self.emit_loop(@intCast(loop_start), stmt.line);
+                    try self.patch_jump(exit_jump);
+                    try self.current.chunk().write_opcode(.OP_POP, stmt.line);
+                }
                 // patching all break statements
                 for (loop_context.break_jumps.items) |break_jump| {
                     try self.patch_jump(break_jump);
@@ -280,6 +378,7 @@ pub const CodeGenerator = struct {
                 } else {
                     try self.current.chunk().write_opcode(.OP_NIL, stmt.line);
                 }
+                try self.emit_defer_runs(self.current.defer_scope_depth, 2, stmt.line);
                 try self.current.chunk().write_opcode(.OP_RETURN, stmt.line);
             },
 
@@ -304,7 +403,7 @@ pub const CodeGenerator = struct {
 
                 // set up loop context
                 const body_start: u32 = @intCast(self.current.chunk().code.items.len);
-                var loop_context = LoopContext.init(self.allocator, self.current.current_locals_count, null, self.current_loop);
+                var loop_context = LoopContext.init(self.allocator, self.current.current_locals_count, self.current.defer_scope_depth, null, self.current_loop);
                 defer loop_context.deinit();
 
                 const prev_loop = self.current_loop;
@@ -351,7 +450,16 @@ pub const CodeGenerator = struct {
 
             .give_stmt => |stmt| {
                 try self.generate_expression(stmt.expr);
+                const give_context = self.current_give orelse return CodeGeneratorError.InvalidPosition;
+                const locals_to_pop = self.current.current_locals_count - give_context.local_floor;
+                try self.emit_defer_runs(self.current.defer_scope_depth - give_context.defer_scope_floor, 3, stmt.line);
+                try self.current.chunk().write_opcode(.OP_GIVE_POP, stmt.line);
+                try self.current.chunk().write_u16(locals_to_pop, stmt.line);
+                const end_jump = try self.emit_jump(.OP_JUMP, stmt.line);
+                try give_context.end_jumps.append(self.allocator, end_jump);
             },
+
+            .defer_stmt => |stmt| try self.generate_defer_statement(stmt),
 
             .break_stmt => |stmt| {
                 const loop_context = self.current_loop orelse {
@@ -360,6 +468,7 @@ pub const CodeGenerator = struct {
                 };
 
                 const locals_to_pop = self.current.current_locals_count - loop_context.scope_local_floor;
+                try self.emit_defer_runs(self.current.defer_scope_depth - loop_context.defer_scope_floor, 0, stmt.line);
                 if (locals_to_pop > 0) {
                     try self.current.chunk().write_opcode(.OP_POP_N, stmt.line);
                     try self.current.chunk().write_u16(locals_to_pop, stmt.line);
@@ -376,6 +485,7 @@ pub const CodeGenerator = struct {
                 };
 
                 const locals_to_pop = self.current.current_locals_count - loop_context.scope_local_floor;
+                try self.emit_defer_runs(self.current.defer_scope_depth - loop_context.defer_scope_floor, 0, stmt.line);
                 if (locals_to_pop > 0) {
                     try self.current.chunk().write_opcode(.OP_POP_N, stmt.line);
                     try self.current.chunk().write_u16(locals_to_pop, stmt.line);
@@ -423,11 +533,18 @@ pub const CodeGenerator = struct {
         // Start nested function with its own parameter count:
         const new_function = try FunctionCompiler.init(self.allocator, function_object, self.current, binding.param_count);
         const enclosing = self.current;
+        const enclosing_give = self.current_give;
         self.current = new_function;
+        self.current_give = null;
+        defer self.current_give = enclosing_give;
 
         // Generate body for the inner function
+        try self.current.chunk().write_opcode(.OP_DEFER_SCOPE, callable_decl.line);
+        self.current.defer_scope_depth += 1;
         try self.generate_node(callable_decl.body);
 
+        try self.emit_defer_run(0, callable_decl.line);
+        self.current.defer_scope_depth -= 1;
         try self.current.chunk().write_opcode(.OP_NIL, callable_decl.line);
         try self.current.chunk().write_opcode(.OP_RETURN, callable_decl.line);
 
@@ -568,6 +685,7 @@ pub const CodeGenerator = struct {
 
     fn generate_expression(self: *CodeGenerator, node: *AST.ASTNode) CodeGeneratorError!void {
         switch (node.*) {
+            .block_stmt, .if_stmt => try self.generate_node(node),
             .int_lit => |lit| {
                 try self.current.chunk().emit_constant(.{ .int = lit.value }, lit.line);
             },
@@ -615,6 +733,33 @@ pub const CodeGenerator = struct {
             .identifier_expr => |expr| try self.generate_identifier_expr(node, expr),
             .assign_expr => |expr| try self.generate_assignment_expression(expr),
             .call_expr => |expr| {
+                if (expr.expr.* == .dot_expr) {
+                    if (self.binding_resolution.member_infos.get(expr.expr)) |member| {
+                        if (member == .enum_variant and member.enum_variant.payload_type != null) {
+                            if (expr.args.len != 1) return CodeGeneratorError.UnsupportedNode;
+                            try self.generate_expression(expr.args[0]);
+                            try self.current.chunk().write_opcode(.OP_NEW_ENUM, expr.line);
+                            try self.current.chunk().write_u32(member.enum_variant.type_id, expr.line);
+                            try self.current.chunk().write_u32(@intCast(member.enum_variant.index), expr.line);
+                            try self.current.chunk().write_u16(1, expr.line);
+                            return;
+                        }
+                    }
+                }
+                if (expr.expr.* == .dot_expr) {
+                    const dot = expr.expr.dot_expr;
+                    if (self.registry.get_type_info(resolve_typeof(dot.expr)) == .coroutine and
+                        (std.mem.eql(u8, dot.member.lexeme, "returned") or std.mem.eql(u8, dot.member.lexeme, "is_finished")))
+                    {
+                        const native_name = if (std.mem.eql(u8, dot.member.lexeme, "returned")) "coroutine_returned" else "coroutine_is_finished";
+                        const native_slot = Natives.find(native_name) orelse return CodeGeneratorError.MissingBinding;
+                        try self.generate_expression(dot.expr);
+                        try self.current.chunk().write_opcode(.OP_CALL_NATIVE, expr.line);
+                        try self.current.chunk().write_u16(1, expr.line);
+                        try self.current.chunk().write_u16(native_slot, expr.line);
+                        return;
+                    }
+                }
                 // instance method call
                 if (expr.expr.* == .dot_expr) {
                     if (self.binding_resolution.member_infos.get(expr.expr)) |member_info| {
@@ -622,6 +767,16 @@ pub const CodeGenerator = struct {
                             const method_slot = member_info.method.index;
                             const takes_receiver = member_info.method.takes_receiver;
                             const dot = expr.expr.dot_expr;
+
+                            if (member_info.method.is_native) {
+                                if (takes_receiver) try self.generate_expression(dot.expr);
+                                for (expr.args) |arg| try self.generate_expression(arg);
+                                try self.current.chunk().write_opcode(.OP_CALL_NATIVE, expr.line);
+                                const arg_count = expr.args.len + @as(usize, if (takes_receiver) 1 else 0);
+                                try self.current.chunk().write_u16(@intCast(arg_count), expr.line);
+                                try self.current.chunk().write_u16(method_slot, expr.line);
+                                return;
+                            }
 
                             try self.current.chunk().write_opcode(.OP_LOAD_FUNCTION_CONSTANT, expr.line);
                             try self.current.chunk().write_u16(method_slot, expr.line);
@@ -647,36 +802,52 @@ pub const CodeGenerator = struct {
                     }
                 }
 
-                // Regular function call
-                try self.generate_expression(expr.expr); // the closure
-                for (expr.args) |arg| {
-                    try self.generate_expression(arg);
-                }
-
                 const indexed_type = resolve_typeof(expr.expr);
-                const opcode: Opcode = switch (self.registry.get_type_info(indexed_type)) {
-                    .function => .OP_CALL,
-                    .coroutine => .OP_COROUTINE,
-                    else => return CodeGeneratorError.UnsupportedOperandType,
-                };
+                const type_info = self.registry.get_type_info(indexed_type);
 
-                try self.current.chunk().write_opcode(opcode, expr.line);
-                try self.current.chunk().write_u16(@intCast(expr.args.len), expr.line);
+                const native_binding = if (expr.expr.* == .identifier_expr)
+                    self.binding_resolution.identifier_bindings.get(expr.expr)
+                else
+                    null;
+
+                if (native_binding != null and native_binding.?.kind == .native) {
+                    for (expr.args) |arg| {
+                        try self.generate_expression(arg);
+                    }
+                    try self.current.chunk().write_opcode(.OP_CALL_NATIVE, expr.line);
+                    try self.current.chunk().write_u16(@intCast(expr.args.len), expr.line);
+                    try self.current.chunk().write_u16(native_binding.?.slot, expr.line);
+                } else {
+                    // Regular function call
+
+                    try self.generate_expression(expr.expr); // the closure
+                    for (expr.args) |arg| {
+                        try self.generate_expression(arg);
+                    }
+
+                    const opcode: Opcode = switch (type_info) {
+                        .function => .OP_CALL,
+                        .coroutine => .OP_COROUTINE,
+                        else => return CodeGeneratorError.UnsupportedOperandType,
+                    };
+
+                    try self.current.chunk().write_opcode(opcode, expr.line);
+                    try self.current.chunk().write_u16(@intCast(expr.args.len), expr.line);
+                }
             },
             .index_expr => |expr| {
                 try self.generate_expression(expr.expr);
                 try self.generate_expression(expr.index);
 
                 const indexed_type = resolve_typeof(expr.expr);
-                const opcode: Opcode = switch (self.registry.get_type_info(indexed_type)) {
-                    .array => .OP_INDEX_ARRAY,
-                    .table => .OP_INDEX_TABLE,
-                    .primitive => |prim| switch (prim) {
-                        .String => .OP_INDEX_STRING,
-                        else => return CodeGeneratorError.UnsupportedOperandType,
-                    },
-                    else => return CodeGeneratorError.UnsupportedOperandType,
-                };
+                const opcode: Opcode = if (self.registry.array_element(indexed_type) != null)
+                    .OP_INDEX_ARRAY
+                else if (self.registry.table_pair(indexed_type) != null)
+                    .OP_INDEX_TABLE
+                else if (TypeRegistryImpl.is_string(indexed_type))
+                    .OP_INDEX_STRING
+                else
+                    return CodeGeneratorError.UnsupportedOperandType;
                 try self.current.chunk().write_opcode(opcode, expr.line);
             },
             .dot_expr => |expr| {
@@ -693,13 +864,24 @@ pub const CodeGenerator = struct {
                         try self.current.chunk().write_u16(field_index.index, expr.line);
                     },
                     .enum_variant => |variant| {
-                        try self.current.chunk().emit_constant(.{ .enum_ = .{ .type_id = variant.type_id, .index = @intCast(variant.index) } }, expr.line);
+                        if (variant.has_payloads) {
+                            try self.current.chunk().write_opcode(.OP_NEW_ENUM, expr.line);
+                            try self.current.chunk().write_u32(variant.type_id, expr.line);
+                            try self.current.chunk().write_u32(@intCast(variant.index), expr.line);
+                            try self.current.chunk().write_u16(0, expr.line);
+                        } else {
+                            try self.current.chunk().emit_constant(.{ .enum_ = .{ .type_id = variant.type_id, .index = @intCast(variant.index) } }, expr.line);
+                        }
                     },
                     .error_variant => |variant| {
                         try self.current.chunk().emit_constant(.{ .error_ = .{ .type_id = variant.type_id, .index = @intCast(variant.index) } }, expr.line);
                     },
                     else => return CodeGeneratorError.UnsupportedNode,
                 }
+            },
+            .optional_unwrap_expr => |expr| {
+                try self.generate_expression(expr.expr);
+                try self.current.chunk().write_opcode(.OP_OPTIONAL_UNWRAP, expr.line);
             },
 
             .new_expr => |expr| {
@@ -734,80 +916,110 @@ pub const CodeGenerator = struct {
                 try self.current.chunk().write_u16(instance_field_count, expr.line);
             },
 
+            .anon_struct_instance => |expr| {
+                const member = self.binding_resolution.member_infos.get(node) orelse return CodeGeneratorError.MissingBinding;
+                const struct_init = member.struct_init;
+                const type_info = self.registry.get_type_info(struct_init.type_id)._struct;
+                for (type_info.fields) |field| {
+                    for (expr.fields) |provided| {
+                        if (std.mem.eql(u8, field.name, provided.name.lexeme)) {
+                            try self.generate_expression(provided.value);
+                            break;
+                        }
+                    }
+                }
+                try self.current.chunk().write_opcode(.OP_STRUCT, expr.line);
+                try self.current.chunk().write_u32(struct_init.type_id, expr.line);
+                try self.current.chunk().write_u16(@intCast(type_info.fields.len), expr.line);
+            },
+
             .match_expr => |expr| {
-                // match target expression
+                var give_context = GiveContext.init(self.allocator, self.current.current_locals_count, self.current.defer_scope_depth);
+                const previous_give = self.current_give;
+                self.current_give = &give_context;
+                defer self.current_give = previous_give;
+                defer give_context.deinit();
                 try self.generate_expression(expr.expr);
+                const hidden_binding = self.binding_resolution.declaration_bindings.get(.{ .node = node }) orelse return CodeGeneratorError.MissingBinding;
+                self.current.current_locals_count += 1;
 
                 var end_jumps: std.ArrayList(usize) = .empty;
                 defer end_jumps.deinit(self.allocator);
-
                 var has_default = false;
+                const matched_info = self.registry.get_type_info(resolve_typeof(expr.expr));
+                const is_enum = matched_info == ._enum;
+                const enum_has_payloads = if (is_enum) matched_info._enum.has_payloads else false;
 
                 for (expr.cases) |case| {
                     if (case.pattern.* == .default_pat) {
                         has_default = true;
-
-                        // Pop target since default always matches
-                        try self.current.chunk().write_opcode(.OP_POP, case.line);
-
                         try self.generate_node(case.stmt);
-
-                        // if no give then emit nil
-                        if (!stmt_has_give(case.stmt)) {
-                            try self.current.chunk().write_opcode(.OP_NIL, case.line);
+                        const arm_pop = self.binding_resolution.match_case_pop_counts.get(case) orelse return CodeGeneratorError.MissingBinding;
+                        if (arm_pop > 0) {
+                            try self.current.chunk().write_opcode(.OP_POP_N, case.line);
+                            try self.current.chunk().write_u16(arm_pop, case.line);
+                            self.current.current_locals_count -= arm_pop;
                         }
-
-                        // Jump to end of match
+                        try self.current.chunk().write_opcode(.OP_POP_N, case.line);
+                        try self.current.chunk().write_u16(1, case.line);
+                        self.current.current_locals_count -= 1;
+                        try self.current.chunk().write_opcode(.OP_NIL, case.line);
                         const jump_to_end = try self.emit_jump(.OP_JUMP, case.line);
                         try end_jumps.append(self.allocator, jump_to_end);
+                        self.current.current_locals_count += 1;
                         continue;
                     }
 
-                    // non default arms
-
-                    // duplicate target: [target] -> [target, target]
-                    try self.current.chunk().write_opcode(.OP_DUP, case.line);
-
-                    // Evaluate pattern: [target, target] -> [target, target, pattern]
-                    try self.generate_expression(case.pattern);
-
-                    // Compare equality: [target, target, pattern] -> [target, bool]
-                    try self.current.chunk().write_opcode(.OP_EQUAL, case.line);
-
-                    // Jump to next case if not equal
-                    const mismatch_jump = try self.emit_jump(.OP_JUMP_IF_FALSE, case.line);
-
-                    // match succeeded
-                    try self.current.chunk().write_opcode(.OP_POP, case.line); // Pop bool
-                    try self.current.chunk().write_opcode(.OP_POP, case.line); // Pop target
-
-                    // case body
-                    try self.generate_node(case.stmt);
-
-                    // if no give then emit nil
-                    if (!stmt_has_give(case.stmt)) {
-                        try self.current.chunk().write_opcode(.OP_NIL, case.line);
+                    try self.current.chunk().write_opcode(.OP_LOAD_LOCAL, case.line);
+                    try self.current.chunk().write_u16(hidden_binding.slot, case.line);
+                    if (is_enum and case.enum_tag != null) {
+                        try self.current.chunk().write_opcode(if (enum_has_payloads) .OP_ENUM_TAG else .OP_ENUM_UNIT_TAG, case.line);
+                        try self.current.chunk().emit_constant(.{ .int = case.enum_tag.? }, case.line);
+                    } else {
+                        try self.generate_expression(case.pattern);
                     }
-
-                    // Jump to end of match
+                    try self.current.chunk().write_opcode(.OP_EQUAL, case.line);
+                    const mismatch_jump = try self.emit_jump(.OP_JUMP_IF_FALSE, case.line);
+                    try self.current.chunk().write_opcode(.OP_POP, case.line);
+                    if (case.payload_binding) |capture| {
+                        try self.current.chunk().write_opcode(.OP_LOAD_LOCAL, case.line);
+                        try self.current.chunk().write_u16(hidden_binding.slot, case.line);
+                        try self.current.chunk().write_opcode(.OP_ENUM_FIELD, case.line);
+                        try self.current.chunk().write_u16(0, case.line);
+                        const capture_binding = self.binding_resolution.declaration_bindings.get(.{ .capture = capture }) orelse return CodeGeneratorError.MissingBinding;
+                        if (capture_binding.slot != self.current.current_locals_count) return CodeGeneratorError.MissingBinding;
+                        self.current.current_locals_count += 1;
+                    }
+                    try self.generate_node(case.stmt);
+                    const arm_pop = self.binding_resolution.match_case_pop_counts.get(case) orelse return CodeGeneratorError.MissingBinding;
+                    if (arm_pop > 0) {
+                        try self.current.chunk().write_opcode(.OP_POP_N, case.line);
+                        try self.current.chunk().write_u16(arm_pop, case.line);
+                        self.current.current_locals_count -= arm_pop;
+                    }
+                    try self.current.chunk().write_opcode(.OP_POP_N, case.line);
+                    try self.current.chunk().write_u16(1, case.line);
+                    self.current.current_locals_count -= 1;
+                    try self.current.chunk().write_opcode(.OP_NIL, case.line);
                     const jump_to_end = try self.emit_jump(.OP_JUMP, case.line);
                     try end_jumps.append(self.allocator, jump_to_end);
-
-                    // mismatch branch
                     try self.patch_jump(mismatch_jump);
-                    try self.current.chunk().write_opcode(.OP_POP, case.line); // Pop 'false' (leaves [target] on stack)
+                    try self.current.chunk().write_opcode(.OP_POP, case.line);
+                    self.current.current_locals_count += 1;
                 }
 
-                // If no default arm matched or was present:
                 if (!has_default) {
-                    try self.current.chunk().write_opcode(.OP_POP, expr.line); // Pop target
-                    try self.current.chunk().write_opcode(.OP_NIL, expr.line); // Result is nil
+                    try self.current.chunk().write_opcode(.OP_POP_N, expr.line);
+                    try self.current.chunk().write_u16(1, expr.line);
+                    self.current.current_locals_count -= 1;
+                    try self.current.chunk().write_opcode(.OP_NIL, expr.line);
                 }
 
-                // Patch all exit jumps to land here
                 for (end_jumps.items) |end_jump| {
                     try self.patch_jump(end_jump);
                 }
+                for (give_context.end_jumps.items) |jump| try self.patch_jump(jump);
+                self.current.current_locals_count = hidden_binding.slot;
             },
 
             .try_expr => |expr| {
@@ -818,6 +1030,7 @@ pub const CodeGenerator = struct {
 
                 // early return
                 try self.patch_jump(err_jump);
+                try self.emit_defer_runs(self.current.defer_scope_depth, 1, expr.line);
                 try self.current.chunk().write_opcode(.OP_RETURN, expr.line);
 
                 // non error success case
@@ -844,11 +1057,13 @@ pub const CodeGenerator = struct {
 
         if (expr.left.* == .index_expr) {
             const index = expr.left.index_expr;
-            const setter: Opcode = switch (self.registry.get_type_info(resolve_typeof(index.expr))) {
-                .array => .OP_SET_INDEX_ARRAY,
-                .table => .OP_SET_INDEX_TABLE,
-                else => return CodeGeneratorError.UnsupportedNode,
-            };
+            const indexed_type = resolve_typeof(index.expr);
+            const setter: Opcode = if (self.registry.array_element(indexed_type) != null)
+                .OP_SET_INDEX_ARRAY
+            else if (self.registry.table_pair(indexed_type) != null)
+                .OP_SET_INDEX_TABLE
+            else
+                return CodeGeneratorError.UnsupportedNode;
 
             try self.generate_expression(index.expr);
             try self.generate_expression(index.index);
@@ -1061,6 +1276,32 @@ pub const CodeGenerator = struct {
         try self.patch_jump(end_jump);
     }
 
+    fn emit_defer_run(self: *CodeGenerator, mode: u8, line: usize) CodeGeneratorError!void {
+        try self.current.chunk().write_opcode(.OP_DEFER_RUN, line);
+        try self.current.chunk().write_u8(mode, line);
+    }
+
+    fn emit_defer_runs(self: *CodeGenerator, count: u16, mode: u8, line: usize) CodeGeneratorError!void {
+        for (0..count) |_| try self.emit_defer_run(mode, line);
+    }
+
+    fn generate_defer_statement(self: *CodeGenerator, stmt: *AST.DeferStmt) CodeGeneratorError!void {
+        try self.current.chunk().write_opcode(.OP_DEFER_PUSH, stmt.line);
+        const target_operand = self.current.chunk().code.items.len;
+        try self.current.chunk().write_u32(0, stmt.line);
+        try self.current.chunk().write_u8(if (stmt.is_errdefer) 1 else 0, stmt.line);
+        const skip_body = try self.emit_jump(.OP_JUMP, stmt.line);
+
+        const target: u32 = @intCast(self.current.chunk().code.items.len);
+        self.current.chunk().code.items[target_operand] = @truncate(target >> 24);
+        self.current.chunk().code.items[target_operand + 1] = @truncate(target >> 16);
+        self.current.chunk().code.items[target_operand + 2] = @truncate(target >> 8);
+        self.current.chunk().code.items[target_operand + 3] = @truncate(target);
+        try self.generate_node(stmt.body);
+        try self.current.chunk().write_opcode(.OP_DEFER_END, stmt.line);
+        try self.patch_jump(skip_body);
+    }
+
     fn emit_jump_placeholder(self: *CodeGenerator, line: usize) CodeGeneratorError!usize {
         try self.current.chunk().write_u8(0xff, line);
         try self.current.chunk().write_u8(0xff, line);
@@ -1118,7 +1359,7 @@ pub const CodeGenerator = struct {
             if (std.mem.eql(u8, op, "^")) return .OP_BITWISE_XOR;
         }
 
-        if (left == @backingInt(TypeRegistry.PrimitiveType.String) and right == @backingInt(TypeRegistry.PrimitiveType.String)) {
+        if (TypeRegistryImpl.is_string(left) and TypeRegistryImpl.is_string(right)) {
             if (std.mem.eql(u8, op, "++")) return .OP_STRING_CONCAT;
         }
 
@@ -1167,11 +1408,18 @@ pub const CodeGenerator = struct {
         const function_object = try Entities.new_function_object(self.isolate, self.module.filepath);
         const new_function = try FunctionCompiler.init(self.allocator, function_object, self.current, binding.param_count);
         const enclosing = self.current;
+        const enclosing_give = self.current_give;
         self.current = new_function;
+        self.current_give = null;
+        defer self.current_give = enclosing_give;
 
+        try self.current.chunk().write_opcode(.OP_DEFER_SCOPE, line);
+        self.current.defer_scope_depth += 1;
         try self.generate_node(body);
 
         // implicit return
+        try self.emit_defer_run(0, line);
+        self.current.defer_scope_depth -= 1;
         try self.current.chunk().write_opcode(.OP_NIL, line);
         try self.current.chunk().write_opcode(.OP_RETURN, line);
 
@@ -1193,19 +1441,9 @@ pub const CodeGenerator = struct {
         }
     }
 
-    fn stmt_has_give(node: *AST.ASTNode) bool {
-        return switch (node.*) {
-            .give_stmt => true,
-            .block_stmt => |b| for (b.stmts) |s| {
-                if (stmt_has_give(s)) return true;
-            } else false,
-            .if_stmt => |s| stmt_has_give(s.then_branch) or (if (s.else_branch) |e| stmt_has_give(e) else false),
-            .while_stmt => |s| stmt_has_give(s.body),
-            .for_stmt => |s| stmt_has_give(s.body),
-            .match_expr => |e| for (e.cases) |c| {
-                if (stmt_has_give(c.stmt)) return true;
-            } else false,
-            else => false,
-        };
+    fn emit_local_cleanup(self: *CodeGenerator, body: *AST.ASTNode, count: u16, line: usize) CodeGeneratorError!void {
+        _ = body;
+        try self.current.chunk().write_opcode(.OP_POP_N, line);
+        try self.current.chunk().write_u16(count, line);
     }
 };

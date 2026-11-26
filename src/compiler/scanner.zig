@@ -74,6 +74,12 @@ pub const TokenType = enum {
     PIPE,
     /// '~'
     TILDE,
+    /// '?'
+    QUESTION,
+    /// '.?'
+    DOT_QUESTION,
+    /// '!'
+    BANG,
     /// '+='
     PLUS_EQUAL,
     /// '-='
@@ -154,6 +160,8 @@ pub const TokenType = enum {
     NEW,
     /// 'panic'
     PANIC,
+    DEFER,
+    ERRDEFER,
     /// 'struct'
     STRUCT,
     /// 'type'
@@ -189,6 +197,10 @@ pub const TokenType = enum {
     RANGE_TYPE,
     /// 'Never'
     NEVER_TYPE,
+    /// 'native'
+    NATIVE,
+    /// 'bind'
+    BIND,
     /// 'EOF'
     EOF,
 };
@@ -341,7 +353,11 @@ pub const Scanner = struct {
                 'n' => self.check_keyword(2, "d", .AND),
                 else => .IDENTIFIER,
             } else .IDENTIFIER,
-            'b' => self.check_keyword(1, "reak", .BREAK),
+            'b' => if (len > 1) switch (source[1]) {
+                'i' => self.check_keyword(2, "nd", .BIND),
+                'r' => self.check_keyword(2, "eak", .BREAK),
+                else => .IDENTIFIER,
+            } else .IDENTIFIER,
             'c' => if (len > 1) switch (source[1]) {
                 'o' => if (len == 2) .CO else if (len > 2) switch (source[2]) {
                     'n' => if (len > 3) switch (source[3]) {
@@ -354,11 +370,18 @@ pub const Scanner = struct {
                 'a' => self.check_keyword(2, "tch", .CATCH),
                 else => .IDENTIFIER,
             } else .IDENTIFIER,
-            'd' => self.check_keyword(1, "efault", .DEFAULT),
+            'd' => if (len > 1 and source[1] == 'e')
+                if (len > 3 and source[2] == 'f' and source[3] == 'e') self.check_keyword(4, "r", .DEFER) else self.check_keyword(1, "efault", .DEFAULT)
+            else
+                self.check_keyword(1, "efault", .DEFAULT),
             'e' => if (len > 1) switch (source[1]) {
                 'l' => self.check_keyword(2, "se", .ELSE),
                 'n' => self.check_keyword(2, "um", .ENUM),
-                'r' => self.check_keyword(2, "ror", .ERROR),
+                'r' => if (len > 2) switch (source[2]) {
+                    'r' => if (len > 3 and source[3] == 'd') self.check_keyword(4, "efer", .ERRDEFER) else self.check_keyword(3, "or", .ERROR),
+                    else => .IDENTIFIER,
+                } else .IDENTIFIER,
+                'd' => self.check_keyword(2, "efer", .DEFER),
                 else => .IDENTIFIER,
             } else .IDENTIFIER,
             'f' => if (len > 1) switch (source[1]) {
@@ -376,6 +399,7 @@ pub const Scanner = struct {
             } else .IDENTIFIER,
             'm' => self.check_keyword(1, "atch", .MATCH),
             'n' => if (len > 1) switch (source[1]) {
+                'a' => self.check_keyword(2, "tive", .NATIVE),
                 'o' => self.check_keyword(2, "t", .NOT),
                 'i' => self.check_keyword(2, "l", .NIL),
                 'e' => self.check_keyword(2, "w", .NEW),
@@ -492,7 +516,15 @@ pub const Scanner = struct {
             ';' => self.make_token(.SEMICOLON),
             ',' => self.make_token(.COMMA),
             ':' => self.make_token(.COLON),
-            '.' => self.make_token(if (self.match('.')) .DOT_DOT else .DOT),
+            '.' => blk: {
+                if (self.match('?')) {
+                    break :blk self.make_token(.DOT_QUESTION);
+                } else if (self.match('.')) {
+                    break :blk self.make_token(.DOT_DOT);
+                } else {
+                    break :blk self.make_token(.DOT);
+                }
+            },
             '-' => if (self.match('>'))
                 self.make_token(.ARROW)
             else
@@ -517,7 +549,7 @@ pub const Scanner = struct {
                 break :blk self.make_token(.STAR);
             },
             '%' => self.make_token(if (self.match('=')) .PERCENT_EQUAL else .PERCENT),
-            '!' => if (self.match('=')) self.make_token(.NOT_EQUAL) else error.UnexpectedToken,
+            '!' => self.make_token(if (self.match('=')) .NOT_EQUAL else .BANG),
             '=' => if (self.match('='))
                 self.make_token(.EQUAL_EQUAL)
             else if (self.match('>'))
@@ -537,6 +569,7 @@ pub const Scanner = struct {
             '|' => self.make_token(.PIPE),
             '^' => self.make_token(.CARET),
             '~' => self.make_token(.TILDE),
+            '?' => self.make_token(.QUESTION),
             else => {
                 return ScannerError.UnexpectedCharacter;
             },

@@ -50,9 +50,9 @@ test "Scanner Emits Error For Unterminated String" {
 test "Scanner Keywords" {
     const allocator = std.testing.allocator;
     _ = allocator;
-    const source = "resume and as break co const continue catch default else false for fn from give if in match new nil not or orelse panic pub return struct true type use var while try yield with";
+    const source = "bind native resume and as break co const continue catch default defer errdefer else false for fn from give if in match new nil not or orelse panic pub return struct true type use var while try yield with";
     const expected = [_]TokenType{
-        .RESUME, .AND, .AS, .BREAK, .CO, .CONST, .CONTINUE, .CATCH, .DEFAULT, .ELSE, .FALSE, .FOR, .FN, .FROM, .GIVE, .IF, .IN, .MATCH, .NEW, .NIL, .NOT, .OR, .ORELSE, .PANIC, .PUB, .RETURN, .STRUCT, .TRUE, .TYPE, .USE, .VAR, .WHILE, .TRY, .YIELD, .WITH,
+        .BIND, .NATIVE, .RESUME, .AND, .AS, .BREAK, .CO, .CONST, .CONTINUE, .CATCH, .DEFAULT, .DEFER, .ERRDEFER, .ELSE, .FALSE, .FOR, .FN, .FROM, .GIVE, .IF, .IN, .MATCH, .NEW, .NIL, .NOT, .OR, .ORELSE, .PANIC, .PUB, .RETURN, .STRUCT, .TRUE, .TYPE, .USE, .VAR, .WHILE, .TRY, .YIELD, .WITH,
     };
     try checkTokens(source, &expected);
 }
@@ -68,8 +68,8 @@ test "Scanner Type Keywords" {
 }
 
 test "Scanner Operators and Punctuation" {
-    const source = "( ) { } [ ] , . .. - + ; / * ** % : -> != = == => > >= < <= << >> & ^ | ~ += -= *= /= %= ++ ++= **=";
-    const expected = [_]TokenType{ .LEFT_PAREN, .RIGHT_PAREN, .LEFT_BRACE, .RIGHT_BRACE, .LEFT_SQUARE, .RIGHT_SQUARE, .COMMA, .DOT, .DOT_DOT, .MINUS, .PLUS, .SEMICOLON, .SLASH, .STAR, .STAR_STAR, .PERCENT, .COLON, .ARROW, .NOT_EQUAL, .EQUAL, .EQUAL_EQUAL, .EQUAL_ARROW, .GREATER, .GREATER_EQUAL, .LESS, .LESS_EQUAL, .LEFT_SHIFT, .RIGHT_SHIFT, .AMPERSAND, .CARET, .PIPE, .TILDE, .PLUS_EQUAL, .MINUS_EQUAL, .STAR_EQUAL, .SLASH_EQUAL, .PERCENT_EQUAL, .PLUS_PLUS, .PLUS_PLUS_EQUAL, .STAR_STAR_EQUAL };
+    const source = "( ) { } [ ] , . .. .? - + ; / * ** % : -> != = == => > >= < <= << >> & ^ | ~ += -= *= /= %= ++ ++= **= ? !";
+    const expected = [_]TokenType{ .LEFT_PAREN, .RIGHT_PAREN, .LEFT_BRACE, .RIGHT_BRACE, .LEFT_SQUARE, .RIGHT_SQUARE, .COMMA, .DOT, .DOT_DOT, .DOT_QUESTION, .MINUS, .PLUS, .SEMICOLON, .SLASH, .STAR, .STAR_STAR, .PERCENT, .COLON, .ARROW, .NOT_EQUAL, .EQUAL, .EQUAL_EQUAL, .EQUAL_ARROW, .GREATER, .GREATER_EQUAL, .LESS, .LESS_EQUAL, .LEFT_SHIFT, .RIGHT_SHIFT, .AMPERSAND, .CARET, .PIPE, .TILDE, .PLUS_EQUAL, .MINUS_EQUAL, .STAR_EQUAL, .SLASH_EQUAL, .PERCENT_EQUAL, .PLUS_PLUS, .PLUS_PLUS_EQUAL, .STAR_STAR_EQUAL, .QUESTION, .BANG };
     try checkTokens(source, &expected);
 }
 

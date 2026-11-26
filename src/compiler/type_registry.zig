@@ -3,23 +3,65 @@ const AST = @import("ast.zig");
 
 pub const TypeId = AST.TypeId;
 
+fn optional_type_ids_equal(a: ?TypeId, b: ?TypeId) bool {
+    if (a) |a_id| return if (b) |b_id| a_id == b_id else false;
+    return b == null;
+}
+
 pub const StructField = struct {
     name: []const u8,
-    type: TypeId,
+    type_id: TypeId,
     is_pub: bool,
     default_value: ?*AST.ASTNode,
 };
 
+pub const MethodKind = enum { FN, CO, NATIVE };
+
 pub const StructMethod = struct {
     name: []const u8,
-    type: TypeId,
+    type_id: TypeId,
     is_pub: bool,
     method_node: *AST.ASTNode,
+    takes_receiver: bool,
+    kind: MethodKind,
+};
+
+pub const EnumVariant = struct {
+    name: []const u8,
+    type_id: ?TypeId,
+};
+
+/// A member resolved through `TypeRegistry.resolve_member`. This is the single
+/// source of truth for member lookup across the type checker and binding
+/// resolver, so both stages agree on what a name refers to.
+pub const ResolvedMember = union(enum) {
+    struct_field: struct { index: u16, field: StructField },
+    struct_method: struct { index: u16, method: StructMethod },
+    tuple_element: struct { index: u16, type_id: TypeId },
+    enum_variant: struct { index: u16, variant: EnumVariant, has_payloads: bool },
+    error_variant: struct { index: u16, name: []const u8 },
+    coroutine_method: CoroutineMember,
+    coroutine_state: CoroutineMember,
+};
+
+pub const CoroutineMember = enum {
+    returned,
+    is_finished,
+    suspended,
+    finished,
+    running,
+    started,
 };
 
 pub const TypeRegistryError = error{
     UnknownType,
     TypeResolutionConflict,
+    NestedOptional,
+    OptionalOfNil,
+    /// In the error position of a union type, a non error type was given
+    NonErrorUnionError,
+    /// Error unions cannot be nested as the success type (`E1!(E2!T)`)
+    NestedErrorUnion,
 } || std.mem.Allocator.Error;
 
 pub const PrimitiveType = enum(TypeId) {
@@ -39,11 +81,14 @@ pub const TypeInfo = union(enum) {
     table: struct { key: TypeId, value: TypeId },
     function: struct { args: []TypeId, ret: TypeId },
     coroutine: struct { args: []TypeId, ret: TypeId, yield: TypeId, resume_with: TypeId },
-    _union: struct { left: TypeId, right: TypeId },
+    optional: struct { inner: TypeId },
+    /// null err typeId allows any error type
+    error_union: struct { err: ?TypeId, ok: TypeId },
     _error: struct { name: []const u8, variants: [][]const u8, source_file: []const u8 },
-    _enum: struct { name: []const u8, variants: [][]const u8, source_file: []const u8 },
+    _enum: struct { name: []const u8, variants: []EnumVariant, source_file: []const u8, has_payloads: bool },
     _struct: struct { name: []const u8, fields: []StructField, methods: []StructMethod, source_file: []const u8 },
     _type: struct { name: []const u8, resolved_type: TypeId, source_file: []const u8 },
+    native_type: struct { name: []const u8, source_file: []const u8 },
     identifier: struct { name: []const u8, source_file: []const u8, generics: ?[]TypeId }, // errors, enums, structs
 };
 
@@ -125,6 +170,19 @@ pub const TypeRegistry = struct {
                 }
                 return try self.add_tuple_type(try element_ids.toOwnedSlice(self.allocator));
             },
+            .anon_struct_decl => |decl| {
+                var fields: std.ArrayList(StructField) = .empty;
+                for (decl.fields) |field| {
+                    try fields.append(self.allocator, .{
+                        .name = field.name.lexeme,
+                        .type_id = try self.resolve(field.type_annotation),
+                        .is_pub = true,
+                        .default_value = field.default_value,
+                    });
+                }
+                const empty_methods = try self.allocator.alloc(StructMethod, 0);
+                return try self.add_struct_type("<anonymous>", try fields.toOwnedSlice(self.allocator), empty_methods, "");
+            },
             .fn_type => |function| {
                 const args = function.params;
                 var arg_ids: std.ArrayList(TypeId) = .empty;
@@ -152,6 +210,15 @@ pub const TypeRegistry = struct {
                 const end_id = try self.resolve(range.end);
                 return try self.add_range_type(start_id, end_id);
             },
+            .optional_type => |optional| {
+                const inner_id = try self.resolve(optional.inner);
+                return try self.add_optional_type(inner_id);
+            },
+            .error_union_type => |error_union| {
+                const err_id: ?TypeId = if (error_union.err) |err| try self.resolve(err) else null;
+                const ok_id = try self.resolve(error_union.ok);
+                return try self.add_error_union_type(err_id, ok_id);
+            },
 
             .identifier_type => |identifier| {
                 const name = identifier.name.lexeme;
@@ -163,15 +230,75 @@ pub const TypeRegistry = struct {
                 }
                 return TypeRegistryError.UnknownType;
             },
-            .union_type => |union_node| {
-                const left_id = try self.resolve(union_node.left);
-                const right_id = try self.resolve(union_node.right);
-                return try self.add_union_type(left_id, right_id);
-            },
             else => {
                 return TypeRegistryError.UnknownType;
             },
         };
+    }
+
+    /// Returns the inner type of an optional, or null if `id` is not optional.
+    pub fn unwrap_optional(self: *TypeRegistry, id: TypeId) ?TypeId {
+        return switch (self.get_type_info(id)) {
+            .optional => |o| o.inner,
+            else => null,
+        };
+    }
+
+    pub fn add_error_union_type(self: *TypeRegistry, err_type: ?TypeId, ok_type: TypeId) !TypeId {
+        if (err_type) |e| {
+            const error_type_info = self.get_type_info(e);
+            if (error_type_info != ._error) {
+                return TypeRegistryError.NonErrorUnionError;
+            }
+        }
+        // disallow nesting of error unions in the success part of the union
+        if (self.get_type_info(ok_type) == .error_union) {
+            return TypeRegistryError.NestedErrorUnion;
+        }
+
+        for (self.types.items, 0..) |info, index| {
+            switch (info) {
+                .error_union => |existing| {
+                    if (existing.err == err_type and existing.ok == ok_type) {
+                        return @as(TypeId, @intCast(index));
+                    }
+                },
+                else => continue,
+            }
+        }
+
+        // add new type
+        const id = @as(TypeId, @intCast(self.types.items.len));
+        try self.types.append(self.allocator, .{ .error_union = .{ .err = err_type, .ok = ok_type } });
+        return id;
+    }
+
+    pub fn add_optional_type(self: *TypeRegistry, inner_type: TypeId) !TypeId {
+        // an optional of nil is not allowed
+        if (inner_type == @backingInt(PrimitiveType.Nil)) {
+            return TypeRegistryError.OptionalOfNil;
+        }
+        // a nested optional is not allowed
+        if (self.get_type_info(inner_type) == .optional) {
+            return TypeRegistryError.NestedOptional;
+        }
+
+        // check for existing type
+        for (self.types.items, 0..) |info, index| {
+            switch (info) {
+                .optional => |existing| {
+                    if (existing.inner == inner_type) {
+                        return @as(TypeId, @intCast(index));
+                    }
+                },
+                else => continue,
+            }
+        }
+
+        // add new type
+        const id = @as(TypeId, @intCast(self.types.items.len));
+        try self.types.append(self.allocator, .{ .optional = .{ .inner = inner_type } });
+        return id;
     }
 
     pub fn add_array_type(self: *TypeRegistry, element_type: TypeId) !TypeId {
@@ -315,51 +442,50 @@ pub const TypeRegistry = struct {
         return id;
     }
 
-    pub fn add_union_type(self: *TypeRegistry, left_id: TypeId, right_id: TypeId) !TypeId {
-        if (left_id == right_id) return left_id;
+    pub fn add_native_type_type(self: *TypeRegistry, name: []const u8, source_file: []const u8) !TypeId {
         for (self.types.items, 0..) |info, index| {
             switch (info) {
-                ._union => |u| {
-                    if (u.left == left_id and u.right == right_id) {
-                        return @as(TypeId, @intCast(index));
-                    }
-                },
-                else => continue,
-            }
-        }
-
-        // add new type
-        const id = @as(TypeId, @intCast(self.types.items.len));
-        try self.types.append(self.allocator, .{ ._union = .{ .left = left_id, .right = right_id } });
-        return id;
-    }
-
-    pub fn add_type_type(self: *TypeRegistry, name: []const u8, resolved_type: TypeId, source_file: []const u8) !TypeId {
-        for (self.types.items, 0..) |info, index| {
-            switch (info) {
-                ._type => |existing_type| {
+                .native_type => |existing_type| {
                     if (!std.mem.eql(u8, existing_type.name, name) or !std.mem.eql(u8, existing_type.source_file, source_file)) continue;
-                    if (existing_type.resolved_type != resolved_type) {
-                        return TypeRegistryError.TypeResolutionConflict; // names are the same but the resolved types differ
-                    }
                     return @as(TypeId, @intCast(index));
                 },
                 else => continue,
             }
         }
 
-        // add new type
         const id = @as(TypeId, @intCast(self.types.items.len));
-        try self.types.append(self.allocator, .{ ._type = .{ .name = name, .resolved_type = resolved_type, .source_file = source_file } });
+        try self.types.append(self.allocator, .{ .native_type = .{ .name = name, .source_file = source_file } });
         return id;
+    }
+
+    pub fn add_type_type(self: *TypeRegistry, name: []const u8, resolved_type: TypeId, source_file: []const u8) !TypeId {
+        for (self.types.items) |info| {
+            switch (info) {
+                ._type => |existing_type| {
+                    if (!std.mem.eql(u8, existing_type.name, name) or !std.mem.eql(u8, existing_type.source_file, source_file)) continue;
+                    if (existing_type.resolved_type != resolved_type) {
+                        return TypeRegistryError.TypeResolutionConflict; // names are the same but the resolved types differ
+                    }
+                    return resolved_type;
+                },
+                else => continue,
+            }
+        }
+
+        // add new type
+        try self.types.append(self.allocator, .{ ._type = .{ .name = name, .resolved_type = resolved_type, .source_file = source_file } });
+        return resolved_type;
     }
 
     pub fn add_struct_type(self: *TypeRegistry, name: []const u8, fields: []StructField, methods: []StructMethod, source_file: []const u8) !TypeId {
         for (self.types.items, 0..) |info, index| {
             switch (info) {
                 ._struct => |existing_struct| {
+                    // do not match if name is different, or source file is different
                     if (!std.mem.eql(u8, existing_struct.name, name) or !std.mem.eql(u8, existing_struct.source_file, source_file)) continue;
+
                     if (existing_struct.fields.len != fields.len or existing_struct.methods.len != methods.len) {
+                        if (std.mem.eql(u8, name, "<anonymous>")) continue;
                         self.allocator.free(fields);
                         self.allocator.free(methods);
                         return TypeRegistryError.TypeResolutionConflict; // names are the same but the number of fields or methods differ
@@ -367,13 +493,13 @@ pub const TypeRegistry = struct {
 
                     var match = true;
                     for (existing_struct.fields, 0..) |ef, i| {
-                        if (!std.mem.eql(u8, ef.name, fields[i].name) or ef.type != fields[i].type) {
+                        if (!std.mem.eql(u8, ef.name, fields[i].name) or ef.type_id != fields[i].type_id) {
                             match = false;
                             break;
                         }
                     }
                     for (existing_struct.methods, 0..) |em, i| {
-                        if (!std.mem.eql(u8, em.name, methods[i].name) or em.type != methods[i].type) {
+                        if (!std.mem.eql(u8, em.name, methods[i].name) or em.type_id != methods[i].type_id) {
                             match = false;
                             break;
                         }
@@ -382,6 +508,8 @@ pub const TypeRegistry = struct {
                         self.allocator.free(fields);
                         self.allocator.free(methods);
                         return @as(TypeId, @intCast(index));
+                    } else {
+                        return TypeRegistryError.TypeResolutionConflict;
                     }
                 },
                 else => continue,
@@ -426,11 +554,11 @@ pub const TypeRegistry = struct {
         return id;
     }
 
-    pub fn add_enum_type(self: *TypeRegistry, name: []const u8, variants: [][]const u8, source_file: []const u8) !TypeId {
+    pub fn add_enum_type(self: *TypeRegistry, name: []const u8, variants: []EnumVariant, source_file: []const u8, has_payloads: bool) !TypeId {
         for (self.types.items, 0..) |info, index| {
             switch (info) {
                 ._enum => |existing_enum| {
-                    if (!std.mem.eql(u8, existing_enum.name, name) or !std.mem.eql(u8, existing_enum.source_file, source_file)) continue;
+                    if (!std.mem.eql(u8, existing_enum.name, name) or !std.mem.eql(u8, existing_enum.source_file, source_file) or existing_enum.has_payloads != has_payloads) continue;
                     if (existing_enum.variants.len != variants.len) {
                         self.allocator.free(variants);
                         return TypeRegistryError.TypeResolutionConflict; // names are the same but the number of variants differ
@@ -438,7 +566,7 @@ pub const TypeRegistry = struct {
 
                     var match = true;
                     for (existing_enum.variants, 0..) |ev, i| {
-                        if (!std.mem.eql(u8, ev, variants[i])) {
+                        if (!std.mem.eql(u8, ev.name, variants[i].name) or !optional_type_ids_equal(ev.type_id, variants[i].type_id)) {
                             match = false;
                             break;
                         }
@@ -454,12 +582,75 @@ pub const TypeRegistry = struct {
 
         // add new type
         const id = @as(TypeId, @intCast(self.types.items.len));
-        try self.types.append(self.allocator, .{ ._enum = .{ .name = name, .variants = variants, .source_file = source_file } });
+        try self.types.append(self.allocator, .{ ._enum = .{ .name = name, .variants = variants, .source_file = source_file, .has_payloads = has_payloads } });
         return id;
+    }
+
+    pub fn set_enum_variants(self: *TypeRegistry, id: TypeId, variants: []EnumVariant, has_payloads: bool) !void {
+        const entry = &self.types.items[id];
+        if (entry.* != ._enum) return TypeRegistryError.TypeResolutionConflict;
+        self.allocator.free(entry._enum.variants);
+        entry._enum.variants = variants;
+        entry._enum.has_payloads = has_payloads;
     }
 
     pub fn get_type_info(self: *TypeRegistry, id: TypeId) TypeInfo {
         return self.types.items[id];
+    }
+
+    /// Resolves a member name against a type. Struct fields take precedence over
+    /// struct methods, matching the runtime layout and the binding resolver.
+    ///
+    /// Returns null when the type has no such member. Callers are responsible
+    /// for reporting why the lookup failed (wrong receiver kind, payload
+    /// variant used as a value, out-of-bounds tuple index, and so on).
+    pub fn resolve_member(self: *TypeRegistry, type_id: TypeId, name: []const u8) ?ResolvedMember {
+        return switch (self.get_type_info(type_id)) {
+            .tuple => |elements| blk: {
+                const index = std.fmt.parseInt(u16, name, 10) catch break :blk null;
+                if (index >= elements.len) break :blk null;
+                break :blk .{ .tuple_element = .{ .index = index, .type_id = elements[index] } };
+            },
+            ._struct => |info| blk: {
+                for (info.fields, 0..) |field, index| {
+                    if (std.mem.eql(u8, field.name, name)) {
+                        break :blk .{ .struct_field = .{ .index = @intCast(index), .field = field } };
+                    }
+                }
+                for (info.methods, 0..) |method, index| {
+                    if (std.mem.eql(u8, method.name, name)) {
+                        break :blk .{ .struct_method = .{ .index = @intCast(index), .method = method } };
+                    }
+                }
+                break :blk null;
+            },
+            ._enum => |info| blk: {
+                for (info.variants, 0..) |variant, index| {
+                    if (std.mem.eql(u8, variant.name, name)) {
+                        break :blk .{ .enum_variant = .{ .index = @intCast(index), .variant = variant, .has_payloads = info.has_payloads } };
+                    }
+                }
+                break :blk null;
+            },
+            ._error => |info| blk: {
+                for (info.variants, 0..) |variant, index| {
+                    if (std.mem.eql(u8, variant, name)) {
+                        break :blk .{ .error_variant = .{ .index = @intCast(index), .name = variant } };
+                    }
+                }
+                break :blk null;
+            },
+            .coroutine => blk: {
+                if (std.mem.eql(u8, name, "returned")) break :blk .{ .coroutine_method = .returned };
+                if (std.mem.eql(u8, name, "is_finished")) break :blk .{ .coroutine_method = .is_finished };
+                if (std.mem.eql(u8, name, "suspended")) break :blk .{ .coroutine_state = .suspended };
+                if (std.mem.eql(u8, name, "finished")) break :blk .{ .coroutine_state = .finished };
+                if (std.mem.eql(u8, name, "running")) break :blk .{ .coroutine_state = .running };
+                if (std.mem.eql(u8, name, "started")) break :blk .{ .coroutine_state = .started };
+                break :blk null;
+            },
+            else => null,
+        };
     }
 
     pub fn get_named_type(self: *TypeRegistry, name: []const u8, source_file: []const u8) ?TypeId {
@@ -479,11 +670,16 @@ pub const TypeRegistry = struct {
                 ._type => |type_info| {
                     if (!std.mem.eql(u8, type_info.name, name)) continue;
                     if (!std.mem.eql(u8, type_info.source_file, source_file)) continue;
-                    return @as(TypeId, @intCast(index));
+                    return @as(TypeId, type_info.resolved_type);
                 },
                 ._error => |error_info| {
                     if (!std.mem.eql(u8, error_info.name, name)) continue;
                     if (!std.mem.eql(u8, error_info.source_file, source_file)) continue;
+                    return @as(TypeId, @intCast(index));
+                },
+                .native_type => |native_type_info| {
+                    if (!std.mem.eql(u8, native_type_info.name, name)) continue;
+                    if (!std.mem.eql(u8, native_type_info.source_file, source_file)) continue;
                     return @as(TypeId, @intCast(index));
                 },
                 else => continue,
@@ -502,15 +698,40 @@ pub const TypeRegistry = struct {
                 },
                 ._type => |type_info| {
                     if (!std.mem.eql(u8, type_info.name, name)) continue;
-                    return @as(TypeId, @intCast(index));
+                    return @as(TypeId, type_info.resolved_type);
                 },
                 ._error => |error_info| {
                     if (!std.mem.eql(u8, error_info.name, name)) continue;
+                    return @as(TypeId, @intCast(index));
+                },
+                .native_type => |native_type_info| {
+                    if (!std.mem.eql(u8, native_type_info.name, name)) continue;
                     return @as(TypeId, @intCast(index));
                 },
                 else => continue,
             }
         }
         return null;
+    }
+
+    /// check if a type is a string
+    pub fn is_string(id: TypeId) bool {
+        return id == @backingInt(PrimitiveType.String);
+    }
+
+    /// get the element type from an array type
+    pub fn array_element(self: *TypeRegistry, id: TypeId) ?TypeId {
+        return switch (self.get_type_info(id)) {
+            .array => |a| a,
+            else => null,
+        };
+    }
+
+    /// get the key and value types from a table type
+    pub fn table_pair(self: *TypeRegistry, id: TypeId) ?struct { key: TypeId, value: TypeId } {
+        return switch (self.get_type_info(id)) {
+            .table => |t| .{ .key = t.key, .value = t.value },
+            else => null,
+        };
     }
 };
