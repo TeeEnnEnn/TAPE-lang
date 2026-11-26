@@ -768,6 +768,16 @@ pub const CodeGenerator = struct {
                             const takes_receiver = member_info.method.takes_receiver;
                             const dot = expr.expr.dot_expr;
 
+                            if (member_info.method.is_native) {
+                                if (takes_receiver) try self.generate_expression(dot.expr);
+                                for (expr.args) |arg| try self.generate_expression(arg);
+                                try self.current.chunk().write_opcode(.OP_CALL_NATIVE, expr.line);
+                                const arg_count = expr.args.len + @as(usize, if (takes_receiver) 1 else 0);
+                                try self.current.chunk().write_u16(@intCast(arg_count), expr.line);
+                                try self.current.chunk().write_u16(method_slot, expr.line);
+                                return;
+                            }
+
                             try self.current.chunk().write_opcode(.OP_LOAD_FUNCTION_CONSTANT, expr.line);
                             try self.current.chunk().write_u16(method_slot, expr.line);
 
@@ -795,17 +805,18 @@ pub const CodeGenerator = struct {
                 const indexed_type = resolve_typeof(expr.expr);
                 const type_info = self.registry.get_type_info(indexed_type);
 
-                if (type_info == .native_function) {
+                const native_binding = if (expr.expr.* == .identifier_expr)
+                    self.binding_resolution.identifier_bindings.get(expr.expr)
+                else
+                    null;
+
+                if (native_binding != null and native_binding.?.kind == .native) {
                     for (expr.args) |arg| {
                         try self.generate_expression(arg);
                     }
                     try self.current.chunk().write_opcode(.OP_CALL_NATIVE, expr.line);
                     try self.current.chunk().write_u16(@intCast(expr.args.len), expr.line);
-                    const binding = self.binding_resolution.identifier_bindings.get(expr.expr) orelse {
-                        return CodeGeneratorError.MissingBinding;
-                    };
-                    if (binding.kind != .native) return CodeGeneratorError.MissingBinding;
-                    try self.current.chunk().write_u16(binding.slot, expr.line);
+                    try self.current.chunk().write_u16(native_binding.?.slot, expr.line);
                 } else {
                     // Regular function call
 
@@ -814,7 +825,7 @@ pub const CodeGenerator = struct {
                         try self.generate_expression(arg);
                     }
 
-                    const opcode: Opcode = switch (self.registry.get_type_info(indexed_type)) {
+                    const opcode: Opcode = switch (type_info) {
                         .function => .OP_CALL,
                         .coroutine => .OP_COROUTINE,
                         else => return CodeGeneratorError.UnsupportedOperandType,

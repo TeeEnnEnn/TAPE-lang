@@ -17,6 +17,8 @@ pub const SymbolInfo = struct {
     /// value of that type. Variant access (`Weekdays.MONDAY`) is only legal on such
     /// symbols; it is rejected on values, even though both share the same TypeId.
     is_type: bool = false,
+    /// True for native functions.
+    is_native: bool = false,
 };
 
 pub const Environment = struct {
@@ -47,21 +49,28 @@ pub const Environment = struct {
     /// Defines a type symbol (struct, enum, error, `type`). Only symbols defined via
     /// the `define_type*` entry points may name variants (`Weekdays.MONDAY`).
     pub fn define_type_binding(self: *Environment, name: []const u8, id: TypeId, decl: ?DeclRef, is_const: bool) EnvironmentError!void {
-        return self.define_symbol(name, id, decl, is_const, true);
+        return self.define_symbol(name, id, decl, is_const, true, false);
     }
 
     /// Defines a symbol with declaration identity attached, for the codegen resolver to use.
     pub fn define_binding(self: *Environment, name: []const u8, id: TypeId, decl: ?DeclRef, is_const: bool) EnvironmentError!void {
-        return self.define_symbol(name, id, decl, is_const, false);
+        return self.define_symbol(name, id, decl, is_const, false, false);
     }
 
-    /// Raw define, giving explicit control over the type-symbol flag (used by imports,
-    /// where the flag is derived from the exporting module's declaration).
-    pub fn define_symbol(self: *Environment, name: []const u8, id: TypeId, decl: ?DeclRef, is_const: bool, is_type: bool) EnvironmentError!void {
+    /// Defines a native function. Native functions are ordinary function types,
+    /// but the checker needs to know they cannot be used as first-class values.
+    pub fn define_native_binding(self: *Environment, name: []const u8, id: TypeId, decl: ?DeclRef, is_const: bool) EnvironmentError!void {
+        return self.define_symbol(name, id, decl, is_const, false, true);
+    }
+
+    /// Raw define, giving explicit control over the type-symbol and native flags
+    /// (used by imports, where the flags are derived from the exporting module's
+    /// declaration).
+    pub fn define_symbol(self: *Environment, name: []const u8, id: TypeId, decl: ?DeclRef, is_const: bool, is_type: bool, is_native: bool) EnvironmentError!void {
         if (self.symbols.contains(name)) {
             return EnvironmentError.DuplicateDefinition;
         }
-        try self.symbols.put(name, .{ .type_id = id, .decl = decl, .is_const = is_const, .is_type = is_type });
+        try self.symbols.put(name, .{ .type_id = id, .decl = decl, .is_const = is_const, .is_type = is_type, .is_native = is_native });
     }
 
     /// Looks up a symbol's type ID only. Existing call sites keep working unchanged.

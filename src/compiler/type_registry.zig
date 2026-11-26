@@ -31,6 +31,28 @@ pub const EnumVariant = struct {
     type_id: ?TypeId,
 };
 
+/// A member resolved through `TypeRegistry.resolve_member`. This is the single
+/// source of truth for member lookup across the type checker and binding
+/// resolver, so both stages agree on what a name refers to.
+pub const ResolvedMember = union(enum) {
+    struct_field: struct { index: u16, field: StructField },
+    struct_method: struct { index: u16, method: StructMethod },
+    tuple_element: struct { index: u16, type_id: TypeId },
+    enum_variant: struct { index: u16, variant: EnumVariant, has_payloads: bool },
+    error_variant: struct { index: u16, name: []const u8 },
+    coroutine_method: CoroutineMember,
+    coroutine_state: CoroutineMember,
+};
+
+pub const CoroutineMember = enum {
+    returned,
+    is_finished,
+    suspended,
+    finished,
+    running,
+    started,
+};
+
 pub const TypeRegistryError = error{
     UnknownType,
     TypeResolutionConflict,
@@ -58,7 +80,6 @@ pub const TypeInfo = union(enum) {
     range: struct { start: TypeId, end: TypeId },
     table: struct { key: TypeId, value: TypeId },
     function: struct { args: []TypeId, ret: TypeId },
-    native_function: struct { args: []TypeId, ret: TypeId },
     coroutine: struct { args: []TypeId, ret: TypeId, yield: TypeId, resume_with: TypeId },
     optional: struct { inner: TypeId },
     /// null err typeId allows any error type
@@ -359,25 +380,6 @@ pub const TypeRegistry = struct {
         return id;
     }
 
-    pub fn add_native_function_type(self: *TypeRegistry, args: []TypeId, ret: TypeId) std.mem.Allocator.Error!TypeId {
-        for (self.types.items, 0..) |info, index| {
-            switch (info) {
-                .native_function => |f| {
-                    if (std.mem.eql(TypeId, f.args, args) and f.ret == ret) {
-                        self.allocator.free(args);
-                        return @as(TypeId, @intCast(index));
-                    }
-                },
-                else => continue,
-            }
-        }
-
-        // add new type
-        const id = @as(TypeId, @intCast(self.types.items.len));
-        try self.types.append(self.allocator, .{ .native_function = .{ .args = args, .ret = ret } });
-        return id;
-    }
-
     pub fn add_coroutine_type(self: *TypeRegistry, args: []TypeId, yield: TypeId, resume_with: TypeId, ret: TypeId) std.mem.Allocator.Error!TypeId {
         for (self.types.items, 0..) |info, index| {
             switch (info) {
@@ -594,6 +596,61 @@ pub const TypeRegistry = struct {
 
     pub fn get_type_info(self: *TypeRegistry, id: TypeId) TypeInfo {
         return self.types.items[id];
+    }
+
+    /// Resolves a member name against a type. Struct fields take precedence over
+    /// struct methods, matching the runtime layout and the binding resolver.
+    ///
+    /// Returns null when the type has no such member. Callers are responsible
+    /// for reporting why the lookup failed (wrong receiver kind, payload
+    /// variant used as a value, out-of-bounds tuple index, and so on).
+    pub fn resolve_member(self: *TypeRegistry, type_id: TypeId, name: []const u8) ?ResolvedMember {
+        return switch (self.get_type_info(type_id)) {
+            .tuple => |elements| blk: {
+                const index = std.fmt.parseInt(u16, name, 10) catch break :blk null;
+                if (index >= elements.len) break :blk null;
+                break :blk .{ .tuple_element = .{ .index = index, .type_id = elements[index] } };
+            },
+            ._struct => |info| blk: {
+                for (info.fields, 0..) |field, index| {
+                    if (std.mem.eql(u8, field.name, name)) {
+                        break :blk .{ .struct_field = .{ .index = @intCast(index), .field = field } };
+                    }
+                }
+                for (info.methods, 0..) |method, index| {
+                    if (std.mem.eql(u8, method.name, name)) {
+                        break :blk .{ .struct_method = .{ .index = @intCast(index), .method = method } };
+                    }
+                }
+                break :blk null;
+            },
+            ._enum => |info| blk: {
+                for (info.variants, 0..) |variant, index| {
+                    if (std.mem.eql(u8, variant.name, name)) {
+                        break :blk .{ .enum_variant = .{ .index = @intCast(index), .variant = variant, .has_payloads = info.has_payloads } };
+                    }
+                }
+                break :blk null;
+            },
+            ._error => |info| blk: {
+                for (info.variants, 0..) |variant, index| {
+                    if (std.mem.eql(u8, variant, name)) {
+                        break :blk .{ .error_variant = .{ .index = @intCast(index), .name = variant } };
+                    }
+                }
+                break :blk null;
+            },
+            .coroutine => blk: {
+                if (std.mem.eql(u8, name, "returned")) break :blk .{ .coroutine_method = .returned };
+                if (std.mem.eql(u8, name, "is_finished")) break :blk .{ .coroutine_method = .is_finished };
+                if (std.mem.eql(u8, name, "suspended")) break :blk .{ .coroutine_state = .suspended };
+                if (std.mem.eql(u8, name, "finished")) break :blk .{ .coroutine_state = .finished };
+                if (std.mem.eql(u8, name, "running")) break :blk .{ .coroutine_state = .running };
+                if (std.mem.eql(u8, name, "started")) break :blk .{ .coroutine_state = .started };
+                break :blk null;
+            },
+            else => null,
+        };
     }
 
     pub fn get_named_type(self: *TypeRegistry, name: []const u8, source_file: []const u8) ?TypeId {

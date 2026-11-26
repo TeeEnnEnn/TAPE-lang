@@ -1,6 +1,6 @@
 # Summary
 
-- [Introduction](./context.md)
+- [Introduction](./introduction.md)
 - [Getting Started](./overview/cli.md)
 - [Importing](./features/imports.md)
 - [Structs](./features/structs.md)

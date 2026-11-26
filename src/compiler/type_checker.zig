@@ -99,6 +99,10 @@ pub const TypeChecker = struct {
     /// statement/block can propagate the (existential) yield signal.
     saw_yield: bool = false,
 
+    /// Allows a native function identifier to be resolved while checking the
+    /// callee of a direct call.
+    allow_native_value: bool = false,
+
     pub fn init(allocator: std.mem.Allocator, registry: *TypeRegistry.TypeRegistry, global_environment: *Environment, diagnostics: *DiagnosticReporter, module: *Module, workspace: *Workspace) TypeChecker {
         return .{ .allocator = allocator, .registry = registry, .environment = global_environment, .diagnostics = diagnostics, .module = module, .workspace = workspace };
     }
@@ -113,8 +117,8 @@ pub const TypeChecker = struct {
         }
 
         const return_id = try self.registry.resolve(decl.return_type_annotation);
-        const fn_id = try self.registry.add_native_function_type(try param_types.toOwnedSlice(self.allocator), return_id);
-        try self.environment.define_binding(decl.name.lexeme, fn_id, .{ .node = node }, true);
+        const fn_id = try self.registry.add_function_type(try param_types.toOwnedSlice(self.allocator), return_id);
+        try self.environment.define_native_binding(decl.name.lexeme, fn_id, .{ .node = node }, true);
         return fn_id;
     }
 
@@ -262,7 +266,8 @@ pub const TypeChecker = struct {
                             .struct_decl, .enum_decl, .error_decl, .type_decl => true,
                             else => false,
                         };
-                        try self.environment.define_symbol(alias.lexeme, resolved_id, .{ .import = .{ .use_decl = node, .index = @as(u32, @intCast(index)) } }, true, is_type_symbol);
+                        const is_native_symbol = exported_node.* == .native_fn_decl;
+                        try self.environment.define_symbol(alias.lexeme, resolved_id, .{ .import = .{ .use_decl = node, .index = @as(u32, @intCast(index)) } }, true, is_type_symbol, is_native_symbol);
                         if (decl.modifier_pub) {
                             // Re-export the original declaration node so further importers
                             // retain the defining module's type identity and binding.
@@ -321,17 +326,14 @@ pub const TypeChecker = struct {
 
                 for (decl.methods) |method| {
                     const decl_type = try self.check_callable_declaration_type(method.method, struct_id);
-                    const method_kind: TypeRegistry.MethodKind = blk: {
-                        const m_info = self.registry.get_type_info(decl_type.type_id);
-                        switch (m_info) {
-                            .coroutine => break :blk .CO,
-                            .function => break :blk .FN,
-                            .native_function => break :blk .NATIVE,
-                            else => {
-                                try self.fail("Type Mismatch", "Received a method that was not of a callable type.", method.name.column, method.name.line);
-                                return TypeCheckerError.TypeMismatch;
-                            },
-                        }
+                    const method_kind: TypeRegistry.MethodKind = switch (method.method.*) {
+                        .fn_decl => .FN,
+                        .co_decl => .CO,
+                        .native_fn_decl => .NATIVE,
+                        else => {
+                            try self.fail("Type Mismatch", "Received a method that was not of a callable type.", method.name.column, method.name.line);
+                            return TypeCheckerError.TypeMismatch;
+                        },
                     };
                     // store the node with the method definition
                     try method_types.append(self.allocator, .{ .name = method.name.lexeme, .type_id = decl_type.type_id, .is_pub = method.is_pub, .method_node = method.method, .kind = method_kind, .takes_receiver = decl_type.has_self });
@@ -940,6 +942,24 @@ pub const TypeChecker = struct {
                 const fn_type = try self.registry.add_function_type(try param_types.toOwnedSlice(self.allocator), return_type);
                 return .{ .has_self = has_self, .type_id = fn_type };
             },
+            .native_fn_decl => |decl| {
+                var param_types: std.ArrayList(AST.TypeId) = .empty;
+                defer param_types.deinit(self.allocator);
+                const has_self = self_type != null and decl.params.len > 0 and std.mem.eql(u8, decl.params[0].name.lexeme, "self");
+                if (has_self) try param_types.append(self.allocator, self_type.?);
+                for (decl.params, 0..) |param, index| {
+                    if (std.mem.eql(u8, param.name.lexeme, "self")) {
+                        if (!has_self or index != 0 or param.type_annotation.* != .nil_type) {
+                            try self.fail("Invalid self parameter", "A struct method receiver must be the first parameter, named `self`, with no type annotation.", param.name.line, param.name.column);
+                            return TypeCheckerError.InvalidOperation;
+                        }
+                        continue;
+                    }
+                    try param_types.append(self.allocator, try self.registry.resolve(param.type_annotation));
+                }
+                const fn_type = try self.registry.add_function_type(try param_types.toOwnedSlice(self.allocator), try self.registry.resolve(decl.return_type_annotation));
+                return .{ .has_self = has_self, .type_id = fn_type };
+            },
             .co_decl => |decl| {
                 var param_types: std.ArrayList(AST.TypeId) = .empty;
                 defer param_types.deinit(self.allocator);
@@ -1064,6 +1084,10 @@ pub const TypeChecker = struct {
                     try self.fail("Undefined symbol", "Symbol is not defined.", expr.line, expr.column);
                     return TypeCheckerError.UndefinedSymbol;
                 };
+                if (resolved.info.is_native and !self.allow_native_value) {
+                    try self.fail("Native function used as a value", "Native functions can only be called directly.", expr.line, expr.column);
+                    return TypeCheckerError.InvalidOperation;
+                }
                 try self.reject_global_state_access(expr.name.lexeme, resolved.info, resolved.scope, expr.line, expr.column);
                 expr.resolved_type = resolved.info.type_id;
                 expr.resolved_decl = resolved.info.decl;
@@ -1279,17 +1303,17 @@ pub const TypeChecker = struct {
                 if (expr.expr.* == .dot_expr) {
                     const dot = expr.expr.dot_expr;
                     const receiver_type = try self.check_expression(dot.expr);
-                    const receiver_info = self.registry.get_type_info(receiver_type);
                     var receiver_is_type = false;
                     if (dot.expr.* == .identifier_expr) {
                         const binding = self.environment.lookup_binding(dot.expr.identifier_expr.name.lexeme) catch null;
                         receiver_is_type = if (binding) |b| b.is_type else false;
                     }
 
-                    // Struct calls inject a receiver only when the declaration names `self`.
-                    if (receiver_info == ._struct) {
-                        for (receiver_info._struct.methods) |method| {
-                            if (std.mem.eql(u8, method.name, dot.member.lexeme)) {
+                    if (self.registry.resolve_member(receiver_type, dot.member.lexeme)) |member| {
+                        switch (member) {
+                            // Struct calls inject a receiver only when the declaration names `self`.
+                            .struct_method => |resolved| {
+                                const method = resolved.method;
                                 if (!method.is_pub and !self.can_access_private_members(receiver_type)) {
                                     try self.fail("Member is private", "Private methods can only be called from a method of their declaring struct.", expr.line, expr.column);
                                     return TypeCheckerError.InvalidMemberAccess;
@@ -1306,11 +1330,7 @@ pub const TypeChecker = struct {
                                     else => return TypeCheckerError.NotCallable,
                                 };
 
-                                const has_receiver = switch (method.method_node.*) {
-                                    .fn_decl => |d| d.params.len > 0 and std.mem.eql(u8, d.params[0].name.lexeme, "self"),
-                                    .co_decl => |d| d.params.len > 0 and std.mem.eql(u8, d.params[0].name.lexeme, "self"),
-                                    else => false,
-                                };
+                                const has_receiver = method.takes_receiver;
                                 if (receiver_is_type and has_receiver) {
                                     try self.fail("Instance method requires a value receiver.", "Call this method on a struct instance; only associated functions can be called through the type name.", expr.line, expr.column);
                                     return TypeCheckerError.InvalidMemberAccess;
@@ -1337,74 +1357,63 @@ pub const TypeChecker = struct {
                                 dot.resolved_type = method.type_id;
                                 expr.resolved_type = return_type;
                                 return expr.resolved_type;
-                            }
-                        }
-                    }
-
-                    if (receiver_info == .coroutine and
-                        (std.mem.eql(u8, dot.member.lexeme, "returned") or std.mem.eql(u8, dot.member.lexeme, "is_finished")))
-                    {
-                        if (expr.args.len != 0) {
-                            try self.fail("Invalid argument count", "Coroutine member expects no arguments.", expr.line, expr.column);
-                            return TypeCheckerError.InvalidArgumentCount;
-                        }
-                        if (std.mem.eql(u8, dot.member.lexeme, "is_finished")) {
-                            expr.resolved_type = @backingInt(PrimitiveType.Bool);
-                        } else {
-                            expr.resolved_type = try self.coroutine_observation_type(receiver_info.coroutine.ret);
-                        }
-                        dot.resolved_type = expr.resolved_type;
-                        return expr.resolved_type;
-                    }
-
-                    if (receiver_info == ._enum) {
-                        if (!receiver_is_type) {
-                            try self.fail("Variant access requires the type name", "Construct enum values through the enum type, such as `Shape.Circle(value)`.", expr.line, expr.column);
-                            return TypeCheckerError.InvalidMemberAccess;
-                        }
-                        for (receiver_info._enum.variants) |variant| {
-                            if (!std.mem.eql(u8, dot.member.lexeme, variant.name)) {
-                                continue;
-                            }
-                            if (variant.type_id) |variant_type| {
-                                dot.resolved_type = receiver_type;
-                                if (expr.args.len != 1) {
-                                    try self.fail("Invalid argument count", "An enum payload variant takes exactly one value.", expr.line, expr.column);
+                            },
+                            .coroutine_method => |method| {
+                                if (expr.args.len != 0) {
+                                    try self.fail("Invalid argument count", "Coroutine member expects no arguments.", expr.line, expr.column);
                                     return TypeCheckerError.InvalidArgumentCount;
                                 }
-                                const provided_type = try self.check_expression(expr.args[0]);
-                                if (!try self.is_compatible(variant_type, provided_type)) {
-                                    try self.fail("Type Mismatch", "Enum payload value does not match the variant's declared payload type.", expr.line, expr.column);
-                                    return TypeCheckerError.TypeMismatch;
+                                if (method == .is_finished) {
+                                    expr.resolved_type = @backingInt(PrimitiveType.Bool);
+                                } else {
+                                    const receiver_info = self.registry.get_type_info(receiver_type);
+                                    expr.resolved_type = try self.coroutine_observation_type(receiver_info.coroutine.ret);
                                 }
-                                expr.resolved_type = receiver_type;
-                                return receiver_type;
-                            } else {
-                                try self.fail("Invalid Access", "Attempting to access a non-payload variant of an enum.", expr.line, expr.column);
-                                return TypeCheckerError.InvalidMemberAccess;
-                            }
+                                dot.resolved_type = expr.resolved_type;
+                                return expr.resolved_type;
+                            },
+                            .enum_variant => |resolved| {
+                                if (!receiver_is_type) {
+                                    try self.fail("Variant access requires the type name", "Construct enum values through the enum type, such as `Shape.Circle(value)`.", expr.line, expr.column);
+                                    return TypeCheckerError.InvalidMemberAccess;
+                                }
+                                if (resolved.variant.type_id) |variant_type| {
+                                    dot.resolved_type = receiver_type;
+                                    if (expr.args.len != 1) {
+                                        try self.fail("Invalid argument count", "An enum payload variant takes exactly one value.", expr.line, expr.column);
+                                        return TypeCheckerError.InvalidArgumentCount;
+                                    }
+                                    const provided_type = try self.check_expression(expr.args[0]);
+                                    if (!try self.is_compatible(variant_type, provided_type)) {
+                                        try self.fail("Type Mismatch", "Enum payload value does not match the variant's declared payload type.", expr.line, expr.column);
+                                        return TypeCheckerError.TypeMismatch;
+                                    }
+                                    expr.resolved_type = receiver_type;
+                                    return receiver_type;
+                                } else {
+                                    try self.fail("Invalid Access", "Attempting to access a non-payload variant of an enum.", expr.line, expr.column);
+                                    return TypeCheckerError.InvalidMemberAccess;
+                                }
+                            },
+                            .coroutine_state => {
+                                try self.fail("Invalid Operation", "Coroutine state properties are not callable.", expr.line, expr.column);
+                                return TypeCheckerError.NotCallable;
+                            },
+                            .struct_field, .tuple_element, .error_variant => {},
                         }
                     }
                 }
 
-                const expr_type = try self.check_expression(expr.expr);
+                const expr_type = blk: {
+                    // A native function may only appear as the direct callee of a call.
+                    const previous_allow_native = self.allow_native_value;
+                    self.allow_native_value = expr.expr.* == .identifier_expr;
+                    defer self.allow_native_value = previous_allow_native;
+                    break :blk try self.check_expression(expr.expr);
+                };
                 const type_info = self.registry.get_type_info(expr_type);
                 switch (type_info) {
                     .function => |info| {
-                        if (expr.args.len != info.args.len) {
-                            try self.fail("Invalid argument count", "Function expects a different number of arguments.", expr.line, expr.column);
-                            return TypeCheckerError.InvalidArgumentCount;
-                        }
-                        for (expr.args, 0..) |arg, index| {
-                            const arg_type = try self.check_expression(arg);
-                            if (!try self.is_compatible(info.args[index], arg_type)) {
-                                try self.fail("Type Mismatch", "Argument type does not match the function parameter type.", expr.line, expr.column);
-                                return TypeCheckerError.TypeMismatch;
-                            }
-                        }
-                        expr.resolved_type = info.ret;
-                    },
-                    .native_function => |info| {
                         if (expr.args.len != info.args.len) {
                             try self.fail("Invalid argument count", "Function expects a different number of arguments.", expr.line, expr.column);
                             return TypeCheckerError.InvalidArgumentCount;
@@ -1499,7 +1508,6 @@ pub const TypeChecker = struct {
             },
             .dot_expr => |expr| {
                 const obj_type = try self.check_expression(expr.expr);
-                const type_info = self.registry.get_type_info(obj_type);
 
                 // Variant access and instance-member access are distinguished by the
                 // receiver *symbol*. only a symbol that *is* a type may name its variants.
@@ -1511,110 +1519,111 @@ pub const TypeChecker = struct {
                     receiver_is_type_symbol = recv_info.is_type;
                 }
 
-                switch (type_info) {
-                    .tuple => |tuple| {
-                        const index_value = std.fmt.parseInt(u8, expr.member.lexeme, 10) catch {
-                            try self.fail("Invalid Member Access", "Tuple member access must be a numeric index.", expr.line, expr.column);
-                            return TypeCheckerError.InvalidMemberAccess;
-                        };
-                        if (index_value >= tuple.len) {
+                const member = self.registry.resolve_member(obj_type, expr.member.lexeme) orelse {
+                    const type_info = self.registry.get_type_info(obj_type);
+                    switch (type_info) {
+                        .tuple => {
+                            _ = std.fmt.parseInt(u16, expr.member.lexeme, 10) catch {
+                                try self.fail("Invalid Member Access", "Tuple member access must be a numeric index.", expr.line, expr.column);
+                                return TypeCheckerError.InvalidMemberAccess;
+                            };
                             try self.fail("Index Out Of Bounds", "Tuple index is out of bounds.", expr.line, expr.column);
                             return TypeCheckerError.IndexOutOfBounds;
-                        }
-                        expr.resolved_type = tuple[index_value];
-                        return tuple[index_value];
+                        },
+                        ._struct => {
+                            try self.fail("Invalid Member Access", "Struct has no member with this name.", expr.line, expr.column);
+                            return TypeCheckerError.InvalidMemberAccess;
+                        },
+                        ._enum => {
+                            try self.fail("Invalid Member Access", "Enum has no variant with this name.", expr.line, expr.column);
+                            return TypeCheckerError.InvalidMemberAccess;
+                        },
+                        ._error => {
+                            try self.fail("Invalid Member Access", "Error type has no variant with this name.", expr.line, expr.column);
+                            return TypeCheckerError.InvalidMemberAccess;
+                        },
+                        .coroutine => {
+                            try self.fail("Invalid Member Access", "Use `returned()` or `is_finished()` to inspect coroutine completion.", expr.line, expr.column);
+                            return TypeCheckerError.InvalidMemberAccess;
+                        },
+                        else => {
+                            try self.fail("Invalid Member Access", "Type does not support member access.", expr.line, expr.column);
+                            return TypeCheckerError.InvalidMemberAccess;
+                        },
+                    }
+                };
+
+                switch (member) {
+                    .tuple_element => |element| {
+                        expr.resolved_type = element.type_id;
+                        return element.type_id;
                     },
-                    ._struct => |_struct| {
+                    .struct_field => |resolved| {
+                        const field = resolved.field;
                         if (receiver_is_type_symbol) {
-                            for (_struct.methods) |method| {
-                                if (std.mem.eql(u8, method.name, expr.member.lexeme)) {
-                                    const takes_receiver = switch (method.method_node.*) {
-                                        .fn_decl => |d| d.params.len > 0 and std.mem.eql(u8, d.params[0].name.lexeme, "self"),
-                                        .co_decl => |d| d.params.len > 0 and std.mem.eql(u8, d.params[0].name.lexeme, "self"),
-                                        else => false,
-                                    };
-                                    if (!takes_receiver) {
-                                        expr.resolved_type = method.type_id;
-                                        return method.type_id;
-                                    }
-                                }
+                            try self.fail("Type name has no associated function with this name.", null, expr.line, expr.column);
+                            return TypeCheckerError.InvalidMemberAccess;
+                        }
+                        if (!field.is_pub and !self.can_access_private_members(obj_type)) {
+                            try self.fail("Member is private", "Private fields can only be accessed from a method of their declaring struct.", expr.line, expr.column);
+                            return TypeCheckerError.InvalidMemberAccess;
+                        }
+                        expr.resolved_type = field.type_id;
+                        return field.type_id;
+                    },
+                    .struct_method => |resolved| {
+                        const method = resolved.method;
+                        if (receiver_is_type_symbol) {
+                            if (!method.takes_receiver) {
+                                expr.resolved_type = method.type_id;
+                                return method.type_id;
                             }
                             try self.fail("Type name has no associated function with this name.", null, expr.line, expr.column);
                             return TypeCheckerError.InvalidMemberAccess;
                         }
-                        for (_struct.fields) |field| {
-                            if (std.mem.eql(u8, field.name, expr.member.lexeme)) {
-                                if (!field.is_pub and !self.can_access_private_members(obj_type)) {
-                                    try self.fail("Member is private", "Private fields can only be accessed from a method of their declaring struct.", expr.line, expr.column);
-                                    return TypeCheckerError.InvalidMemberAccess;
-                                }
-                                expr.resolved_type = field.type_id;
-                                return field.type_id;
-                            }
+                        if (method.kind == .NATIVE) {
+                            try self.fail("Native method used as a value", "Native methods need synthetic wrapper thunks before they can be used as first-class values.", expr.line, expr.column);
+                            return TypeCheckerError.InvalidOperation;
                         }
-                        for (_struct.methods) |method| {
-                            if (std.mem.eql(u8, method.name, expr.member.lexeme)) {
-                                const method_type = self.registry.get_type_info(method.type_id);
-                                if (method_type != .function and method_type != .coroutine) {
-                                    try self.fail("Invalid Member Access", "Member is not a callable method.", expr.line, expr.column);
-                                    return TypeCheckerError.InvalidMemberAccess;
-                                }
-                                if (!method.is_pub and !self.can_access_private_members(obj_type)) {
-                                    try self.fail("Member is private", "Private methods can only be accessed from a method of their declaring struct.", expr.line, expr.column);
-                                    return TypeCheckerError.InvalidMemberAccess;
-                                }
-                                expr.resolved_type = method.type_id;
-                                return method.type_id;
-                            }
-                        }
-                        try self.fail("Invalid Member Access", "Struct has no member with this name.", expr.line, expr.column);
-                        return TypeCheckerError.InvalidMemberAccess;
-                    },
-                    .coroutine => {
-                        // Coroutine state flags are properties; returned() and is_finished() are methods.
-                        if (std.mem.eql(u8, expr.member.lexeme, "suspended") or std.mem.eql(u8, expr.member.lexeme, "finished") or std.mem.eql(u8, expr.member.lexeme, "running") or std.mem.eql(u8, expr.member.lexeme, "started")) {
-                            expr.resolved_type = @backingInt(PrimitiveType.Bool);
-                            return @backingInt(PrimitiveType.Bool);
-                        } else {
-                            try self.fail("Invalid Member Access", "Use `returned()` or `is_finished()` to inspect coroutine completion.", expr.line, expr.column);
+                        const method_type = self.registry.get_type_info(method.type_id);
+                        if (method_type != .function and method_type != .coroutine) {
+                            try self.fail("Invalid Member Access", "Member is not a callable method.", expr.line, expr.column);
                             return TypeCheckerError.InvalidMemberAccess;
                         }
-                    },
-                    ._error => |existing_error| {
-                        if (!receiver_is_type_symbol) {
-                            try self.fail("Variant access requires the type name", "Error variants are constants; write `ErrorType.<variant>`, not `value.<variant>`.", expr.line, expr.column);
+                        if (!method.is_pub and !self.can_access_private_members(obj_type)) {
+                            try self.fail("Member is private", "Private methods can only be accessed from a method of their declaring struct.", expr.line, expr.column);
                             return TypeCheckerError.InvalidMemberAccess;
                         }
-                        for (existing_error.variants) |variant| {
-                            if (std.mem.eql(u8, variant, expr.member.lexeme)) {
-                                expr.resolved_type = obj_type;
-                                return obj_type;
-                            }
-                        }
-                        try self.fail("Error type has no variant with this name.", null, expr.line, expr.column);
-                        return TypeCheckerError.InvalidMemberAccess;
+                        expr.resolved_type = method.type_id;
+                        return method.type_id;
                     },
-                    ._enum => |existing_enum| {
+                    .enum_variant => |resolved| {
                         if (!receiver_is_type_symbol) {
                             try self.fail("Variant access requires the type name", "Enum variants are constants; write `EnumType.<variant>`, not `value.<variant>`.", expr.line, expr.column);
                             return TypeCheckerError.InvalidMemberAccess;
                         }
-                        for (existing_enum.variants) |variant| {
-                            if (std.mem.eql(u8, variant.name, expr.member.lexeme)) {
-                                if (variant.type_id) |var_type| {
-                                    _ = var_type;
-                                    try self.fail("Payload variant requires a value", "Call this variant with its payload, for example `Enum.Variant(value)`.", expr.line, expr.column);
-                                    return TypeCheckerError.InvalidMemberAccess;
-                                }
-                                expr.resolved_type = obj_type;
-                                return obj_type;
-                            }
+                        if (resolved.variant.type_id != null) {
+                            try self.fail("Payload variant requires a value", "Call this variant with its payload, for example `Enum.Variant(value)`.", expr.line, expr.column);
+                            return TypeCheckerError.InvalidMemberAccess;
                         }
-                        try self.fail("Enum has no variant with this name.", null, expr.line, expr.column);
-                        return TypeCheckerError.InvalidMemberAccess;
+                        expr.resolved_type = obj_type;
+                        return obj_type;
                     },
-                    else => {
-                        try self.fail("Invalid Member Access", "Type does not support member access.", expr.line, expr.column);
+                    .error_variant => {
+                        if (!receiver_is_type_symbol) {
+                            try self.fail("Variant access requires the type name", "Error variants are constants; write `ErrorType.<variant>`, not `value.<variant>`.", expr.line, expr.column);
+                            return TypeCheckerError.InvalidMemberAccess;
+                        }
+                        expr.resolved_type = obj_type;
+                        return obj_type;
+                    },
+                    .coroutine_state => {
+                        // Coroutine state flags are properties; returned() and is_finished() are methods.
+                        expr.resolved_type = @backingInt(PrimitiveType.Bool);
+                        return @backingInt(PrimitiveType.Bool);
+                    },
+                    .coroutine_method => {
+                        try self.fail("Invalid Member Access", "Use `returned()` or `is_finished()` to inspect coroutine completion.", expr.line, expr.column);
                         return TypeCheckerError.InvalidMemberAccess;
                     },
                 }

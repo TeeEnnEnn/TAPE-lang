@@ -66,7 +66,7 @@ pub const FunctionInfo = struct {
 
 pub const MemberInfo = union(enum) {
     field: struct { index: u16, type_id: AST.TypeId },
-    method: struct { index: u16, type_id: AST.TypeId, takes_receiver: bool = true },
+    method: struct { index: u16, type_id: AST.TypeId, takes_receiver: bool = true, is_native: bool = false },
     tuple_index: struct { index: u16, type_id: AST.TypeId },
     enum_variant: struct { index: u16, type_id: AST.TypeId, payload_type: ?AST.TypeId, has_payloads: bool },
     error_variant: struct { index: u16, type_id: AST.TypeId },
@@ -254,6 +254,15 @@ pub const BindingResolver = struct {
                     // pre hoist methods (allocating function slots)
                     for (decl.methods) |method| {
                         const ref: AST.DeclRef = .{ .node = method.method };
+                        if (method.method.* == .native_fn_decl) {
+                            const native_decl = method.method.native_fn_decl;
+                            const native_slot = Natives.find(native_decl.name.lexeme) orelse {
+                                try self.fail("No native implementation found.", "If this error is unexpected. Please reach out to a maintainer.", native_decl.line, native_decl.column);
+                                return BindingResolverError.MissingBinding;
+                            };
+                            try self.putDeclBinding(ref, .{ .decl = ref, .kind = .native, .slot = native_slot, .type_id = try self.native_function_type_id(native_decl, struct_type_id), .name = method.name.lexeme, .module_path = self.module.filepath });
+                            continue;
+                        }
                         try self.putDeclBinding(ref, .{
                             .decl = ref,
                             .kind = .function_constant,
@@ -614,83 +623,57 @@ pub const BindingResolver = struct {
             };
             receiver_is_type_symbol = recv_binding.kind == .comptime_type;
         }
-        switch (self.registry.get_type_info(obj_type)) {
-            .tuple => |items| {
-                const index = std.fmt.parseInt(u16, expr.member.lexeme, 10) catch return;
-                if (index < items.len) {
-                    try self.result.member_infos.put(node, .{ .tuple_index = .{ .index = index, .type_id = items[index] } });
-                    return;
-                }
+        const member = self.registry.resolve_member(obj_type, expr.member.lexeme) orelse return;
+        switch (member) {
+            .tuple_element => |element| {
+                try self.result.member_infos.put(node, .{ .tuple_index = .{ .index = element.index, .type_id = element.type_id } });
             },
-            ._struct => |info| {
+            .struct_field => |resolved| {
                 if (receiver_is_type_symbol) {
-                    for (info.methods) |method| {
-                        if (!std.mem.eql(u8, method.name, expr.member.lexeme)) continue;
-                        const takes_receiver = method.takes_receiver;
-                        if (takes_receiver) {
-                            try self.fail("Instance method requires a value receiver.", "Call this method on a struct instance; only associated functions can be called through the type name.", expr.line, expr.column);
-                            return BindingResolverError.MissingBinding;
-                        }
-                        const binding = self.find_binding(.{ .node = method.method_node }) orelse return BindingResolverError.MissingBinding;
-                        try self.result.member_infos.put(node, .{ .method = .{ .index = binding.slot, .type_id = method.type_id, .takes_receiver = false } });
-                        return;
-                    }
                     try self.fail("Struct has no associated function with this name.", null, expr.line, expr.column);
                     return BindingResolverError.MissingBinding;
                 }
-                // instance fields are stored on the struct instance
-                // so the instance_field_index is the index into that array of values at runtime
-                var instance_field_index: u16 = 0;
-                for (info.fields) |field| {
-                    if (std.mem.eql(u8, field.name, expr.member.lexeme)) {
-                        try self.result.member_infos.put(node, .{ .field = .{ .index = instance_field_index, .type_id = field.type_id } });
-                        return;
-                    }
-                    instance_field_index += 1;
-                }
-
-                // methods are stored in the function constants array
-                for (info.methods) |method| {
-                    if (std.mem.eql(u8, method.name, expr.member.lexeme)) {
-                        const method_binding = self.find_binding(.{ .node = method.method_node }) orelse {
-                            try self.fail("Method binding not found.", null, expr.line, expr.column);
-                            return BindingResolverError.MissingBinding;
-                        };
-                        const takes_receiver = method.takes_receiver;
-                        if (!takes_receiver) {
-                            try self.fail("Associated function requires the struct type.", "Call this function through the struct name, not an instance.", expr.line, expr.column);
-                            return BindingResolverError.MissingBinding;
-                        }
-                        try self.result.member_infos.put(node, .{ .method = .{ .index = method_binding.slot, .type_id = method.type_id, .takes_receiver = true } });
-                        return;
-                    }
-                }
+                // Instance fields are stored on the struct instance, so the index
+                // is the index into that array of values at runtime.
+                try self.result.member_infos.put(node, .{ .field = .{ .index = resolved.index, .type_id = resolved.field.type_id } });
             },
-            ._enum => |info| {
+            .struct_method => |resolved| {
+                const method = resolved.method;
+                if (receiver_is_type_symbol) {
+                    if (method.takes_receiver) {
+                        try self.fail("Instance method requires a value receiver.", "Call this method on a struct instance; only associated functions can be called through the type name.", expr.line, expr.column);
+                        return BindingResolverError.MissingBinding;
+                    }
+                    const binding = self.find_binding(.{ .node = method.method_node }) orelse return BindingResolverError.MissingBinding;
+                    try self.result.member_infos.put(node, .{ .method = .{ .index = binding.slot, .type_id = method.type_id, .takes_receiver = false, .is_native = method.kind == .NATIVE } });
+                    return;
+                }
+                // methods are stored in the function constants array
+                if (!method.takes_receiver) {
+                    try self.fail("Associated function requires the struct type.", "Call this function through the struct name, not an instance.", expr.line, expr.column);
+                    return BindingResolverError.MissingBinding;
+                }
+                const method_binding = self.find_binding(.{ .node = method.method_node }) orelse {
+                    try self.fail("Method binding not found.", null, expr.line, expr.column);
+                    return BindingResolverError.MissingBinding;
+                };
+                try self.result.member_infos.put(node, .{ .method = .{ .index = method_binding.slot, .type_id = method.type_id, .takes_receiver = true, .is_native = method.kind == .NATIVE } });
+            },
+            .enum_variant => |resolved| {
                 if (!receiver_is_type_symbol) {
                     try self.fail("Variant access requires the type name.", "Enum variants are constants; write `EnumType.<variant>`, not `value.<variant>`.", expr.line, expr.column);
                     return BindingResolverError.MissingBinding;
                 }
-                for (info.variants, 0..) |variant, index| {
-                    if (std.mem.eql(u8, variant.name, expr.member.lexeme)) {
-                        try self.result.member_infos.put(node, .{ .enum_variant = .{ .index = @intCast(index), .type_id = obj_type, .payload_type = variant.type_id, .has_payloads = info.has_payloads } });
-                        return;
-                    }
-                }
+                try self.result.member_infos.put(node, .{ .enum_variant = .{ .index = resolved.index, .type_id = obj_type, .payload_type = resolved.variant.type_id, .has_payloads = resolved.has_payloads } });
             },
-            ._error => |info| {
+            .error_variant => |resolved| {
                 if (!receiver_is_type_symbol) {
                     try self.fail("Variant access requires the type name.", "Error variants are constants; write `ErrorType.<variant>`, not `value.<variant>`.", expr.line, expr.column);
                     return BindingResolverError.MissingBinding;
                 }
-                for (info.variants, 0..) |variant, index| {
-                    if (std.mem.eql(u8, variant, expr.member.lexeme)) {
-                        try self.result.member_infos.put(node, .{ .error_variant = .{ .index = @intCast(index), .type_id = obj_type } });
-                        return;
-                    }
-                }
+                try self.result.member_infos.put(node, .{ .error_variant = .{ .index = resolved.index, .type_id = obj_type } });
             },
-            else => {},
+            .coroutine_method, .coroutine_state => {},
         }
     }
 
@@ -788,7 +771,7 @@ pub const BindingResolver = struct {
         try self.putDeclBinding(ref, .{
             .kind = .native,
             .slot = index,
-            .type_id = try self.native_function_type_id(decl),
+            .type_id = try self.native_function_type_id(decl, null),
             .decl = ref,
             .name = decl.name.lexeme,
             .module_path = self.module.filepath,
@@ -890,17 +873,24 @@ pub const BindingResolver = struct {
         return switch (node.*) {
             .fn_decl => self.functionTypeId(node, self_type),
             .co_decl => self.coroutineTypeId(node, self_type),
+            .native_fn_decl => self.native_function_type_id(node.native_fn_decl, self_type),
             else => BindingResolverError.MissingBinding,
         };
     }
 
-    fn native_function_type_id(self: *BindingResolver, decl: *const AST.NativeFnDecl) !AST.TypeId {
+    fn native_function_type_id(self: *BindingResolver, decl: *const AST.NativeFnDecl, self_type: ?AST.TypeId) !AST.TypeId {
         var param_types: std.ArrayList(AST.TypeId) = .empty;
         defer param_types.deinit(self.allocator);
-        for (decl.params) |param| {
+        const has_self = self_type != null and decl.params.len > 0 and std.mem.eql(u8, decl.params[0].name.lexeme, "self");
+        if (has_self) try param_types.append(self.allocator, self_type.?);
+        for (decl.params, 0..) |param, index| {
+            if (std.mem.eql(u8, param.name.lexeme, "self")) {
+                if (!has_self or index != 0 or param.type_annotation.* != .nil_type) return BindingResolverError.MissingBinding;
+                continue;
+            }
             try param_types.append(self.allocator, try self.registry.resolve(param.type_annotation));
         }
-        return self.registry.add_native_function_type(try param_types.toOwnedSlice(self.allocator), try self.registry.resolve(decl.return_type_annotation));
+        return self.registry.add_function_type(try param_types.toOwnedSlice(self.allocator), try self.registry.resolve(decl.return_type_annotation));
     }
 
     /// Add a function's type id to the registry
